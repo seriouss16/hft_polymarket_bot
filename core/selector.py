@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 import requests
 
@@ -140,6 +141,11 @@ class MarketSelector:
 
         now = int(datetime.now(timezone.utc).timestamp())
         return (now // self.interval) * self.interval
+
+    def seconds_to_slot_end(self) -> float:
+        """Return approximate seconds until the current slot window ends."""
+        slot_start = float(self.get_current_slot_timestamp())
+        return max(0.0, slot_start + float(self.interval) - time.time())
 
     def format_slug(self, timestamp):
         """Return Gamma slug for this asset and slot start timestamp."""

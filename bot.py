@@ -209,6 +209,7 @@ async def main():
                     latency_ms=latency_ms,
                     recent_pnl=pnl.last_realized_pnl,
                     meta_enabled=trade_allowed,
+                    seconds_to_expiry=selector.seconds_to_slot_end(),
                 )
                 if PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
                     diff = fast_price - poly_btc
