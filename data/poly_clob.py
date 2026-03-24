@@ -1,11 +1,17 @@
+"""Polymarket live RTDS WebSocket feed for Chainlink oracle prices (not the CLOB HTTP API)."""
+
 import asyncio
 import json
 import logging
 import os
 import websockets
 
+
 class PolyOrderBook:
+    """Hold oracle-driven book fields updated from ``wss://ws-live-data.polymarket.com``."""
+
     def __init__(self, symbol="bitcoin"):
+        """Initialize empty book state for the given asset symbol."""
         self.symbol = symbol
         self.book = {
             "ask": 0.0,
@@ -19,6 +25,7 @@ class PolyOrderBook:
         self.url = "wss://ws-live-data.polymarket.com"
 
     async def connect(self):
+        """Subscribe to RTDS Chainlink stream and update ``self.book`` until disconnect."""
         while True:
             try:
                 async with websockets.connect(self.url) as ws:

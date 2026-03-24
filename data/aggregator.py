@@ -94,7 +94,10 @@ class FastPriceAggregator:
         return len(self.get_primary_history()) >= 100
 
     def get_latency_ms(self, poly_ts: float) -> float:
-        """Return Coinbase-to-Poly latency estimate in milliseconds."""
+        """Return Coinbase-to-Poly latency estimate in milliseconds.
+
+        Negative values mean the Poly timestamp is ahead of the local Coinbase tick (clock skew).
+        """
         c_ts = float(self.data.get("coinbase", {}).get("timestamp", 0.0))
         if c_ts <= 0 or poly_ts <= 0:
             return 0.0

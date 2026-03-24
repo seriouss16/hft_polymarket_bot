@@ -2,6 +2,26 @@ import os
 import sys
 import asyncio
 import logging
+
+
+_UVLOOP_ACTIVE = False
+
+
+def _install_uvloop_policy() -> None:
+    """Prefer libuv-backed asyncio loop on Linux/macOS when uvloop is available."""
+    global _UVLOOP_ACTIVE
+    if os.getenv("HFT_USE_UVLOOP", "1") == "0":
+        return
+    try:
+        import uvloop
+
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+        _UVLOOP_ACTIVE = True
+    except ImportError:
+        pass
+
+
+_install_uvloop_policy()
 import traceback
 import time
 from datetime import datetime, timezone
@@ -56,6 +76,9 @@ def _setup_logging() -> None:
 _setup_logging()
 
 async def main():
+    if _UVLOOP_ACTIVE:
+        logging.info("asyncio: uvloop event loop policy active")
+
     # --- Конфигурация ---
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     TEST_MODE = True
@@ -113,6 +136,8 @@ async def main():
     last_book_pull_time = 0
     forecast = 0.0
     last_slot_check_time = 0.0
+    last_skew_warn_time = 0.0
+    last_high_latency_warn_time = 0.0
 
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
 
@@ -218,6 +243,23 @@ async def main():
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
                 latency_ms = aggregator.get_latency_ms(float(poly_book.book.get("ts", 0.0)))
+                if latency_ms < -100.0 and (now - last_skew_warn_time) >= 60.0:
+                    logging.warning(
+                        "Clock skew (latency_ms=%.0f): sync NTP/chrony; Poly tick ahead of local Coinbase.",
+                        latency_ms,
+                    )
+                    last_skew_warn_time = now
+                if (
+                    engine.entry_max_latency_ms > 0.0
+                    and latency_ms > engine.entry_max_latency_ms
+                    and (now - last_high_latency_warn_time) >= 30.0
+                ):
+                    logging.info(
+                        "Latency %.0f ms above entry_max_latency_ms=%.0f (engine may block entries).",
+                        latency_ms,
+                        engine.entry_max_latency_ms,
+                    )
+                    last_high_latency_warn_time = now
                 equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book)
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
