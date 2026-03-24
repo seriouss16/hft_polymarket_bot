@@ -35,6 +35,25 @@ class HFTEngine:
         self.trend_since_ts = 0.0
         self.trend_depth = 0.0
         self.entry_context = {}
+        self._last_rsi = 50.0
+        self.rsi_hold_yes_floor = 40.0
+        self.rsi_hold_no_ceiling = 60.0
+        self.rsi_entry_yes_low = 28.0
+        self.rsi_entry_yes_high = 78.0
+        self.rsi_entry_no_low = 22.0
+        self.rsi_entry_no_high = 72.0
+
+    def get_last_rsi(self):
+        """Return RSI of the last tick (fast price series)."""
+        return self._last_rsi
+
+    def _rsi_suppresses_soft_exit(self, position_side, rsi):
+        """Block trend/speed/imbalance exits while RSI still matches the held thesis."""
+        if position_side == "YES":
+            return rsi >= self.rsi_hold_yes_floor
+        if position_side == "NO":
+            return rsi <= self.rsi_hold_no_ceiling
+        return False
 
     def can_trade(self):
         """Return True when risk limits allow new trade."""
@@ -161,6 +180,7 @@ class HFTEngine:
             return
 
         current_rsi = compute_rsi(np.array(price_history))
+        self._last_rsi = float(current_rsi)
 
         poly_mid = poly_orderbook.get("mid", 0.0)
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
@@ -194,7 +214,7 @@ class HFTEngine:
             signal == "BUY_YES"
             and self.pnl.inventory == 0
             and self.can_trade()
-            and current_rsi < 85
+            and self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
             and pre_reaction_yes
             and meta_enabled
         ):
@@ -225,7 +245,7 @@ class HFTEngine:
             signal == "BUY_NO"
             and self.pnl.inventory == 0
             and self.can_trade()
-            and current_rsi > 15
+            and self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
             and pre_reaction_no
             and meta_enabled
         ):
@@ -275,11 +295,21 @@ class HFTEngine:
                     or current_rsi > 80
                 )
             )
-            trend_lost = trend["trend"] != self.position_trend and trend["age"] > 0.5
+            trend_lost = (
+                hold_sec >= self.min_hold_sec
+                and trend["trend"] != self.position_trend
+                and trend["age"] > 0.5
+            )
             speed_slowdown = abs(trend["speed"]) < self.speed_floor and hold_sec >= self.min_hold_sec
-            unrealized = self.pnl.get_unrealized_pnl(poly_mid)
+            unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             pnl_tp = unrealized >= self.target_profit_usd
             pnl_sl = unrealized <= -self.stop_loss_usd
+
+            side = self.pnl.position_side or "YES"
+            if self._rsi_suppresses_soft_exit(side, current_rsi):
+                trend_lost = False
+                speed_slowdown = False
+                imbalance_flip = False
 
             should_close = (
                 reaction_confirmed
@@ -308,13 +338,14 @@ class HFTEngine:
                 elif pnl_sl:
                     reason = "PNL_SL"
                 logging.info(
-                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f edge=%.2f pnl=%.2f imb=%.2f",
+                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f edge=%.2f pnl=%.2f imb=%.2f rsi=%.1f",
                     reason,
                     hold_sec,
                     poly_move,
                     fast_price - poly_mid,
                     unrealized,
                     imbalance,
+                    current_rsi,
                 )
                 exit_price = no_bid if self.pnl.position_side == "NO" else yes_bid
                 pos_side = self.pnl.position_side or "YES"

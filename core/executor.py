@@ -1,5 +1,25 @@
 import logging
 import time
+from typing import Optional
+
+
+def mark_price_for_side(book: dict, side: Optional[str]) -> float:
+    """Return outcome token mid for YES or NO from YES outcome order book."""
+    yes_bid = float(book.get("bid") or 0.0)
+    yes_ask = float(book.get("ask") or 0.0)
+    if side == "YES":
+        mid = float(book.get("mid") or 0.0)
+        if mid > 0.0:
+            return mid
+        if yes_bid > 0.0 and yes_ask > yes_bid:
+            return (yes_bid + yes_ask) / 2.0
+        return 0.0
+    if side == "NO":
+        no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
+        no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
+        return (no_bid + no_ask) / 2.0
+    return 0.0
+
 
 class PnLTracker:
     """Track position state and realized/unrealized PnL on Polymarket shares."""
@@ -90,13 +110,14 @@ class PnLTracker:
             }
         return None
 
-    def get_unrealized_pnl(self, current_price: float) -> float:
-        """Return mark-to-market PnL for open shares."""
-        if self.inventory <= 0:
+    def get_unrealized_pnl(self, book: dict) -> float:
+        """Return mark-to-market PnL using the correct token mid (YES vs NO)."""
+        if self.inventory <= 0 or not self.position_side:
             return 0.0
-        if self.position_side == "YES":
-            return (current_price - self.entry_price) * self.inventory
-        return (self.entry_price - current_price) * self.inventory
+        mark = mark_price_for_side(book, self.position_side)
+        if mark <= 0.0:
+            return 0.0
+        return (mark - self.entry_price) * self.inventory
 
 class RealExecutor:
     """Заглушка для реального API Polymarket."""

@@ -145,7 +145,7 @@ async def main():
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
                 latency_ms = aggregator.get_latency_ms(float(poly_book.book.get("ts", 0.0)))
-                equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book["mid"])
+                equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book)
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
                 # Визуальный пульс в консоль
@@ -155,12 +155,12 @@ async def main():
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     imbalance = bid_size / (bid_size + ask_size + 1e-9)
-                    upnl = pnl.get_unrealized_pnl(poly_book.book["mid"])
+                    upnl = pnl.get_unrealized_pnl(poly_book.book)
                     print(
                         f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
-                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
+                        f"RSI: {engine.get_last_rsi():.1f} | Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Forecast: {forecast:.2f}",
                         flush=True,
