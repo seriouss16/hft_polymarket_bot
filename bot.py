@@ -1,0 +1,147 @@
+import os
+import sys
+import asyncio
+import logging
+import traceback
+from datetime import datetime, timezone
+
+# --- Форсируем вывод и отключаем мусор TF ---
+os.environ['PYTHONUNBUFFERED'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+
+print(">>> Инициализация HFT системы...", flush=True)
+
+# Импорты после настройки окружения
+import tensorflow as tf
+from core.selector import MarketSelector
+from core.executor import PnLTracker
+from core.engine import HFTEngine
+from data.aggregator import FastPriceAggregator
+from data.providers import FastExchangeProvider
+from data.poly_clob import PolyOrderBook
+from ml.model import AsyncLSTMPredictor
+from utils.stats import StatsCollector
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+async def main():
+    # --- Конфигурация ---
+    TEST_MODE = True
+    SYMBOL = "BTC"
+    STATS_INTERVAL = 60  # Отчет раз в минуту
+    PULSE_INTERVAL = 2   # Пульс цен раз в 2 секунды
+    
+    # --- Инициализация компонентов ---
+    selector = MarketSelector(asset=SYMBOL)
+    aggregator = FastPriceAggregator()
+    pnl = PnLTracker(initial_balance=1000.0)
+    stats = StatsCollector(pnl)
+    engine = HFTEngine(pnl, is_test_mode=TEST_MODE)
+    lstm = AsyncLSTMPredictor(history_len=100)
+    
+    # Отключаем GPU для предсказаний
+    tf.config.set_visible_devices([], 'GPU')
+
+    # --- Запуск провайдеров быстрых цен (Binance + Coinbase) ---
+    providers = [
+        FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update),
+        FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
+    ]
+    for p in providers:
+        asyncio.create_task(p.connect())
+
+    current_token_id = None
+    poly_book = None
+    last_stats_time = asyncio.get_event_loop().time()
+    last_pulse_time = 0
+    last_lstm_time = 0
+    forecast = 0.0
+    
+    logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
+
+    try:
+        while True:
+            now = asyncio.get_event_loop().time()
+            
+            # 1. Авто-переключение слота (проверка раз в 10 сек)
+            if int(now) % 10 == 0:
+                ts = selector.get_current_slot_timestamp()
+                slug = selector.format_slug(ts)
+                token_id, question = await selector.fetch_token_id(slug)
+
+                if token_id and token_id != current_token_id:
+                    logging.info(f"🎯 Смена рынка: {question}")
+                    current_token_id = token_id
+                    # Используем RTDS (оракул) как в bot2.py для стабильности
+                    poly_book = PolyOrderBook(symbol="bitcoin") 
+                    asyncio.create_task(poly_book.connect())
+
+            # 2. Получение данных
+            fast_price = aggregator.get_weighted_price()
+            binance_data = aggregator.prices.get("binance")
+            
+            # 3. Инференс LSTM (раз в 1 секунду, чтобы не грузить CPU)
+            if binance_data and now - last_lstm_time > 1.0:
+                forecast = await lstm.predict(binance_data)
+                last_lstm_time = now
+
+            # Fast-start fallback: keep forecast on realistic price scale before warmup.
+            if fast_price and (forecast <= 0 or abs(forecast - fast_price) > 0.2 * fast_price):
+                forecast = float(fast_price)
+
+            # 4. Анализ и "Пульс"
+            if fast_price and poly_book and poly_book.book['mid'] > 0:
+                # Визуальный пульс в консоль
+                if now - last_pulse_time > PULSE_INTERVAL:
+                    diff = fast_price - poly_book.book['mid']
+                    print(f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | Diff: {diff:+.2f} | Forecast: {forecast:.2f}", flush=True)
+                    last_pulse_time = now
+                
+                # Попытка совершить сделку
+                await engine.process_tick(
+                    fast_price=fast_price,
+                    poly_orderbook=poly_book.book,
+                    price_history=list(binance_data) if binance_data else [],
+                    lstm_forecast=forecast
+                )
+            elif now - last_pulse_time > PULSE_INTERVAL:
+                logging.warning("⏳ Ожидание полной синхронизации данных (Binance/Poly)...")
+                last_pulse_time = now
+
+            # 5. Вывод статистики
+            if now - last_stats_time > STATS_INTERVAL:
+                stats.show_report()
+                last_stats_time = now
+
+            # HFT частота 20Гц
+            await asyncio.sleep(0.05)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Остановка пользователем...")
+        stats.show_report()
+    except Exception as e:
+        logging.error("💥 КРИТИЧЕСКАЯ ОШИБКА В ГЛАВНОМ ЦИКЛЕ")
+        # Выводит подробный Traceback (стек вызовов)
+        logging.error(traceback.format_exc())
+        
+        # Дополнительный дебаг состояния данных перед падением
+        try:
+            bp = aggregator.data.get("binance")
+            pp = poly_book.book if poly_book else "None"
+            logging.debug(f"DEBUG DATA AT CRASH -> Binance: {bp} | Poly: {pp}")
+        except:
+            pass
+            
+        stats.show_report()
+        
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
