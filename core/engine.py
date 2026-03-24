@@ -5,7 +5,12 @@ import os
 from collections import deque
 
 from ml.indicators import compute_rsi, dynamic_rsi_bands
-def __init__(self, pnl_tracker, is_test_mode=True):
+
+
+class HFTEngine:
+    """Signal, risk, and execution engine for Polymarket latency strategy."""
+
+    def __init__(self, pnl_tracker, is_test_mode=True):
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
         
@@ -21,7 +26,10 @@ def __init__(self, pnl_tracker, is_test_mode=True):
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "50.0"))
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.0"))
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
-        
+        self.entry_poly_mid = None
+        self.entry_fast_price = None
+        self.entry_time = 0.0
+
         # --- Тейки и Стопы (в пунктах и USD) ---
         self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
         self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
@@ -53,12 +61,22 @@ def __init__(self, pnl_tracker, is_test_mode=True):
         self.rsi_slope_yes_exit = -2.0 # Выходим из YES если RSI резко падает
         self.rsi_slope_no_exit = 2.0  # Выходим из NO если RSI резко растет
         self._rsi_tick_history = deque(maxlen=10)
-        
+        self._last_rsi_upper = 70.0
+        self._last_rsi_lower = 30.0
+        self._last_rsi_slope = 0.0
+        self.rsi_hold_yes_floor = float(os.getenv("HFT_RSI_HOLD_YES_FLOOR", "40.0"))
+        self.rsi_hold_no_ceiling = float(os.getenv("HFT_RSI_HOLD_NO_CEILING", "60.0"))
+
         # --- Подтверждение входа (Entry Confirm) ---
         self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.1"))
         self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.2"))
         self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "5.0"))
-        
+        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW", "0.20"))
+        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH", "0.80"))
+        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT", "0.9"))
+        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.5"))
+        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.5"))
+
         # --- Скорость и Акселерация ---
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
         self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "1") == "1"
@@ -71,17 +89,42 @@ def __init__(self, pnl_tracker, is_test_mode=True):
         self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "100.0"))
         self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW", "0.30"))
         self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE", "0.70"))
+        self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE", "0.01"))
+        self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD", "30.0"))
+        self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
+        self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
 
         # --- Стакан (Orderbook) и Ликвидность ---
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0001"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "30"))
         self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.015")) # Не входим если спред > 1.5%
+        self._prev_yes_mid = None
+        self._prev_no_mid = None
+        self._book_stall_ticks = 0
+        self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT", "2.0"))
+        self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT", "3.0"))
+        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "0.35"))
+        self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE", "12.0"))
+        self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD", "0.03"))
+        self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED", "1") == "1"
 
         # --- Задержка (Latency Guard) ---
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "600.0"))
         self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
         self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
+        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
+        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT", "2.0"))
+        self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC", "2.0"))
+        self.entry_rsi_slope_filter_enabled = os.getenv(
+            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "1"
+        ) == "1"
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "30.0"))
+        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "70.0"))
+        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
+        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
+        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
 
         # --- Z-Score (Статистический вход) ---
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
@@ -96,12 +139,15 @@ def __init__(self, pnl_tracker, is_test_mode=True):
         self.soft_exits_enabled = True
         self.no_entry_guards = False # ВКЛЮЧАЕМ защиту (False значит guards активны)
         self.edge_window = deque(maxlen=120)
+        self.last_edge_sign = 0
+        self.trend_dir = "FLAT"
+        self.trend_since_ts = 0.0
+        self.trend_depth = 0.0
         self._speed_samples = deque(maxlen=12)
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
         self.entry_context = {}
 
-        
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
         return self.min_hold_sec <= 0.0 or hold_sec >= self.min_hold_sec

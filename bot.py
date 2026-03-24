@@ -343,8 +343,11 @@ async def main():
 
     except KeyboardInterrupt:
         print("\n🛑 Остановка пользователем...")
-        stats.show_report()
-    except Exception as e:
+        stats.show_final_report(
+            journal_path=journal.path,
+            shutdown_reason="KeyboardInterrupt",
+        )
+    except Exception:
         logging.error("💥 КРИТИЧЕСКАЯ ОШИБКА В ГЛАВНОМ ЦИКЛЕ")
         # Выводит подробный Traceback (стек вызовов)
         logging.error(traceback.format_exc())
@@ -357,8 +360,11 @@ async def main():
         except:
             pass
             
-        stats.show_report()
-        
+        stats.show_final_report(
+            journal_path=journal.path,
+            shutdown_reason="exception",
+        )
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())

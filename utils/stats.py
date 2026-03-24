@@ -1,27 +1,104 @@
-import os
+import csv
 import logging
+from collections import Counter
+from pathlib import Path
+
 
 class StatsCollector:
+    """Aggregate PnL metrics and print session / shutdown reports."""
+
     def __init__(self, pnl_tracker):
         self.pnl = pnl_tracker
 
     def show_report(self):
-        total_days = 1 # Для масштабирования в будущем
+        """Print compact PnL summary to stdout (legacy block format)."""
         win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
         roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
 
         report = [
-            "\n" + "="*45,
+            "\n" + "=" * 45,
             f"📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ (HFT SIM)",
-            "="*45,
+            "=" * 45,
             f"💰 Текущий баланс:    {self.pnl.balance:>10.2f} USD",
             f"📈 Чистая прибыль:    {self.pnl.total_pnl:>10.2f} USD ({roi:+.2f}%)",
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
             f"🎯 Процент побед:     {win_rate:>10.1f}%",
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
             f"📦 В позиции:         {'ДА' if self.pnl.inventory > 0 else 'НЕТ'}",
-            "="*45 + "\n"
+            "=" * 45 + "\n",
         ]
-        
-        # Печатаем в консоль и дублируем в лог
+
         print("\n".join(report))
+
+    def _journal_aggregates(self, journal_path: Path | None):
+        """Return (rows_n, pnl_csv_sum, exit_reason_counts) from journal CSV if present."""
+        if journal_path is None or not journal_path.is_file() or journal_path.stat().st_size == 0:
+            return 0, 0.0, Counter()
+        pnl_sum = 0.0
+        n = 0
+        reasons = Counter()
+        try:
+            with journal_path.open("r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    n += 1
+                    try:
+                        pnl_sum += float(row.get("pnl") or 0.0)
+                    except (TypeError, ValueError):
+                        pass
+                    r = str(row.get("exit_reason") or "").strip() or "(empty)"
+                    reasons[r] += 1
+        except OSError:
+            return 0, 0.0, Counter()
+        return n, pnl_sum, reasons
+
+    def show_final_report(self, journal_path=None, shutdown_reason: str = "shutdown"):
+        """Print full session summary with a tabular report and optional journal breakdown."""
+        self.show_report()
+        win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
+        roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
+        losses = self.pnl.trades_count - self.pnl.wins
+
+        jp = Path(journal_path) if journal_path else None
+        j_rows, j_pnl, j_reasons = self._journal_aggregates(jp)
+
+        w_label = 28
+        w_val = 22
+
+        def row(label: str, val: str) -> str:
+            return f"| {label:<{w_label}} | {val:>{w_val}} |"
+
+        sep = "+" + "-" * (w_label + 2) + "+" + "-" * (w_val + 2) + "+"
+
+        lines = [
+            "",
+            sep,
+            row("Итоговая таблица (сессия)", ""),
+            sep,
+            row("Причина завершения", shutdown_reason),
+            row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
+            row("Текущий баланс USD", f"{self.pnl.balance:.2f}"),
+            row("Чистая прибыль USD", f"{self.pnl.total_pnl:+.2f}"),
+            row("ROI %", f"{roi:+.2f}"),
+            row("Закрытых сделок (sim)", str(self.pnl.trades_count)),
+            row("Побед / поражений", f"{self.pnl.wins} / {losses}"),
+            row("Win rate %", f"{win_rate:.1f}"),
+            row("Макс. просадка %", f"{self.pnl.max_drawdown*100:.1f}"),
+            row("Открытая позиция", "да" if self.pnl.inventory > 0 else "нет"),
+            sep,
+        ]
+
+        if jp is not None:
+            lines.append(row("Журнал (файл)", str(jp)))
+            lines.append(row("Строк в журнале (CSV)", str(j_rows)))
+            lines.append(row("Сумма pnl по журналу", f"{j_pnl:+.4f}"))
+            lines.append(sep)
+            lines.append(row("exit_reason (журнал)", "count"))
+            lines.append(sep)
+            for reason, cnt in sorted(j_reasons.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(row(reason[: w_label], str(cnt)))
+            lines.append(sep)
+
+        block = "\n".join(lines)
+        print(block)
+        logging.info("Session final report:\n%s", block)
