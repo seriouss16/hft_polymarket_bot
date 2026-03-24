@@ -1,9 +1,12 @@
+"""Rolling price buffers and hybrid fast price for the HFT loop."""
+
 import asyncio
-import logging
+import itertools
 from collections import deque
 from typing import Any
 
 import numpy as np
+
 
 class FastPriceAggregator:
     """Aggregate Coinbase/Binance feeds into smart fast price and z-score."""
@@ -15,14 +18,27 @@ class FastPriceAggregator:
         }
         self.max_age = max_age_seconds
         self.prices = {
-            "binance": deque(maxlen=200), # История для LSTM/RSI
-            "coinbase": deque(maxlen=200)
+            "binance": deque(maxlen=200),
+            "coinbase": deque(maxlen=200),
         }
         self.history = deque(maxlen=500)
+        self.zscore_window = 96
+
+    @staticmethod
+    def tail_last_n(seq, n: int) -> list[float]:
+        """Return the last n samples from a deque or list without copying the full sequence."""
+        if not seq or n <= 0:
+            return []
+        if len(seq) <= n:
+            return list(seq)
+        skip = len(seq) - n
+        return list(itertools.islice(seq, skip, None))
 
     def update(self, exchange, price, ts=None):
-        """Обновление данных из провайдеров."""
-        current_time = ts if ts is not None else asyncio.get_event_loop().time()
+        """Apply one tick from a websocket feed into local buffers."""
+        current_time = (
+            ts if ts is not None else asyncio.get_running_loop().time()
+        )
         self.data[exchange] = {
             "price": price,
             "timestamp": current_time
@@ -74,10 +90,11 @@ class FastPriceAggregator:
         self.history.append(float(price))
 
     def get_zscore(self):
-        """Return rolling z-score of fast price."""
+        """Return rolling z-score using the last ``zscore_window`` fast-price samples."""
         if len(self.history) < 50:
             return 0.0
-        arr = np.array(self.history, dtype=np.float64)
+        window = self.tail_last_n(self.history, self.zscore_window)
+        arr = np.asarray(window, dtype=np.float64)
         std = float(arr.std()) + 1e-9
         return float((arr[-1] - arr.mean()) / std)
 
@@ -92,7 +109,7 @@ class FastPriceAggregator:
         return deque()
 
     def is_ready(self):
-        """Проверка, накоплено ли достаточно данных для работы (например, для LSTM)."""
+        """Return True when enough primary ticks exist for LSTM-length indicators."""
         return len(self.get_primary_history()) >= 100
 
     def feed_timing(self, poly_ts: float, now_loop: float | None = None) -> dict[str, Any]:
@@ -104,7 +121,7 @@ class FastPriceAggregator:
         not NTP skew by itself.
         """
         if now_loop is None:
-            now_loop = asyncio.get_event_loop().time()
+            now_loop = asyncio.get_running_loop().time()
         _MISSING = 1e9
         c_ts = float(self.data.get("coinbase", {}).get("timestamp", 0.0))
         b_ts = float(self.data.get("binance", {}).get("timestamp", 0.0))

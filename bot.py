@@ -115,6 +115,7 @@ async def main():
     MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
     CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0"))
     LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "0"))
+    ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM", "0") == "1"
     SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC", "0"))
     
     # --- Инициализация компонентов ---
@@ -164,6 +165,12 @@ async def main():
     last_high_latency_warn_time = 0.0
 
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
+    if ENABLE_LSTM:
+        logging.info("HFT_ENABLE_LSTM=1: TensorFlow LSTM inference on (higher CPU).")
+    else:
+        logging.info(
+            "HFT_ENABLE_LSTM=0: LSTM off; forecast tracks spot. Set HFT_ENABLE_LSTM=1 to enable."
+        )
 
     shutdown_reason = "shutdown"
     try:
@@ -198,12 +205,14 @@ async def main():
             if _net_dbg:
                 _nw_t1 = time.perf_counter()
             
-            # 3. Инференс LSTM (интервал LSTM_INFERENCE_SEC; 0 = каждый тик главного цикла).
-            if primary_data and (
+            # 3. LSTM is optional: engine ignores forecast; keep off by default for lower CPU latency.
+            if ENABLE_LSTM and primary_data and (
                 LSTM_MIN_INTERVAL <= 0.0 or (now - last_lstm_time) >= LSTM_MIN_INTERVAL
             ):
                 forecast = await lstm.predict(primary_data)
                 last_lstm_time = now
+            elif fast_price:
+                forecast = float(fast_price)
 
             # Fast-start fallback: keep forecast on realistic price scale before warmup.
             if fast_price and (forecast <= 0 or abs(forecast - fast_price) > 0.2 * fast_price):
@@ -230,15 +239,25 @@ async def main():
                         down_bid = 0.0
                         down_ask = 0.0
 
-                        ob_up = await asyncio.to_thread(live_exec.get_orderbook_snapshot, token_up_id, 5)
+                        if token_down_id:
+                            ob_up, ob_down = await asyncio.gather(
+                                asyncio.to_thread(
+                                    live_exec.get_orderbook_snapshot, token_up_id, 5
+                                ),
+                                asyncio.to_thread(
+                                    live_exec.get_orderbook_snapshot, token_down_id, 5
+                                ),
+                            )
+                        else:
+                            ob_up = await asyncio.to_thread(
+                                live_exec.get_orderbook_snapshot, token_up_id, 5
+                            )
+                            ob_down = {}
                         up_bid = float(ob_up.get("best_bid", 0.0))
                         up_ask = float(ob_up.get("best_ask", 0.0))
                         if token_down_id:
-                            ob_down = await asyncio.to_thread(live_exec.get_orderbook_snapshot, token_down_id, 5)
                             down_bid = float(ob_down.get("best_bid", 0.0))
                             down_ask = float(ob_down.get("best_ask", 0.0))
-                        else:
-                            ob_down = {}
 
                         up_valid = 0.0 < up_bid < up_ask <= 1.0
                         down_valid = 0.0 < down_bid < down_ask <= 1.0
@@ -317,7 +336,7 @@ async def main():
                 decision = await engine.process_tick(
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
-                    price_history=list(primary_data) if primary_data else [],
+                    price_history=primary_data if primary_data else [],
                     lstm_forecast=forecast,
                     zscore=zscore,
                     latency_ms=latency_ms,
@@ -416,7 +435,7 @@ async def main():
                         fast_price,
                         poly_btc,
                         zscore,
-                        price_history=list(primary_data) if primary_data else [],
+                        price_history=primary_data if primary_data else [],
                         recent_pnl=pnl.last_realized_pnl,
                         latency_ms=latency_ms,
                     )

@@ -1,10 +1,16 @@
+"""Websocket clients for Coinbase and Binance fast price feeds."""
+
 import asyncio
 import json
 import logging
 import os
+
 import websockets
 
+
 class FastExchangeProvider:
+    """Subscribe to one exchange websocket and push mid prices into a callback."""
+
     def __init__(self, exchange_name, url, symbol, update_callback):
         self.name = exchange_name
         self.url = url
@@ -12,6 +18,7 @@ class FastExchangeProvider:
         self.update_callback = update_callback
 
     async def connect(self):
+        """Reconnect loop: subscribe and stream best bid/ask mids into ``update_callback``."""
         uri = self.url
         if self.name == "binance":
             stream_symbol = self.symbol
@@ -46,7 +53,7 @@ class FastExchangeProvider:
                                 price = float(data['price'])
                         
                         if price:
-                            ts = asyncio.get_event_loop().time()
+                            ts = asyncio.get_running_loop().time()
                             self.update_callback(self.name, price, ts)
                             
             except Exception as e:

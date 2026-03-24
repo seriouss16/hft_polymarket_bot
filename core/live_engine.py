@@ -98,6 +98,7 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.client = None
+        self._http = requests.Session()
 
         if ClobClient is None:
             if not self.test_mode:
@@ -125,7 +126,7 @@ class LiveExecutionEngine:
     def _orderbook_snapshot_http(self, token_id: str, depth: int) -> dict:
         """Fetch and summarize the order book from the public CLOB HTTP endpoint."""
         try:
-            resp = requests.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=5)
+            resp = self._http.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=5)
             resp.raise_for_status()
             data = resp.json()
             bid_levels = _levels_from_book_rows(data.get("bids"))
