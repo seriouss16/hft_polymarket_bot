@@ -54,22 +54,23 @@ class LiveExecutionEngine:
         self.max_spread = max_spread
         self.client = None
 
-        if self.test_mode:
+        if ClobClient is None:
+            if not self.test_mode:
+                raise RuntimeError("py_clob_client is not installed.")
             return
 
-        if not private_key or not funder:
-            raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
-        if ClobClient is None:
-            raise RuntimeError("py_clob_client is not installed.")
-
+        # Public market-data client is available in both SIM and LIVE.
         self.client = ClobClient(
             "https://clob.polymarket.com",
-            key=private_key,
+            key=private_key or "",
             chain_id=137,
             signature_type=1,
-            funder=funder,
+            funder=funder or "",
         )
-        self.client.set_api_creds(self.client.create_or_derive_api_creds())
+        if not self.test_mode:
+            if not private_key or not funder:
+                raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
+            self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
@@ -79,6 +80,42 @@ class LiveExecutionEngine:
         best_bid = float(book.bids[0].price) if book.bids else 0.0
         best_ask = float(book.asks[0].price) if book.asks else 1.0
         return best_bid, best_ask
+
+    def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
+        """Return top-N orderbook metrics for imbalance and pressure."""
+        if self.client is None:
+            return {
+                "best_bid": 0.0,
+                "best_ask": 1.0,
+                "bid_size_top": 0.0,
+                "ask_size_top": 0.0,
+                "imbalance": 0.0,
+                "bid_vol_topn": 0.0,
+                "ask_vol_topn": 0.0,
+                "pressure": 0.0,
+            }
+        book = self.client.get_order_book(token_id)
+        bids = list(book.bids or [])
+        asks = list(book.asks or [])
+        best_bid = float(bids[0].price) if bids else 0.0
+        best_ask = float(asks[0].price) if asks else 1.0
+        bid_size_top = float(bids[0].size) if bids else 0.0
+        ask_size_top = float(asks[0].size) if asks else 0.0
+        bid_vol_topn = float(sum(float(lvl.size) for lvl in bids[:depth]))
+        ask_vol_topn = float(sum(float(lvl.size) for lvl in asks[:depth]))
+        den = bid_vol_topn + ask_vol_topn + 1e-9
+        imbalance = (bid_vol_topn - ask_vol_topn) / den
+        pressure = bid_size_top - ask_size_top
+        return {
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "bid_size_top": bid_size_top,
+            "ask_size_top": ask_size_top,
+            "imbalance": imbalance,
+            "bid_vol_topn": bid_vol_topn,
+            "ask_vol_topn": ask_vol_topn,
+            "pressure": pressure,
+        }
 
     def _place_limit(self, token_id: str, side: str, price: float, size: float) -> None:
         """Send one GTC limit order or print it in simulation mode."""

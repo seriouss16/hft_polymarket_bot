@@ -12,9 +12,9 @@ class HFTEngine:
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
         self.noise_edge = 3.0
-        self.buy_edge = 8.0
-        self.sell_edge = -8.0
-        self.cooldown = 2.0
+        self.buy_edge = 6.0
+        self.sell_edge = -6.0
+        self.cooldown = 1.0
         self.last_trade_time = 0.0
         self.max_position = 100.0
         self.trade_amount_usd = 100.0
@@ -28,7 +28,7 @@ class HFTEngine:
         self.position_trend = "FLAT"
         self.target_profit_usd = 0.30
         self.stop_loss_usd = 0.30
-        self.speed_floor = 2.0
+        self.speed_floor = 0.8
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
         self.trend_dir = "FLAT"
@@ -73,23 +73,33 @@ class HFTEngine:
         age = now - self.trend_since_ts if self.trend_since_ts else 0.0
         return edge, speed, self.trend_depth, age, self.trend_dir
 
-    def generate_signal(self, fast_price, poly_mid, zscore, lstm_forecast):
+    def dynamic_edge_threshold(self, price_history):
+        """Return adaptive edge threshold in price units from recent volatility."""
+        if not price_history or len(price_history) < 30:
+            return self.buy_edge, abs(self.sell_edge)
+        arr = np.array(price_history[-50:], dtype=np.float64)
+        vol = float(np.std(arr))
+        edge = max(2.0, min(20.0, vol * 0.6))
+        return edge, edge
+
+    def generate_signal(self, fast_price, poly_mid, zscore, lstm_forecast, price_history):
         """Return BUY_YES or BUY_NO or None based on edge/zscore/cooldown."""
         now = time.time()
         if now - self.last_trade_time < self.cooldown:
             return None
 
         edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
+        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(price_history=price_history)
         if abs(edge) < self.noise_edge:
             return None
 
-        trend_ok_up = trend == "UP" and speed > 0 and depth >= self.buy_edge and age >= 0.3
-        trend_ok_down = trend == "DOWN" and speed < 0 and depth >= abs(self.sell_edge) and age >= 0.3
+        trend_ok_up = trend == "UP" and speed >= -0.2 and depth >= buy_edge_dyn and age >= 0.15
+        trend_ok_down = trend == "DOWN" and speed <= 0.2 and depth >= sell_edge_dyn and age >= 0.15
 
-        if edge > self.buy_edge and zscore > 0.5 and lstm_forecast >= fast_price and trend_ok_up:
+        if edge > buy_edge_dyn and zscore > 0.25 and lstm_forecast >= fast_price and trend_ok_up:
             self.last_trade_time = now
             return "BUY_YES"
-        if edge < self.sell_edge and zscore < -0.5 and trend_ok_down:
+        if edge < -sell_edge_dyn and zscore < -0.25 and trend_ok_down:
             self.last_trade_time = now
             return "BUY_NO"
         return None
@@ -100,12 +110,12 @@ class HFTEngine:
         if now - self.last_trade_time < self.cooldown:
             return None
         edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
-        if abs(edge) < 5.0:
+        if abs(edge) < 4.0:
             return None
-        if edge > 10.0 and zscore > 0.7 and trend == "UP" and speed > 0 and depth >= 10.0 and age >= 0.3:
+        if edge > 8.0 and zscore > 0.4 and trend == "UP" and speed >= -0.2 and depth >= 8.0 and age >= 0.15:
             self.last_trade_time = now
             return "BUY_YES"
-        if edge < -10.0 and zscore < -0.7 and trend == "DOWN" and speed < 0 and depth >= 10.0 and age >= 0.3:
+        if edge < -8.0 and zscore < -0.4 and trend == "DOWN" and speed <= 0.2 and depth >= 8.0 and age >= 0.15:
             self.last_trade_time = now
             return "BUY_NO"
         return None
@@ -139,20 +149,24 @@ class HFTEngine:
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
         imbalance = bid_size / (bid_size + ask_size + 1e-9)
-        signal = self.generate_signal(fast_price, poly_mid, zscore, lstm_forecast)
+        signal = self.generate_signal(fast_price, poly_mid, zscore, lstm_forecast, price_history)
         trend = self.get_trend_state()
+        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(price_history)
 
         yes_ask = float(poly_orderbook["ask"])
         yes_bid = float(poly_orderbook["bid"])
         no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
         no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
 
+        pre_reaction_yes = (fast_price - poly_mid) >= buy_edge_dyn and imbalance < 0.15
+        pre_reaction_no = (fast_price - poly_mid) <= -sell_edge_dyn and imbalance > -0.15
+
         if (
             signal == "BUY_YES"
             and self.pnl.inventory == 0
             and self.can_trade()
             and current_rsi < 85
-            and imbalance >= 0.5
+            and pre_reaction_yes
         ):
             await self.execute("BUY_YES", yes_ask)
             self.entry_poly_mid = poly_mid
@@ -174,7 +188,7 @@ class HFTEngine:
             and self.pnl.inventory == 0
             and self.can_trade()
             and current_rsi > 15
-            and imbalance <= 0.5
+            and pre_reaction_no
         ):
             await self.execute("BUY_NO", no_ask)
             self.entry_poly_mid = poly_mid
@@ -201,11 +215,11 @@ class HFTEngine:
             if self.pnl.position_side == "NO":
                 reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_take_profit_move
                 protective_stop = hold_sec >= self.min_hold_sec and poly_move >= self.poly_stop_move
-                imbalance_flip = imbalance > 0.55 and hold_sec >= self.min_hold_sec
+                imbalance_flip = imbalance > 0.20 and hold_sec >= self.min_hold_sec
             else:
                 reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move >= self.poly_take_profit_move
                 protective_stop = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_stop_move
-                imbalance_flip = imbalance < 0.45 and hold_sec >= self.min_hold_sec
+                imbalance_flip = imbalance < -0.20 and hold_sec >= self.min_hold_sec
             timeout_no_reaction = (
                 hold_sec >= self.reaction_timeout_sec
                 and (

@@ -71,6 +71,7 @@ async def main():
     last_stats_time = asyncio.get_event_loop().time()
     last_pulse_time = 0
     last_lstm_time = 0
+    last_book_pull_time = 0
     forecast = 0.0
     
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
@@ -107,6 +108,28 @@ async def main():
 
             # 4. Анализ и "Пульс"
             if fast_price and poly_book and poly_book.book['mid'] > 0:
+                if current_token_id and now - last_book_pull_time > 0.5:
+                    try:
+                        ob = await asyncio.to_thread(live_exec.get_orderbook_snapshot, current_token_id, 5)
+                        best_bid = float(ob.get("best_bid", 0.0))
+                        best_ask = float(ob.get("best_ask", 0.0))
+                        spread = best_ask - best_bid
+                        is_valid_book = (
+                            best_bid > 0.0
+                            and best_ask > best_bid
+                            and best_ask < 1.0
+                            and 0.0 < spread < 0.20
+                        )
+                        if is_valid_book:
+                            poly_book.book["ask"] = ob["best_ask"]
+                            poly_book.book["bid"] = ob["best_bid"]
+                            poly_book.book["mid"] = (ob["best_bid"] + ob["best_ask"]) / 2.0
+                            poly_book.book["ask_size_top"] = ob["ask_size_top"]
+                            poly_book.book["bid_size_top"] = ob["bid_size_top"]
+                    except Exception:
+                        pass
+                    last_book_pull_time = now
+
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
                 # Визуальный пульс в консоль
