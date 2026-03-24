@@ -1,7 +1,8 @@
 import asyncio
 import json
-import websockets
 import logging
+import os
+import websockets
 
 class FastExchangeProvider:
     def __init__(self, exchange_name, url, symbol, update_callback):
@@ -50,4 +51,5 @@ class FastExchangeProvider:
                             
             except Exception as e:
                 logging.error(f"❌ [{self.name}] Ошибка: {e}")
-                await asyncio.sleep(1)
+                delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0.2"))
+                await asyncio.sleep(delay)

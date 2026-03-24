@@ -41,10 +41,11 @@ async def main():
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = 60  # Periodic stats report (seconds).
-    PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0.02"))
-    MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0.002"))
-    CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0.15"))
-    LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "1.0"))
+    PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
+    MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
+    CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0"))
+    LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "0"))
+    SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC", "0"))
     
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
@@ -64,7 +65,7 @@ async def main():
     risk = RiskEngine(
         max_drawdown_pct=float(os.getenv("MAX_DRAWDOWN_PCT", "0.12")),
         max_position_pct=float(os.getenv("MAX_POSITION_PCT", "0.10")),
-        loss_cooldown_sec=float(os.getenv("LOSS_COOLDOWN_SEC", "12")),
+        loss_cooldown_sec=float(os.getenv("LOSS_COOLDOWN_SEC", "0")),
     )
     journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
     
@@ -88,15 +89,17 @@ async def main():
     last_lstm_time = 0
     last_book_pull_time = 0
     forecast = 0.0
-    
+    last_slot_check_time = 0.0
+
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
 
     try:
         while True:
             now = asyncio.get_event_loop().time()
             
-            # 1. Авто-переключение слота (проверка раз в 10 сек)
-            if int(now) % 10 == 0:
+            # 1. Авто-переключение слота (без фиксированной паузы: чаще = быстрее реакция на новый рынок).
+            if SLOT_POLL_SEC <= 0.0 or (now - last_slot_check_time) >= SLOT_POLL_SEC:
+                last_slot_check_time = now
                 ts = selector.get_current_slot_timestamp()
                 slug = selector.format_slug(ts)
                 current_slug = slug
@@ -117,8 +120,10 @@ async def main():
                 fast_price = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             primary_data = aggregator.get_primary_history()
             
-            # 3. Инференс LSTM (раз в 1 секунду, чтобы не грузить CPU)
-            if primary_data and now - last_lstm_time >= LSTM_MIN_INTERVAL:
+            # 3. Инференс LSTM (интервал LSTM_INFERENCE_SEC; 0 = каждый тик главного цикла).
+            if primary_data and (
+                LSTM_MIN_INTERVAL <= 0.0 or (now - last_lstm_time) >= LSTM_MIN_INTERVAL
+            ):
                 forecast = await lstm.predict(primary_data)
                 last_lstm_time = now
 
@@ -135,7 +140,10 @@ async def main():
                     or 0.0
                 )
             if fast_price and poly_book is not None and poly_btc > 0:
-                if token_up_id and now - last_book_pull_time >= CLOB_PULL_INTERVAL:
+                if token_up_id and (
+                    CLOB_PULL_INTERVAL <= 0.0
+                    or (now - last_book_pull_time) >= CLOB_PULL_INTERVAL
+                ):
                     try:
                         up_bid = 0.0
                         up_ask = 0.0
@@ -201,7 +209,7 @@ async def main():
                     recent_pnl=pnl.last_realized_pnl,
                     meta_enabled=trade_allowed,
                 )
-                if now - last_pulse_time > PULSE_INTERVAL:
+                if PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
                     diff = fast_price - poly_btc
                     trend = engine.get_trend_state()
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
@@ -297,8 +305,8 @@ async def main():
                     if live_signal:
                         live_tid = token_up_id if live_signal == "BUY_UP" else (token_down_id or token_up_id)
                         await live_exec.execute(live_signal, live_tid)
-            elif now - last_pulse_time > PULSE_INTERVAL:
-                logging.warning("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
+            elif PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
+                # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
 
             # 5. Вывод статистики
@@ -306,7 +314,10 @@ async def main():
                 stats.show_report()
                 last_stats_time = now
 
-            await asyncio.sleep(MAIN_LOOP_SLEEP)
+            if MAIN_LOOP_SLEEP > 0.0:
+                await asyncio.sleep(MAIN_LOOP_SLEEP)
+            else:
+                await asyncio.sleep(0)
 
     except KeyboardInterrupt:
         print("\n🛑 Остановка пользователем...")

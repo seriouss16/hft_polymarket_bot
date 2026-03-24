@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from typing import Optional
 
@@ -37,6 +38,26 @@ def mark_price_for_side(book: dict, side: Optional[str]) -> float:
     return 0.0
 
 
+def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
+    """Return conservative liquidation bid for the held outcome (long mark-to-market)."""
+    yes_bid = float(book.get("bid") or 0.0)
+    yes_ask = float(book.get("ask") or 0.0)
+    down_bid = float(book.get("down_bid") or 0.0)
+    down_ask = float(book.get("down_ask") or 0.0)
+    if side in ("UP", "YES"):
+        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
+            return yes_bid
+        m = mark_price_for_side(book, side)
+        return m
+    if side in ("DOWN", "NO"):
+        if 0.0 < down_bid < down_ask <= 1.0:
+            return down_bid
+        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
+            return max(0.01, min(0.99, 1.0 - yes_ask))
+        return mark_price_for_side(book, side)
+    return 0.0
+
+
 class PnLTracker:
     """Track position state and realized/unrealized PnL on Polymarket shares."""
 
@@ -55,7 +76,7 @@ class PnLTracker:
         self.max_drawdown = 0.0
         self.peak_balance = initial_balance
         
-        self.fee_rate = 0.001 # 0.1% (комиссия + среднее проскальзывание)
+        self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE", "0.001"))
         self.last_realized_pnl = 0.0
         self.last_close_ts = 0.0
 
@@ -153,10 +174,10 @@ class PnLTracker:
         return None
 
     def get_unrealized_pnl(self, book: dict) -> float:
-        """Return mark-to-market PnL using the correct token mid (YES vs NO)."""
+        """Return markPnL at the outcome bid (conservative exit)."""
         if self.inventory <= 0 or not self.position_side:
             return 0.0
-        mark = mark_price_for_side(book, self.position_side)
+        mark = mark_bid_for_side(book, self.position_side)
         if mark <= 0.0:
             return 0.0
         return (mark - self.entry_price) * self.inventory

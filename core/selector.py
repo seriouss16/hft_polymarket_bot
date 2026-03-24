@@ -62,26 +62,49 @@ def _parse_float_list(field, n: int) -> list[float]:
     """Parse per-outcome numeric values that Gamma may return as list, JSON string, or scalar."""
     if n <= 0:
         return []
+
+    def _numpy_scalar_to_float(val):
+        """Coerce numpy or Python scalars to float; return None if not applicable."""
+        if isinstance(val, (int, float)):
+            return float(val)
+        if hasattr(val, "item") and callable(val.item):
+            try:
+                item = val.item()
+            except Exception:
+                return None
+            if isinstance(item, (int, float)):
+                return float(item)
+        return None
+
+    def _fill_from_scalar(val: float, out: list[float]) -> list[float]:
+        """Write a single scalar into the first outcome slot."""
+        out[0] = float(val)
+        return out
+
     raw = _parse_json_field(field)
     if raw is None:
         raw = field
     out = [0.0] * n
-    if isinstance(raw, (int, float)):
-        out[0] = float(raw)
-        return out
+
+    v0 = _numpy_scalar_to_float(raw)
+    if v0 is not None:
+        return _fill_from_scalar(v0, out)
+
     if isinstance(raw, str):
         s = raw.strip()
         if not s:
             return out
         try:
-            out[0] = float(s)
-            return out
+            return _fill_from_scalar(float(s), out)
         except ValueError:
             parsed = _parse_json_field(s)
-            if parsed is not None:
-                raw = parsed
-            else:
+            if parsed is None:
                 return out
+            raw = parsed
+            v1 = _numpy_scalar_to_float(raw)
+            if v1 is not None:
+                return _fill_from_scalar(v1, out)
+
     if isinstance(raw, (list, tuple)):
         for i in range(min(n, len(raw))):
             if raw[i] is None:

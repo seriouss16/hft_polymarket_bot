@@ -15,20 +15,20 @@ class HFTEngine:
         self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "1.5"))
         self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "3.5"))
         self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "3.5"))
-        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.35"))
+        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.0"))
         self.last_trade_time = 0.0
         self.max_position = 100.0
         self.trade_amount_usd = 100.0
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.2"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "0.0"))
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "8.0"))
-        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.00025"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.00022"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0010"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0015"))
         self.entry_poly_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
         self.position_trend = "FLAT"
         self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "0.60"))
-        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.50"))
+        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "6.0"))
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.15"))
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
@@ -40,12 +40,16 @@ class HFTEngine:
         self.rsi_hold_yes_floor = 40.0
         self.rsi_hold_no_ceiling = 60.0
         self.rsi_entry_yes_low = float(os.getenv("HFT_RSI_ENTRY_YES_LOW", "32.0"))
-        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "74.0"))
-        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "32.0"))
+        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "85.0"))
+        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "15.0"))
         self.rsi_entry_no_high = float(os.getenv("HFT_RSI_ENTRY_NO_HIGH", "68.0"))
         self.rsi_period = 14
-        self.rsi_exit_upper_base = 70.0
-        self.rsi_exit_lower_base = 30.0
+        self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE", "85"))
+        self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE", "15"))
+        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD", "0.5"))
+        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "10.0"))
+        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "85"))
+        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "15"))
         self.rsi_band_vol_k = 0.08
         self.rsi_slope_exit_enabled = True
         self.rsi_slope_yes_exit = -2.5
@@ -54,11 +58,13 @@ class HFTEngine:
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
-        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.25"))
-        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.35"))
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.0"))
+        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.0"))
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
         self.imbalance_exit_yes_floor = float(os.getenv("HFT_IMBALANCE_EXIT_YES_FLOOR", "0.35"))
         self.imbalance_exit_no_ceiling = float(os.getenv("HFT_IMBALANCE_EXIT_NO_CEILING", "0.65"))
+        self.rsi_range_hold_yes_floor = float(os.getenv("HFT_RSI_RANGE_HOLD_YES_FLOOR", "40.0"))
+        self.rsi_range_hold_no_ceiling = float(os.getenv("HFT_RSI_RANGE_HOLD_NO_CEILING", "60.0"))
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0005"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "4"))
@@ -92,6 +98,25 @@ class HFTEngine:
             return rsi >= self.rsi_hold_yes_floor
         if position_side in ("DOWN", "NO"):
             return rsi <= self.rsi_hold_no_ceiling
+        return False
+
+    def _rsi_range_exit_triggered(self, position_side, current_rsi, unrealized):
+        """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin)."""
+        margin = self.rsi_range_exit_band_margin
+        min_p = self.rsi_range_exit_min_profit_usd
+        target = self.target_profit_usd
+        if position_side in ("UP", "YES"):
+            if current_rsi >= self.rsi_entry_yes_high and unrealized >= target:
+                return True
+            if current_rsi <= self.rsi_entry_yes_low - margin:
+                return unrealized > min_p or current_rsi <= self.rsi_extreme_low
+            return False
+        if position_side in ("DOWN", "NO"):
+            if current_rsi <= self.rsi_entry_no_low and unrealized >= target:
+                return True
+            if current_rsi >= self.rsi_entry_no_high + margin:
+                return unrealized > min_p or current_rsi >= self.rsi_extreme_high
+            return False
         return False
 
     def can_trade(self):
@@ -476,11 +501,21 @@ class HFTEngine:
                 imbalance_flip = False
                 timeout_no_reaction = False
 
-            rsi_out_of_bounds = False
-            if side in ("UP", "YES"):
-                rsi_out_of_bounds = current_rsi <= self.rsi_entry_yes_low or current_rsi >= self.rsi_entry_yes_high
-            elif side in ("DOWN", "NO"):
-                rsi_out_of_bounds = current_rsi <= self.rsi_entry_no_low or current_rsi >= self.rsi_entry_no_high
+            rsi_out_of_bounds = self._rsi_range_exit_triggered(side, current_rsi, unrealized)
+            if self._rsi_suppresses_soft_exit(side, current_rsi) and unrealized < self.target_profit_usd:
+                rsi_out_of_bounds = False
+            if (
+                side in ("DOWN", "NO")
+                and current_rsi < self.rsi_range_hold_no_ceiling
+                and unrealized < self.target_profit_usd
+            ):
+                rsi_out_of_bounds = False
+            elif (
+                side in ("UP", "YES")
+                and current_rsi > self.rsi_range_hold_yes_floor
+                and unrealized < self.target_profit_usd
+            ):
+                rsi_out_of_bounds = False
 
             rsi_overbought_exit = (
                 hold_sec >= self.min_hold_sec
