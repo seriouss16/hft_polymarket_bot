@@ -1,10 +1,55 @@
 """Live execution and risk controls for Polymarket CLOB."""
 
+
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass
+
+import requests
+
+CLOB_BOOK_HTTP = "https://clob.polymarket.com/book"
+
+
+def _levels_from_book_rows(rows: list | None) -> list[tuple[float, float]]:
+    """Parse CLOB bids or asks JSON rows into (price, size) tuples."""
+    out: list[tuple[float, float]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            out.append((float(row.get("price", 0.0)), float(row.get("size", 0.0))))
+        else:
+            out.append((float(getattr(row, "price", 0.0)), float(getattr(row, "size", 0.0))))
+    return out
+
+
+def _snapshot_from_levels(
+    bid_levels: list[tuple[float, float]],
+    ask_levels: list[tuple[float, float]],
+    depth: int,
+) -> dict:
+    """Pick best bid (max price), best ask (min price), and top-of-book volumes."""
+    bids = sorted(bid_levels, key=lambda x: x[0], reverse=True)
+    asks = sorted(ask_levels, key=lambda x: x[0])
+    best_bid = float(bids[0][0]) if bids else 0.0
+    best_ask = float(asks[0][0]) if asks else 1.0
+    bid_size_top = float(bids[0][1]) if bids else 0.0
+    ask_size_top = float(asks[0][1]) if asks else 0.0
+    bid_vol_topn = float(sum(s for _, s in bids[:depth]))
+    ask_vol_topn = float(sum(s for _, s in asks[:depth]))
+    den = bid_vol_topn + ask_vol_topn + 1e-9
+    imbalance = (bid_vol_topn - ask_vol_topn) / den
+    pressure = bid_size_top - ask_size_top
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "bid_size_top": bid_size_top,
+        "ask_size_top": ask_size_top,
+        "imbalance": imbalance,
+        "bid_vol_topn": bid_vol_topn,
+        "ask_vol_topn": ask_vol_topn,
+        "pressure": pressure,
+    }
 
 try:
     from py_clob_client.client import ClobClient
@@ -74,16 +119,24 @@ class LiveExecutionEngine:
 
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
-        if self.client is None:
-            return 0.0, 1.0
-        book = self.client.get_order_book(token_id)
-        best_bid = float(book.bids[0].price) if book.bids else 0.0
-        best_ask = float(book.asks[0].price) if book.asks else 1.0
-        return best_bid, best_ask
+        snap = self.get_orderbook_snapshot(token_id, depth=1)
+        return float(snap["best_bid"]), float(snap["best_ask"])
 
-    def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
-        """Return top-N orderbook metrics for imbalance and pressure."""
-        if self.client is None:
+    def _orderbook_snapshot_http(self, token_id: str, depth: int) -> dict:
+        """Fetch and summarize the order book from the public CLOB HTTP endpoint."""
+        try:
+            resp = requests.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            bid_levels = _levels_from_book_rows(data.get("bids"))
+            ask_levels = _levels_from_book_rows(data.get("asks"))
+            return _snapshot_from_levels(bid_levels, ask_levels, depth)
+        except Exception as exc:
+            logging.warning(
+                "HTTP CLOB book failed token=%s…: %s",
+                token_id[:28] if token_id else "",
+                exc,
+            )
             return {
                 "best_bid": 0.0,
                 "best_ask": 1.0,
@@ -94,28 +147,15 @@ class LiveExecutionEngine:
                 "ask_vol_topn": 0.0,
                 "pressure": 0.0,
             }
+
+    def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
+        """Return top-N orderbook metrics for imbalance and pressure."""
+        if self.client is None:
+            return self._orderbook_snapshot_http(token_id, depth)
         book = self.client.get_order_book(token_id)
-        bids = list(book.bids or [])
-        asks = list(book.asks or [])
-        best_bid = float(bids[0].price) if bids else 0.0
-        best_ask = float(asks[0].price) if asks else 1.0
-        bid_size_top = float(bids[0].size) if bids else 0.0
-        ask_size_top = float(asks[0].size) if asks else 0.0
-        bid_vol_topn = float(sum(float(lvl.size) for lvl in bids[:depth]))
-        ask_vol_topn = float(sum(float(lvl.size) for lvl in asks[:depth]))
-        den = bid_vol_topn + ask_vol_topn + 1e-9
-        imbalance = (bid_vol_topn - ask_vol_topn) / den
-        pressure = bid_size_top - ask_size_top
-        return {
-            "best_bid": best_bid,
-            "best_ask": best_ask,
-            "bid_size_top": bid_size_top,
-            "ask_size_top": ask_size_top,
-            "imbalance": imbalance,
-            "bid_vol_topn": bid_vol_topn,
-            "ask_vol_topn": ask_vol_topn,
-            "pressure": pressure,
-        }
+        bid_levels = _levels_from_book_rows(book.bids)
+        ask_levels = _levels_from_book_rows(book.asks)
+        return _snapshot_from_levels(bid_levels, ask_levels, depth)
 
     def _place_limit(self, token_id: str, side: str, price: float, size: float) -> None:
         """Send one GTC limit order or print it in simulation mode."""
@@ -141,11 +181,10 @@ class LiveExecutionEngine:
             return
 
         size = self.min_order_size
-        if signal == "BUY_YES":
+        if signal in ("BUY_YES", "BUY_UP"):
             price = max(0.01, min(0.99, best_ask - 0.002))
             await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
-        elif signal == "BUY_NO":
-            no_ask = 1.0 - best_bid
-            price = max(0.01, min(0.99, no_ask - 0.002))
+        elif signal in ("BUY_NO", "BUY_DOWN"):
+            price = max(0.01, min(0.99, best_ask - 0.002))
             await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
 

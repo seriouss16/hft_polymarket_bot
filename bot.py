@@ -79,7 +79,9 @@ async def main():
     for p in providers:
         asyncio.create_task(p.connect())
 
-    current_token_id = None
+    token_up_id = None
+    token_down_id = None
+    current_slug = None
     poly_book = None
     last_stats_time = asyncio.get_event_loop().time()
     last_pulse_time = 0
@@ -97,13 +99,15 @@ async def main():
             if int(now) % 10 == 0:
                 ts = selector.get_current_slot_timestamp()
                 slug = selector.format_slug(ts)
-                token_id, question = await selector.fetch_token_id(slug)
+                current_slug = slug
+                up_id, down_id, question = await selector.fetch_up_down_token_ids(slug)
 
-                if token_id and token_id != current_token_id:
+                if up_id and (up_id != token_up_id or down_id != token_down_id):
                     logging.info(f"🎯 Смена рынка: {question}")
-                    current_token_id = token_id
-                    # Используем RTDS (оракул) как в bot2.py для стабильности
-                    poly_book = PolyOrderBook(symbol="bitcoin") 
+                    token_up_id = up_id
+                    token_down_id = down_id
+                    engine.reset_for_new_market()
+                    poly_book = PolyOrderBook(symbol="bitcoin")
                     asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
@@ -131,23 +135,51 @@ async def main():
                     or 0.0
                 )
             if fast_price and poly_book is not None and poly_btc > 0:
-                if current_token_id and now - last_book_pull_time >= CLOB_PULL_INTERVAL:
+                if token_up_id and now - last_book_pull_time >= CLOB_PULL_INTERVAL:
                     try:
-                        ob = await asyncio.to_thread(live_exec.get_orderbook_snapshot, current_token_id, 5)
-                        best_bid = float(ob.get("best_bid", 0.0))
-                        best_ask = float(ob.get("best_ask", 0.0))
-                        spread = best_ask - best_bid
-                        is_valid_book = (
-                            best_bid > 0.0
-                            and best_ask > best_bid
-                            and best_ask < 1.0
-                            and 0.0 < spread < 0.20
-                        )
-                        if is_valid_book:
-                            poly_book.book["ask"] = ob["best_ask"]
-                            poly_book.book["bid"] = ob["best_bid"]
-                            poly_book.book["ask_size_top"] = ob["ask_size_top"]
-                            poly_book.book["bid_size_top"] = ob["bid_size_top"]
+                        up_bid = 0.0
+                        up_ask = 0.0
+                        down_bid = 0.0
+                        down_ask = 0.0
+
+                        ob_up = await asyncio.to_thread(live_exec.get_orderbook_snapshot, token_up_id, 5)
+                        up_bid = float(ob_up.get("best_bid", 0.0))
+                        up_ask = float(ob_up.get("best_ask", 0.0))
+                        if token_down_id:
+                            ob_down = await asyncio.to_thread(live_exec.get_orderbook_snapshot, token_down_id, 5)
+                            down_bid = float(ob_down.get("best_bid", 0.0))
+                            down_ask = float(ob_down.get("best_ask", 0.0))
+                        else:
+                            ob_down = {}
+
+                        up_valid = 0.0 < up_bid < up_ask <= 1.0
+                        down_valid = 0.0 < down_bid < down_ask <= 1.0
+                        if (not up_valid or not down_valid) and current_slug:
+                            q = await selector.fetch_up_down_quotes(current_slug, token_up_id, token_down_id)
+                            if not up_valid:
+                                up_bid = float(q.get("up_bid", 0.0))
+                                up_ask = float(q.get("up_ask", 0.0))
+                                up_valid = 0.0 < up_bid < up_ask <= 1.0
+                            if not down_valid:
+                                down_bid = float(q.get("down_bid", 0.0))
+                                down_ask = float(q.get("down_ask", 0.0))
+                                down_valid = 0.0 < down_bid < down_ask <= 1.0
+
+                        if up_valid:
+                            poly_book.book["bid"] = up_bid
+                            poly_book.book["ask"] = up_ask
+                            poly_book.book["bid_size_top"] = float(ob_up.get("bid_size_top", poly_book.book.get("bid_size_top", 1.0)))
+                            poly_book.book["ask_size_top"] = float(ob_up.get("ask_size_top", poly_book.book.get("ask_size_top", 1.0)))
+                        if down_valid:
+                            poly_book.book["down_bid"] = down_bid
+                            poly_book.book["down_ask"] = down_ask
+                            if isinstance(ob_down, dict) and ob_down:
+                                poly_book.book["down_bid_size_top"] = float(
+                                    ob_down.get("bid_size_top", 0.0)
+                                )
+                                poly_book.book["down_ask_size_top"] = float(
+                                    ob_down.get("ask_size_top", 0.0)
+                                )
                     except Exception:
                         pass
                     last_book_pull_time = now
@@ -158,34 +190,7 @@ async def main():
                 equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book)
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
-                # Визуальный пульс в консоль
-                if now - last_pulse_time > PULSE_INTERVAL:
-                    diff = fast_price - poly_btc
-                    trend = engine.get_trend_state()
-                    bid_size = float(poly_book.book.get("bid_size_top", 1.0))
-                    ask_size = float(poly_book.book.get("ask_size_top", 1.0))
-                    imbalance = bid_size / (bid_size + ask_size + 1e-9)
-                    upnl = pnl.get_unrealized_pnl(poly_book.book)
-                    rsi_st = engine.get_rsi_v5_state()
-                    cb_px = aggregator.get_coinbase_price()
-                    bn_px = aggregator.get_binance_price()
-                    cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
-                    bn_s = f"{bn_px:.2f}" if bn_px else "n/a"
-                    print(
-                        f"DEBUG: Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
-                        f"PolyRTDS: {poly_btc:.2f} | "
-                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
-                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
-                        f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
-                        f"Δ={rsi_st['slope']:+.2f} | "
-                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
-                        f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
-                        f"Forecast: {forecast:.2f}",
-                        flush=True,
-                    )
-                    last_pulse_time = now
-                
-                # Попытка совершить сделку
+
                 decision = await engine.process_tick(
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
@@ -196,6 +201,50 @@ async def main():
                     recent_pnl=pnl.last_realized_pnl,
                     meta_enabled=trade_allowed,
                 )
+                if now - last_pulse_time > PULSE_INTERVAL:
+                    diff = fast_price - poly_btc
+                    trend = engine.get_trend_state()
+                    bid_size = float(poly_book.book.get("bid_size_top", 1.0))
+                    ask_size = float(poly_book.book.get("ask_size_top", 1.0))
+                    db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
+                    da_sz = float(poly_book.book.get("down_ask_size_top", 0.0))
+                    if trend["trend"] == "DOWN" and db_sz + da_sz > 0.0:
+                        imbalance = db_sz / (db_sz + da_sz + 1e-9)
+                    else:
+                        imbalance = bid_size / (bid_size + ask_size + 1e-9)
+                    upnl = pnl.get_unrealized_pnl(poly_book.book)
+                    rsi_st = engine.get_rsi_v5_state()
+                    cb_px = aggregator.get_coinbase_price()
+                    bn_px = aggregator.get_binance_price()
+                    cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
+                    bn_s = f"{bn_px:.2f}" if bn_px else "n/a"
+                    y_bid = float(poly_book.book.get("bid", 0.0))
+                    y_ask = float(poly_book.book.get("ask", 0.0))
+                    d_bid = float(poly_book.book.get("down_bid", 0.0))
+                    d_ask = float(poly_book.book.get("down_ask", 0.0))
+                    if not (0.0 < d_bid < d_ask <= 1.0):
+                        d_bid = max(0.01, min(0.99, 1.0 - y_ask))
+                        d_ask = max(0.01, min(0.99, 1.0 - y_bid))
+                    if trend["trend"] == "UP":
+                        book_focus = f"UP b/a {y_bid:.3f}/{y_ask:.3f}"
+                    elif trend["trend"] == "DOWN":
+                        book_focus = f"DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+                    else:
+                        book_focus = f"UP b/a {y_bid:.3f}/{y_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+                    print(
+                        f"DEBUG: Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
+                        f"PolyRTDS: {poly_btc:.2f} | "
+                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
+                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
+                        f"Book: {book_focus} | "
+                        f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                        f"Δ={rsi_st['slope']:+.2f} | "
+                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
+                        f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
+                        f"Forecast: {forecast:.2f}",
+                        flush=True,
+                    )
+                    last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
                     _rs = engine.get_rsi_v5_state()
@@ -228,14 +277,26 @@ async def main():
                             "proceeds_usd": decision.get("proceeds_usd"),
                             "entry_yes_bid": decision.get("entry_yes_bid"),
                             "entry_yes_ask": decision.get("entry_yes_ask"),
+                            "entry_no_bid": decision.get("entry_no_bid"),
+                            "entry_no_ask": decision.get("entry_no_ask"),
                             "exit_yes_bid": decision.get("exit_yes_bid"),
                             "exit_yes_ask": decision.get("exit_yes_ask"),
+                            "exit_no_bid": decision.get("exit_no_bid"),
+                            "exit_no_ask": decision.get("exit_no_ask"),
                         }
                     )
-                if LIVE_MODE and current_token_id and live_risk.can_trade():
-                    live_signal = engine.generate_live_signal(fast_price, poly_btc, zscore)
+                if LIVE_MODE and token_up_id and live_risk.can_trade():
+                    live_signal = engine.generate_live_signal(
+                        fast_price,
+                        poly_btc,
+                        zscore,
+                        price_history=list(primary_data) if primary_data else [],
+                        recent_pnl=pnl.last_realized_pnl,
+                        latency_ms=latency_ms,
+                    )
                     if live_signal:
-                        await live_exec.execute(live_signal, current_token_id)
+                        live_tid = token_up_id if live_signal == "BUY_UP" else (token_down_id or token_up_id)
+                        await live_exec.execute(live_signal, live_tid)
             elif now - last_pulse_time > PULSE_INTERVAL:
                 logging.warning("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

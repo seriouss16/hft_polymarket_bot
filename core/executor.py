@@ -14,17 +14,21 @@ def _yes_outcome_quotes_ok(yes_bid: float, yes_ask: float) -> bool:
 
 
 def mark_price_for_side(book: dict, side: Optional[str]) -> float:
-    """Return outcome token mid for YES or NO from YES outcome order book."""
+    """Return outcome token mid for UP or DOWN using explicit legs when present."""
     yes_bid = float(book.get("bid") or 0.0)
     yes_ask = float(book.get("ask") or 0.0)
-    if side == "YES":
+    down_bid = float(book.get("down_bid") or 0.0)
+    down_ask = float(book.get("down_ask") or 0.0)
+    if side in ("UP", "YES"):
         if _yes_outcome_quotes_ok(yes_bid, yes_ask):
             return (yes_bid + yes_ask) / 2.0
         m = float(book.get("mid") or 0.0)
         if 0.0 < m < 1.0:
             return m
         return 0.0
-    if side == "NO":
+    if side in ("DOWN", "NO"):
+        if 0.0 < down_bid < down_ask <= 1.0:
+            return (down_bid + down_ask) / 2.0
         if _yes_outcome_quotes_ok(yes_bid, yes_ask):
             no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
             no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
@@ -56,7 +60,7 @@ class PnLTracker:
         self.last_close_ts = 0.0
 
     def log_trade(self, side, price, amount_usd=100.0):
-        if side in ("BUY", "BUY_YES", "BUY_NO"):
+        if side in ("BUY", "BUY_YES", "BUY_NO", "BUY_UP", "BUY_DOWN"):
             if self.balance < amount_usd:
                 return None
 
@@ -70,7 +74,7 @@ class PnLTracker:
             else:
                 self.inventory = new_shares
                 self.entry_price = exec_price
-                self.position_side = "NO" if side == "BUY_NO" else "YES"
+                self.position_side = "DOWN" if side in ("BUY_NO", "BUY_DOWN") else "UP"
             self.balance -= amount_usd
             self.entry_ts = time.time()
             logging.info(

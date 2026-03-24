@@ -59,10 +59,11 @@ class HFTEngine:
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
         self.imbalance_exit_yes_floor = float(os.getenv("HFT_IMBALANCE_EXIT_YES_FLOOR", "0.35"))
         self.imbalance_exit_no_ceiling = float(os.getenv("HFT_IMBALANCE_EXIT_NO_CEILING", "0.65"))
-        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0015"))
+        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0005"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "4"))
         self._prev_yes_mid = None
+        self._prev_no_mid = None
         self._book_stall_ticks = 0
 
     def get_last_rsi(self):
@@ -87,9 +88,9 @@ class HFTEngine:
 
     def _rsi_suppresses_soft_exit(self, position_side, rsi):
         """Block trend/speed/imbalance exits while RSI still matches the held thesis."""
-        if position_side == "YES":
+        if position_side in ("UP", "YES"):
             return rsi >= self.rsi_hold_yes_floor
-        if position_side == "NO":
+        if position_side in ("DOWN", "NO"):
             return rsi <= self.rsi_hold_no_ceiling
         return False
 
@@ -142,13 +143,27 @@ class HFTEngine:
         edge = max(2.0, min(20.0, vol * 0.6 * pnl_penalty * latency_boost))
         return edge, edge
 
-    def generate_signal(self, fast_price, poly_mid, zscore, lstm_forecast, price_history, recent_pnl=0.0, latency_ms=0.0):
-        """Return BUY_YES or BUY_NO or None based on edge/zscore/cooldown."""
-        now = time.time()
-        if now - self.last_trade_time < self.cooldown:
-            return None
+    def reset_for_new_market(self):
+        """Clear trend/book memory when switching Polymarket token or slot."""
+        self.edge_window.clear()
+        self.last_edge_sign = 0
+        self.trend_dir = "FLAT"
+        self.trend_since_ts = 0.0
+        self.trend_depth = 0.0
+        self._prev_yes_mid = None
+        self._prev_no_mid = None
+        self._book_stall_ticks = 0
 
-        edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
+    def _entry_candidate_from_state(
+        self,
+        edge,
+        age,
+        trend,
+        price_history,
+        recent_pnl=0.0,
+        latency_ms=0.0,
+    ):
+        """Return BUY_YES/BUY_NO/None from trend vs oracle (no cooldown / no update_trend here)."""
         buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
             price_history=price_history,
             recent_pnl=recent_pnl,
@@ -156,27 +171,32 @@ class HFTEngine:
         )
         if abs(edge) < self.noise_edge:
             return None
-
-        trend_ok_up = trend == "UP" and speed >= 0.0 and depth >= buy_edge_dyn and age >= self.entry_confirm_age
-        trend_ok_down = trend == "DOWN" and speed <= 0.0 and depth >= sell_edge_dyn and age >= self.entry_confirm_age
-
-        if edge > buy_edge_dyn and zscore > 0.25 and lstm_forecast >= fast_price and trend_ok_up:
-            self.last_trade_time = now
-            return "BUY_YES"
-        if edge < -sell_edge_dyn and zscore < -0.25 and trend_ok_down:
-            self.last_trade_time = now
-            return "BUY_NO"
+        depth = self.trend_depth
+        if (
+            trend == "UP"
+            and age >= self.entry_confirm_age
+            and depth >= buy_edge_dyn
+            and edge >= buy_edge_dyn
+        ):
+            return "BUY_UP"
+        if (
+            trend == "DOWN"
+            and age >= self.entry_confirm_age
+            and depth >= sell_edge_dyn
+            and edge <= -sell_edge_dyn
+        ):
+            return "BUY_DOWN"
         return None
 
     def _is_reversal_confirmed(self, side, trend):
         """Return True when trend has clearly flipped against open position."""
-        if side == "YES":
+        if side in ("UP", "YES"):
             return (
                 trend["trend"] == "DOWN"
                 and trend["age"] >= self.reversal_confirm_age
                 and trend["speed"] <= -self.reversal_speed_floor
             )
-        if side == "NO":
+        if side in ("DOWN", "NO"):
             return (
                 trend["trend"] == "UP"
                 and trend["age"] >= self.reversal_confirm_age
@@ -184,39 +204,54 @@ class HFTEngine:
             )
         return False
 
-    def _book_move_state(self, yes_mid, side_hint):
-        """Return signed/absolute top-of-book movement and alignment with side."""
-        if yes_mid <= 0.0:
-            return 0.0, 0.0, False
-        if self._prev_yes_mid is None:
-            self._prev_yes_mid = yes_mid
-            return 0.0, 0.0, False
-        move = yes_mid - self._prev_yes_mid
-        self._prev_yes_mid = yes_mid
+    def _book_move_for_outcome(self, token_mid, prev_key, want_up):
+        """Return move size and whether it aligns with the trade direction."""
+        if token_mid <= 0.0:
+            return 0.0, False
+        prev = getattr(self, prev_key)
+        if prev is None:
+            setattr(self, prev_key, token_mid)
+            return 0.0, False
+        move = token_mid - prev
+        setattr(self, prev_key, token_mid)
         abs_move = abs(move)
-        if side_hint == "YES":
-            aligned = move > 0.0
-        elif side_hint == "NO":
-            aligned = move < 0.0
+        if want_up:
+            aligned = move >= 0.0
         else:
-            aligned = False
-        return move, abs_move, aligned
+            aligned = move <= 0.0
+        return abs_move, aligned
 
-    def generate_live_signal(self, fast_price, poly_mid, zscore):
-        """Return production-style signal without position side-effects."""
+    def _book_move_while_holding(self, token_mid, prev_key):
+        """Track mid while in position; return absolute tick move (for stall detection)."""
+        if token_mid <= 0.0:
+            return 0.0, False
+        prev = getattr(self, prev_key)
+        if prev is None:
+            setattr(self, prev_key, token_mid)
+            return 0.0, True
+        move = token_mid - prev
+        setattr(self, prev_key, token_mid)
+        return abs(move), True
+
+    def generate_live_signal(self, fast_price, poly_mid, zscore, price_history=None, recent_pnl=0.0, latency_ms=0.0):
+        """Return entry side for live orders; call after process_tick in the same loop (trend already updated)."""
+        _ = fast_price
+        _ = poly_mid
+        _ = zscore
+        if price_history is None:
+            price_history = []
         now = time.time()
         if now - self.last_trade_time < self.cooldown:
             return None
-        edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
-        if abs(edge) < 2.0:
-            return None
-        if edge > 4.0 and zscore > 0.25 and trend == "UP" and speed >= -0.2 and depth >= 4.0 and age >= 0.10:
-            self.last_trade_time = now
-            return "BUY_YES"
-        if edge < -4.0 and zscore < -0.25 and trend == "DOWN" and speed <= 0.2 and depth >= 4.0 and age >= 0.10:
-            self.last_trade_time = now
-            return "BUY_NO"
-        return None
+        tr = self.get_trend_state()
+        return self._entry_candidate_from_state(
+            tr["edge"],
+            tr["age"],
+            tr["trend"],
+            price_history,
+            recent_pnl=recent_pnl,
+            latency_ms=latency_ms,
+        )
 
     def get_trend_state(self):
         """Expose latest trend analytics for debug output."""
@@ -250,6 +285,8 @@ class HFTEngine:
     ):
         if not fast_price or not poly_orderbook['ask']:
             return
+        _ = lstm_forecast
+        _ = zscore
 
         px = np.array(price_history)
         current_rsi = float(compute_rsi(px, period=self.rsi_period))
@@ -272,46 +309,62 @@ class HFTEngine:
         )
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
-        imbalance = bid_size / (bid_size + ask_size + 1e-9)
-        signal = self.generate_signal(
-            fast_price,
-            poly_mid,
-            zscore,
-            lstm_forecast,
-            price_history,
-            recent_pnl=recent_pnl,
-            latency_ms=latency_ms,
-        )
+        db_top = float(poly_orderbook.get("down_bid_size_top", 0.0))
+        da_top = float(poly_orderbook.get("down_ask_size_top", 0.0))
+        if self.pnl.inventory > 0 and self.pnl.position_side in ("DOWN", "NO") and db_top + da_top > 0.0:
+            imbalance = db_top / (db_top + da_top + 1e-9)
+        else:
+            imbalance = bid_size / (bid_size + ask_size + 1e-9)
+
+        self.update_trend(fast_price, poly_mid)
         trend = self.get_trend_state()
-        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
-            price_history,
-            recent_pnl=recent_pnl,
-            latency_ms=latency_ms,
-        )
+        signal = None
+        if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
+            signal = self._entry_candidate_from_state(
+                trend["edge"],
+                trend["age"],
+                trend["trend"],
+                price_history,
+                recent_pnl=recent_pnl,
+                latency_ms=latency_ms,
+            )
 
         yes_ask = float(poly_orderbook["ask"])
         yes_bid = float(poly_orderbook["bid"])
         yes_mid = (yes_bid + yes_ask) * 0.5
-        no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
-        no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
+        down_bid_raw = float(poly_orderbook.get("down_bid", 0.0))
+        down_ask_raw = float(poly_orderbook.get("down_ask", 0.0))
+        if 0.0 < down_bid_raw < down_ask_raw <= 1.0:
+            no_bid = down_bid_raw
+            no_ask = down_ask_raw
+        else:
+            no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
+            no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
+        no_mid = (no_bid + no_ask) * 0.5
 
-        pre_reaction_yes = (fast_price - poly_mid) >= buy_edge_dyn and imbalance < 0.15
-        pre_reaction_no = (fast_price - poly_mid) <= -sell_edge_dyn and imbalance > -0.15
-        _, abs_move_yes, aligned_yes = self._book_move_state(yes_mid, "YES")
-        _, abs_move_no, aligned_no = self._book_move_state(yes_mid, "NO")
-        book_entry_yes = aligned_yes and abs_move_yes >= self.book_move_entry_min
-        book_entry_no = aligned_no and abs_move_no >= self.book_move_entry_min
+        if self.pnl.inventory == 0:
+            abs_move_yes, aligned_yes = self._book_move_for_outcome(yes_mid, "_prev_yes_mid", want_up=True)
+            abs_move_no, aligned_no = self._book_move_for_outcome(no_mid, "_prev_no_mid", want_up=True)
+            if self.book_move_entry_min <= 0.0:
+                book_entry_yes = True
+                book_entry_no = True
+            else:
+                book_entry_yes = aligned_yes and abs_move_yes >= self.book_move_entry_min
+                book_entry_no = aligned_no and abs_move_no >= self.book_move_entry_min
+        else:
+            book_entry_yes = False
+            book_entry_no = False
 
         if (
-            signal == "BUY_YES"
+            signal == "BUY_UP"
             and self.pnl.inventory == 0
             and self.can_trade()
             and self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
-            and pre_reaction_yes
             and book_entry_yes
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_YES", yes_ask)
+            open_event = await self.execute("BUY_UP", yes_ask)
+            self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
             self.entry_time = time.time()
@@ -329,6 +382,8 @@ class HFTEngine:
                 "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
                 "entry_yes_bid": yes_bid,
                 "entry_yes_ask": yes_ask,
+                "entry_no_bid": no_bid,
+                "entry_no_ask": no_ask,
             }
             logging.info(
                 "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
@@ -338,18 +393,18 @@ class HFTEngine:
                 self.position_trend,
                 imbalance,
             )
-            return {"event": "OPEN", "side": "YES", "trade": open_event}
+            return {"event": "OPEN", "side": "UP", "trade": open_event}
 
         if (
-            signal == "BUY_NO"
+            signal == "BUY_DOWN"
             and self.pnl.inventory == 0
             and self.can_trade()
             and self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
-            and pre_reaction_no
             and book_entry_no
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_NO", no_ask)
+            open_event = await self.execute("BUY_DOWN", no_ask)
+            self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
             self.entry_time = time.time()
@@ -367,16 +422,18 @@ class HFTEngine:
                 "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
                 "entry_yes_bid": yes_bid,
                 "entry_yes_ask": yes_ask,
+                "entry_no_bid": no_bid,
+                "entry_no_ask": no_ask,
             }
             logging.info(
-                "🧭 Entry context: side=BUY_NO poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
+                "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
                 poly_mid,
                 fast_price,
                 fast_price - poly_mid,
                 self.position_trend,
                 imbalance,
             )
-            return {"event": "OPEN", "side": "NO", "trade": open_event}
+            return {"event": "OPEN", "side": "DOWN", "trade": open_event}
 
         if self.pnl.inventory > 0:
             now = time.time()
@@ -385,7 +442,7 @@ class HFTEngine:
             if self.entry_poly_mid and self.entry_poly_mid > 0:
                 poly_move = (poly_mid - self.entry_poly_mid) / self.entry_poly_mid
 
-            if self.pnl.position_side == "NO":
+            if self.pnl.position_side in ("DOWN", "NO"):
                 reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_take_profit_move
                 protective_stop = hold_sec >= self.min_hold_sec and poly_move >= self.poly_stop_move
                 imbalance_flip = imbalance >= self.imbalance_exit_no_ceiling and hold_sec >= self.min_hold_sec
@@ -397,16 +454,18 @@ class HFTEngine:
                 hold_sec >= self.reaction_timeout_sec
                 and abs(fast_price - poly_mid) < self.noise_edge
             )
-            reversal_confirmed = hold_sec >= self.min_hold_sec and self._is_reversal_confirmed(side=self.pnl.position_side or "YES", trend=trend)
+            reversal_confirmed = hold_sec >= self.min_hold_sec and self._is_reversal_confirmed(side=self.pnl.position_side or "UP", trend=trend)
             trend_lost = reversal_confirmed
             speed_slowdown = False
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             pnl_tp = hold_sec >= self.min_hold_sec and unrealized >= self.target_profit_usd
             pnl_sl = hold_sec >= self.min_hold_sec and unrealized <= -self.stop_loss_usd
 
-            side = self.pnl.position_side or "YES"
-            _, abs_book_move, aligned_book_move = self._book_move_state(yes_mid, side)
-            if abs_book_move <= self.book_move_stop_max or not aligned_book_move:
+            side = self.pnl.position_side or "UP"
+            focus_mid = yes_mid if side in ("UP", "YES") else no_mid
+            prev_attr = "_prev_yes_mid" if side in ("UP", "YES") else "_prev_no_mid"
+            abs_book_move, meaningful = self._book_move_while_holding(focus_mid, prev_attr)
+            if not meaningful or abs_book_move <= self.book_move_stop_max:
                 self._book_stall_ticks += 1
             else:
                 self._book_stall_ticks = 0
@@ -418,20 +477,20 @@ class HFTEngine:
                 timeout_no_reaction = False
 
             rsi_out_of_bounds = False
-            if side == "YES":
+            if side in ("UP", "YES"):
                 rsi_out_of_bounds = current_rsi <= self.rsi_entry_yes_low or current_rsi >= self.rsi_entry_yes_high
-            elif side == "NO":
+            elif side in ("DOWN", "NO"):
                 rsi_out_of_bounds = current_rsi <= self.rsi_entry_no_low or current_rsi >= self.rsi_entry_no_high
 
             rsi_overbought_exit = (
                 hold_sec >= self.min_hold_sec
-                and side == "YES"
+                and side in ("UP", "YES")
                 and current_rsi >= upper_b
                 and reversal_confirmed
             )
             rsi_oversold_exit = (
                 hold_sec >= self.min_hold_sec
-                and side == "NO"
+                and side in ("DOWN", "NO")
                 and current_rsi <= lower_b
                 and reversal_confirmed
             )
@@ -439,8 +498,8 @@ class HFTEngine:
                 self.rsi_slope_exit_enabled
                 and hold_sec >= self.min_hold_sec
                 and (
-                    (side == "YES" and self._last_rsi_slope <= self.rsi_slope_yes_exit)
-                    or (side == "NO" and self._last_rsi_slope >= self.rsi_slope_no_exit)
+                    (side in ("UP", "YES") and self._last_rsi_slope <= self.rsi_slope_yes_exit)
+                    or (side in ("DOWN", "NO") and self._last_rsi_slope >= self.rsi_slope_no_exit)
                 )
                 and reversal_confirmed
             )
@@ -500,8 +559,8 @@ class HFTEngine:
                     upper_b,
                     self._last_rsi_slope,
                 )
-                exit_price = no_bid if self.pnl.position_side == "NO" else yes_bid
-                pos_side = self.pnl.position_side or "YES"
+                exit_price = no_bid if self.pnl.position_side in ("DOWN", "NO") else yes_bid
+                pos_side = self.pnl.position_side or "UP"
                 close_event = await self.execute("SELL", exit_price)
                 ce = close_event or {}
                 result = {
@@ -530,6 +589,8 @@ class HFTEngine:
                     "entry_yes_ask": self.entry_context.get("entry_yes_ask"),
                     "exit_yes_bid": yes_bid,
                     "exit_yes_ask": yes_ask,
+                    "exit_no_bid": no_bid,
+                    "exit_no_ask": no_ask,
                 }
                 self.entry_poly_mid = None
                 self.entry_fast_price = None
@@ -537,6 +598,8 @@ class HFTEngine:
                 self.position_trend = "FLAT"
                 self.entry_context = {}
                 self._book_stall_ticks = 0
+                self._prev_yes_mid = None
+                self._prev_no_mid = None
                 return result
 
     async def execute(self, side, price):
