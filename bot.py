@@ -60,7 +60,7 @@ async def main():
         funder=os.getenv("FUNDER"),
         test_mode=not LIVE_MODE,
         min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
-        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "0.03")),
+        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "0.10")),
     )
     live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-50")))
     risk = RiskEngine(

@@ -90,6 +90,26 @@ class HFTEngine:
         self._prev_yes_mid = None
         self._prev_no_mid = None
         self._book_stall_ticks = 0
+        self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT", "2.0"))
+        self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT", "3.0"))
+        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "0.35"))
+        self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.0"))
+        self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE", "12.0"))
+        self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD", "0.03"))
+        self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "1") == "1"
+        self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN", "0.15"))
+        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "0") == "1"
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "3"))
+        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "500.0"))
+        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.5"))
+        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
+        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT", "2.0"))
+        self.entry_cex_imbalance_enabled = os.getenv("HFT_ENTRY_CEX_IMBALANCE_ENABLED", "0") == "1"
+        self.cex_imbalance_up_min = float(os.getenv("HFT_CEX_IMBALANCE_UP_MIN", "0.55"))
+        self.cex_imbalance_down_max = float(os.getenv("HFT_CEX_IMBALANCE_DOWN_MAX", "0.45"))
+        self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED", "0") == "1"
+        self._speed_samples = deque(maxlen=12)
+        self._zscore_samples = deque(maxlen=12)
 
     def _calc_dynamic_amount(self, exec_price: float) -> float:
         """Size notional USD conservatively: cheap tokens use smaller $, mid via risk-per-tick."""
@@ -240,6 +260,14 @@ class HFTEngine:
             sl = self.stop_loss_usd
         return tp, sl
 
+    def _is_strong_oracle_edge(self, edge: float) -> bool:
+        """Return True when abs(fast-oracle edge) exceeds buy_edge * strong multiplier."""
+        return abs(edge) >= self.buy_edge * self.strong_edge_rsi_mult
+
+    def _is_aggressive_oracle_edge(self, edge: float) -> bool:
+        """Return True for very large edge; used for logging and relaxed confirm age."""
+        return abs(edge) >= self.buy_edge * self.aggressive_edge_mult
+
     def _entry_candidate_from_state(
         self,
         edge,
@@ -260,10 +288,26 @@ class HFTEngine:
         )
         if abs(edge) < self.noise_edge:
             return None
+        strong = self._is_strong_oracle_edge(edge)
+        if self._is_aggressive_oracle_edge(edge):
+            logging.info(
+                "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
+                edge,
+                self.aggressive_edge_mult,
+                self.buy_edge,
+            )
+        age_need = self.entry_confirm_age_strong if strong else self.entry_confirm_age
+        up_speed_ok = speed >= self.entry_up_speed_min or (
+            strong and speed >= self.speed_floor
+        )
+        down_speed_ok = speed <= self.entry_down_speed_max or (
+            strong and speed <= -self.speed_floor
+        )
         low = self.entry_extreme_price_low
         high = self.entry_extreme_price_high
         if (
             abs(edge) < self.entry_extreme_min_edge
+            and not strong
             and (
                 (yes_mid > 0.0 and (yes_mid < low or yes_mid > high))
                 or (no_mid > 0.0 and (no_mid < low or no_mid > high))
@@ -274,20 +318,20 @@ class HFTEngine:
         dm = self.entry_depth_mult
         if (
             trend == "UP"
-            and age >= self.entry_confirm_age
+            and age >= age_need
             and depth >= buy_edge_dyn * dm
             and edge >= buy_edge_dyn
             and speed >= self.speed_floor
-            and speed >= self.entry_up_speed_min
+            and up_speed_ok
         ):
             return "BUY_UP"
         if (
             trend == "DOWN"
-            and age >= self.entry_confirm_age
+            and age >= age_need
             and depth >= sell_edge_dyn * dm
             and edge <= -sell_edge_dyn
             and speed <= -self.speed_floor
-            and speed <= self.entry_down_speed_max
+            and down_speed_ok
         ):
             return "BUY_DOWN"
         return None
@@ -438,10 +482,17 @@ class HFTEngine:
 
         self.update_trend(fast_price, poly_mid)
         trend = self.get_trend_state()
+        edge_now = trend["edge"]
+        spread_yes = max(0.0, yes_ask - yes_bid)
+        spread_gate = (
+            self.max_entry_spread <= 0.0
+            or spread_yes <= self.max_entry_spread
+            or abs(edge_now) >= self.wide_spread_min_edge
+        )
         signal = None
         if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
             signal = self._entry_candidate_from_state(
-                trend["edge"],
+                edge_now,
                 trend["age"],
                 trend["trend"],
                 trend["speed"],
@@ -465,12 +516,23 @@ class HFTEngine:
             book_entry_yes = False
             book_entry_no = False
 
+        strong_rsi = self._is_strong_oracle_edge(edge_now)
+        rsi_ok_up = strong_rsi or (
+            self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
+        )
+        rsi_ok_down = strong_rsi or (
+            self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
+        )
+        book_ok_yes = book_entry_yes or strong_rsi
+        book_ok_no = book_entry_no or strong_rsi
+
         if (
             signal == "BUY_UP"
             and self.pnl.inventory == 0
             and self.can_trade()
-            and self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
-            and book_entry_yes
+            and rsi_ok_up
+            and book_ok_yes
+            and spread_gate
             and meta_enabled
         ):
             open_event = await self.execute("BUY_UP", yes_ask, self._calc_dynamic_amount(yes_ask))
@@ -509,8 +571,9 @@ class HFTEngine:
             signal == "BUY_DOWN"
             and self.pnl.inventory == 0
             and self.can_trade()
-            and self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
-            and book_entry_no
+            and rsi_ok_down
+            and book_ok_no
+            and spread_gate
             and meta_enabled
         ):
             open_event = await self.execute("BUY_DOWN", no_ask, self._calc_dynamic_amount(no_ask))
