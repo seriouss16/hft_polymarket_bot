@@ -112,9 +112,12 @@ async def main():
                 # Визуальный пульс в консоль
                 if now - last_pulse_time > PULSE_INTERVAL:
                     diff = fast_price - poly_book.book['mid']
+                    trend = engine.get_trend_state()
                     print(
                         f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
-                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | Forecast: {forecast:.2f}",
+                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
+                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
+                        f"Forecast: {forecast:.2f}",
                         flush=True,
                     )
                     last_pulse_time = now
