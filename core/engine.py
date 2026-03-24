@@ -17,20 +17,20 @@ class HFTEngine:
         self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "10.0"))
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.0"))
         self.last_trade_time = 0.0
-        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "120.0"))
+        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "90.0"))
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.2"))
-        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "14.0"))
-        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0028"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0035"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.5"))
+        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "16.0"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0040"))
         self.entry_poly_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
         self.position_trend = "FLAT"
         self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "4.2"))
         self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.8"))
-        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.035"))
-        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.022"))
+        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.042"))
+        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.018"))
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.15"))
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
@@ -60,17 +60,23 @@ class HFTEngine:
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
-        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "4.0"))
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "5.0"))
         self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "1.8"))
-        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "13.0"))
+        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "15.0"))
+        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW", "0.20"))
+        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH", "0.80"))
         self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT", "0.9"))
         self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.5"))
         self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.5"))
-        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "3.0"))
+        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "2.0"))
         self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "40.0"))
-        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "120.0"))
+        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "90.0"))
         self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE", "0.01"))
         self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD", "30.0"))
+        self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW", "0.20"))
+        self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE", "0.70"))
+        self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
+        self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
         self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.7"))
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
         self.imbalance_exit_yes_floor = float(os.getenv("HFT_IMBALANCE_EXIT_YES_FLOOR", "0.35"))
@@ -80,16 +86,26 @@ class HFTEngine:
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0030"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0005"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "999"))
-        self.soft_exits_enabled = os.getenv("HFT_SOFT_EXITS_ENABLED", "0") == "1"
+        self.soft_exits_enabled = False
         self._prev_yes_mid = None
         self._prev_no_mid = None
         self._book_stall_ticks = 0
 
     def _calc_dynamic_amount(self, exec_price: float) -> float:
-        """Size notional USD so a 0.01 token move risks roughly a fixed USD amount."""
+        """Size notional USD conservatively: cheap tokens use smaller $, mid via risk-per-tick."""
         px = float(exec_price)
         if px < self.dynamic_min_exec_price:
             return self.dynamic_floor_notional_usd
+        if px < self.dynamic_cheap_price_below:
+            return min(
+                self.dynamic_amount_max_usd,
+                max(self.dynamic_amount_min_usd, self.dynamic_amount_cheap_usd),
+            )
+        if px > self.dynamic_rich_price_above:
+            return min(
+                self.dynamic_amount_max_usd,
+                max(self.dynamic_amount_min_usd, self.dynamic_amount_rich_usd),
+            )
         tick = 0.01
         shares = self.dynamic_risk_per_tick_usd / tick
         amount = shares * px
@@ -244,6 +260,16 @@ class HFTEngine:
         )
         if abs(edge) < self.noise_edge:
             return None
+        low = self.entry_extreme_price_low
+        high = self.entry_extreme_price_high
+        if (
+            abs(edge) < self.entry_extreme_min_edge
+            and (
+                (yes_mid > 0.0 and (yes_mid < low or yes_mid > high))
+                or (no_mid > 0.0 and (no_mid < low or no_mid > high))
+            )
+        ):
+            return None
         depth = self.trend_depth
         dm = self.entry_depth_mult
         if (
@@ -254,12 +280,6 @@ class HFTEngine:
             and speed >= self.speed_floor
             and speed >= self.entry_up_speed_min
         ):
-            if (
-                yes_mid > 0.0
-                and (yes_mid < 0.15 or yes_mid > 0.85)
-                and abs(edge) < self.entry_extreme_min_edge
-            ):
-                return None
             return "BUY_UP"
         if (
             trend == "DOWN"
@@ -269,12 +289,6 @@ class HFTEngine:
             and speed <= -self.speed_floor
             and speed <= self.entry_down_speed_max
         ):
-            if (
-                no_mid > 0.0
-                and (no_mid < 0.15 or no_mid > 0.85)
-                and abs(edge) < self.entry_extreme_min_edge
-            ):
-                return None
             return "BUY_DOWN"
         return None
 
@@ -541,127 +555,31 @@ class HFTEngine:
             if self.pnl.position_side in ("DOWN", "NO"):
                 reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_take_profit_move
                 protective_stop = hold_sec >= self.min_hold_sec and poly_move >= self.poly_stop_move
-                imbalance_flip = imbalance >= self.imbalance_exit_no_ceiling and hold_sec >= self.min_hold_sec
             else:
                 reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move >= self.poly_take_profit_move
                 protective_stop = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_stop_move
-                imbalance_flip = imbalance <= self.imbalance_exit_yes_floor and hold_sec >= self.min_hold_sec
             timeout_no_reaction = (
                 hold_sec >= self.reaction_timeout_sec
                 and abs(fast_price - poly_mid) < self.noise_edge
             )
-            reversal_confirmed = hold_sec >= self.min_hold_sec and self._is_reversal_confirmed(side=self.pnl.position_side or "UP", trend=trend)
-            trend_lost = reversal_confirmed
-            speed_slowdown = False
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             tp_line, sl_line = self._pnl_target_and_stop_lines()
             pnl_tp = hold_sec >= self.min_hold_sec and unrealized >= tp_line
             pnl_sl = hold_sec >= self.min_hold_sec and unrealized <= -sl_line
 
-            side = self.pnl.position_side or "UP"
-            focus_mid = yes_mid if side in ("UP", "YES") else no_mid
-            prev_attr = "_prev_yes_mid" if side in ("UP", "YES") else "_prev_no_mid"
-            abs_book_move, meaningful = self._book_move_while_holding(focus_mid, prev_attr)
-            if not meaningful or abs_book_move <= self.book_move_stop_max:
-                self._book_stall_ticks += 1
-            else:
-                self._book_stall_ticks = 0
-            movement_stopped = hold_sec >= self.min_hold_sec and self._book_stall_ticks >= self.book_stall_ticks_limit
-            if self._rsi_suppresses_soft_exit(side, current_rsi):
-                trend_lost = False
-                speed_slowdown = False
-                imbalance_flip = False
-                timeout_no_reaction = False
-
-            rsi_out_of_bounds = self._rsi_range_exit_triggered(side, current_rsi, unrealized)
-            if self._rsi_suppresses_soft_exit(side, current_rsi) and unrealized < tp_line:
-                rsi_out_of_bounds = False
-            if (
-                side in ("DOWN", "NO")
-                and current_rsi < self.rsi_range_hold_no_ceiling
-                and unrealized < tp_line
-            ):
-                rsi_out_of_bounds = False
-            elif (
-                side in ("UP", "YES")
-                and current_rsi > self.rsi_range_hold_yes_floor
-                and unrealized < tp_line
-            ):
-                rsi_out_of_bounds = False
-            if (
-                rsi_out_of_bounds
-                and unrealized < self.target_profit_usd * self.rsi_range_exit_profit_frac
-            ):
-                rsi_out_of_bounds = False
-
-            rsi_overbought_exit = (
-                hold_sec >= self.min_hold_sec
-                and side in ("UP", "YES")
-                and current_rsi >= upper_b
-                and reversal_confirmed
+            should_close = (
+                reaction_confirmed
+                or protective_stop
+                or timeout_no_reaction
+                or pnl_tp
+                or pnl_sl
             )
-            rsi_oversold_exit = (
-                hold_sec >= self.min_hold_sec
-                and side in ("DOWN", "NO")
-                and current_rsi <= lower_b
-                and reversal_confirmed
-            )
-            rsi_slope_exit = (
-                self.rsi_slope_exit_enabled
-                and hold_sec >= self.min_hold_sec
-                and (
-                    (side in ("UP", "YES") and self._last_rsi_slope <= self.rsi_slope_yes_exit)
-                    or (side in ("DOWN", "NO") and self._last_rsi_slope >= self.rsi_slope_no_exit)
-                )
-                and reversal_confirmed
-            )
-
-            if self.soft_exits_enabled:
-                should_close = (
-                    reaction_confirmed
-                    or protective_stop
-                    or timeout_no_reaction
-                    or rsi_overbought_exit
-                    or rsi_oversold_exit
-                    or rsi_slope_exit
-                    or trend_lost
-                    or speed_slowdown
-                    or imbalance_flip
-                    or movement_stopped
-                    or rsi_out_of_bounds
-                    or pnl_tp
-                    or pnl_sl
-                )
-            else:
-                should_close = (
-                    reaction_confirmed
-                    or protective_stop
-                    or timeout_no_reaction
-                    or pnl_tp
-                    or pnl_sl
-                )
             if should_close:
                 reason = "REACTION_TP"
                 if protective_stop:
                     reason = "REACTION_STOP"
                 elif timeout_no_reaction:
                     reason = "TIMEOUT_EXIT"
-                elif rsi_overbought_exit:
-                    reason = "RSI_OVERBOUGHT"
-                elif rsi_oversold_exit:
-                    reason = "RSI_OVERSOLD"
-                elif rsi_slope_exit:
-                    reason = "RSI_SLOPE"
-                elif trend_lost:
-                    reason = "TREND_LOST"
-                elif speed_slowdown:
-                    reason = "SPEED_SLOWDOWN"
-                elif imbalance_flip:
-                    reason = "IMBALANCE_FLIP"
-                elif movement_stopped:
-                    reason = "BOOK_STALL"
-                elif rsi_out_of_bounds:
-                    reason = "RSI_RANGE_EXIT"
                 elif pnl_tp:
                     reason = "PNL_TP"
                 elif pnl_sl:
