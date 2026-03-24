@@ -17,6 +17,7 @@ import tensorflow as tf
 from core.selector import MarketSelector
 from core.executor import PnLTracker
 from core.engine import HFTEngine
+from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
 from data.poly_clob import PolyOrderBook
@@ -33,6 +34,7 @@ logging.basicConfig(
 async def main():
     # --- Конфигурация ---
     TEST_MODE = True
+    LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = 60  # Отчет раз в минуту
     PULSE_INTERVAL = 2   # Пульс цен раз в 2 секунды
@@ -44,6 +46,14 @@ async def main():
     stats = StatsCollector(pnl)
     engine = HFTEngine(pnl, is_test_mode=TEST_MODE)
     lstm = AsyncLSTMPredictor(history_len=100)
+    live_exec = LiveExecutionEngine(
+        private_key=os.getenv("PRIVATE_KEY"),
+        funder=os.getenv("FUNDER"),
+        test_mode=not LIVE_MODE,
+        min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
+        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "0.03")),
+    )
+    live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-50")))
     
     # Отключаем GPU для предсказаний
     tf.config.set_visible_devices([], 'GPU')
@@ -117,6 +127,10 @@ async def main():
                     lstm_forecast=forecast,
                     zscore=zscore,
                 )
+                if LIVE_MODE and current_token_id and live_risk.can_trade():
+                    live_signal = engine.generate_live_signal(fast_price, poly_book.book["mid"], zscore)
+                    if live_signal:
+                        await live_exec.execute(live_signal, current_token_id)
             elif now - last_pulse_time > PULSE_INTERVAL:
                 logging.warning("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

@@ -40,6 +40,22 @@ class HFTEngine:
             return "BUY_NO"
         return None
 
+    def generate_live_signal(self, fast_price, poly_mid, zscore):
+        """Return production-style signal without position side-effects."""
+        now = time.time()
+        if now - self.last_trade_time < self.cooldown:
+            return None
+        edge = fast_price - poly_mid
+        if abs(edge) < 5.0:
+            return None
+        if edge > 10.0 and zscore > 0.7:
+            self.last_trade_time = now
+            return "BUY_YES"
+        if edge < -10.0 and zscore < -0.7:
+            self.last_trade_time = now
+            return "BUY_NO"
+        return None
+
     async def process_tick(self, fast_price, poly_orderbook, price_history, lstm_forecast, zscore=0.0):
         if not fast_price or not poly_orderbook['ask']:
             return
