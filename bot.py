@@ -156,11 +156,14 @@ async def main():
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     imbalance = bid_size / (bid_size + ask_size + 1e-9)
                     upnl = pnl.get_unrealized_pnl(poly_book.book)
+                    rsi_st = engine.get_rsi_v5_state()
                     print(
                         f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
-                        f"RSI: {engine.get_last_rsi():.1f} | Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
+                        f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                        f"Δ={rsi_st['slope']:+.2f} | "
+                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Forecast: {forecast:.2f}",
                         flush=True,
@@ -180,6 +183,7 @@ async def main():
                 )
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
+                    _rs = engine.get_rsi_v5_state()
                     journal.append(
                         {
                             "ts": time.time(),
@@ -193,6 +197,11 @@ async def main():
                             "entry_imbalance": decision.get("entry_imbalance"),
                             "latency_ms": decision.get("latency_ms"),
                             "pnl": decision.get("pnl"),
+                            "exit_reason": decision.get("reason"),
+                            "exit_rsi": _rs.get("rsi"),
+                            "rsi_band_lower": _rs.get("lower"),
+                            "rsi_band_upper": _rs.get("upper"),
+                            "rsi_slope": _rs.get("slope"),
                         }
                     )
                 if LIVE_MODE and current_token_id and live_risk.can_trade():

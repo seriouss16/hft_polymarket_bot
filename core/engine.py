@@ -3,7 +3,7 @@ import time
 import logging
 from collections import deque
 
-from ml.indicators import compute_rsi
+from ml.indicators import compute_rsi, dynamic_rsi_bands
 
 class HFTEngine:
     """Signal, risk, and execution engine for Polymarket latency strategy."""
@@ -42,10 +42,37 @@ class HFTEngine:
         self.rsi_entry_yes_high = 78.0
         self.rsi_entry_no_low = 22.0
         self.rsi_entry_no_high = 72.0
+        self.rsi_period = 14
+        self.rsi_exit_upper_base = 70.0
+        self.rsi_exit_lower_base = 30.0
+        self.rsi_band_vol_k = 0.08
+        self.rsi_slope_exit_enabled = True
+        self.rsi_slope_yes_exit = -2.5
+        self.rsi_slope_no_exit = 2.5
+        self._rsi_tick_history = deque(maxlen=10)
+        self._last_rsi_upper = 70.0
+        self._last_rsi_lower = 30.0
+        self._last_rsi_slope = 0.0
 
     def get_last_rsi(self):
         """Return RSI of the last tick (fast price series)."""
         return self._last_rsi
+
+    def get_rsi_v5_state(self):
+        """Return RSI value, dynamic exit bands, and per-tick slope for logging."""
+        return {
+            "rsi": self._last_rsi,
+            "upper": self._last_rsi_upper,
+            "lower": self._last_rsi_lower,
+            "slope": self._last_rsi_slope,
+        }
+
+    def _rsi_slope_per_tick(self):
+        """Approximate RSI slope over the last few engine ticks."""
+        if len(self._rsi_tick_history) < 3:
+            return 0.0
+        r = list(self._rsi_tick_history)
+        return (r[-1] - r[-3]) / 2.0
 
     def _rsi_suppresses_soft_exit(self, position_side, rsi):
         """Block trend/speed/imbalance exits while RSI still matches the held thesis."""
@@ -179,8 +206,19 @@ class HFTEngine:
         if not fast_price or not poly_orderbook['ask']:
             return
 
-        current_rsi = compute_rsi(np.array(price_history))
-        self._last_rsi = float(current_rsi)
+        px = np.array(price_history)
+        current_rsi = float(compute_rsi(px, period=self.rsi_period))
+        self._last_rsi = current_rsi
+        self._rsi_tick_history.append(current_rsi)
+        upper_b, lower_b = dynamic_rsi_bands(
+            px,
+            base_upper=self.rsi_exit_upper_base,
+            base_lower=self.rsi_exit_lower_base,
+            k=self.rsi_band_vol_k,
+        )
+        self._last_rsi_upper = upper_b
+        self._last_rsi_lower = lower_b
+        self._last_rsi_slope = self._rsi_slope_per_tick()
 
         poly_mid = poly_orderbook.get("mid", 0.0)
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
@@ -311,10 +349,32 @@ class HFTEngine:
                 speed_slowdown = False
                 imbalance_flip = False
 
+            rsi_overbought_exit = (
+                hold_sec >= self.min_hold_sec
+                and side == "YES"
+                and current_rsi >= upper_b
+            )
+            rsi_oversold_exit = (
+                hold_sec >= self.min_hold_sec
+                and side == "NO"
+                and current_rsi <= lower_b
+            )
+            rsi_slope_exit = (
+                self.rsi_slope_exit_enabled
+                and hold_sec >= self.min_hold_sec
+                and (
+                    (side == "YES" and self._last_rsi_slope <= self.rsi_slope_yes_exit)
+                    or (side == "NO" and self._last_rsi_slope >= self.rsi_slope_no_exit)
+                )
+            )
+
             should_close = (
                 reaction_confirmed
                 or protective_stop
                 or timeout_no_reaction
+                or rsi_overbought_exit
+                or rsi_oversold_exit
+                or rsi_slope_exit
                 or trend_lost
                 or speed_slowdown
                 or imbalance_flip
@@ -327,6 +387,12 @@ class HFTEngine:
                     reason = "REACTION_STOP"
                 elif timeout_no_reaction:
                     reason = "TIMEOUT_EXIT"
+                elif rsi_overbought_exit:
+                    reason = "RSI_OVERBOUGHT"
+                elif rsi_oversold_exit:
+                    reason = "RSI_OVERSOLD"
+                elif rsi_slope_exit:
+                    reason = "RSI_SLOPE"
                 elif trend_lost:
                     reason = "TREND_LOST"
                 elif speed_slowdown:
@@ -338,7 +404,8 @@ class HFTEngine:
                 elif pnl_sl:
                     reason = "PNL_SL"
                 logging.info(
-                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f edge=%.2f pnl=%.2f imb=%.2f rsi=%.1f",
+                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
+                    "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f",
                     reason,
                     hold_sec,
                     poly_move,
@@ -346,6 +413,9 @@ class HFTEngine:
                     unrealized,
                     imbalance,
                     current_rsi,
+                    lower_b,
+                    upper_b,
+                    self._last_rsi_slope,
                 )
                 exit_price = no_bid if self.pnl.position_side == "NO" else yes_bid
                 pos_side = self.pnl.position_side or "YES"
