@@ -6,7 +6,7 @@ import logging
 class PolyOrderBook:
     def __init__(self, symbol="bitcoin"):
         self.symbol = symbol
-        self.book = {"ask": 0.0, "bid": 0.0, "mid": 0.0}
+        self.book = {"ask": 0.0, "bid": 0.0, "mid": 0.0, "ask_size_top": 0.0, "bid_size_top": 0.0}
         self.url = "wss://ws-live-data.polymarket.com"
 
     async def connect(self):
@@ -38,6 +38,9 @@ class PolyOrderBook:
                             self.book['mid'] = price
                             self.book['ask'] = price + 0.05
                             self.book['bid'] = price - 0.05
+                            # RTDS does not provide depth; keep synthetic top sizes for imbalance logic.
+                            self.book['ask_size_top'] = 1.0
+                            self.book['bid_size_top'] = 1.0
             except Exception as e:
                 logging.error(f"❌ Poly RTDS Error: {e}")
                 await asyncio.sleep(2)

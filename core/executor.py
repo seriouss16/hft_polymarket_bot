@@ -2,12 +2,15 @@ import logging
 import time
 
 class PnLTracker:
+    """Track position state and realized/unrealized PnL on Polymarket shares."""
+
     def __init__(self, initial_balance=1000.0):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.inventory = 0.0  # Кол-во токенов (YES или NO)
         self.entry_price = 0.0
         self.entry_ts = 0
+        self.position_side = None
         
         # Метрики
         self.trades_count = 0
@@ -19,20 +22,34 @@ class PnLTracker:
         self.fee_rate = 0.001 # 0.1% (комиссия + среднее проскальзывание)
 
     def log_trade(self, side, price, amount_usd=100.0):
-        if side == "BUY":
+        if side in ("BUY", "BUY_YES", "BUY_NO"):
             if self.balance < amount_usd: return
             
             exec_price = price * (1 + self.fee_rate) # Покупаем чуть дороже рынка
-            self.inventory = amount_usd / exec_price
+            new_shares = amount_usd / exec_price
+            if self.inventory > 0:
+                total_cost = self.entry_price * self.inventory + exec_price * new_shares
+                self.inventory += new_shares
+                self.entry_price = total_cost / self.inventory
+            else:
+                self.inventory = new_shares
+                self.entry_price = exec_price
+                self.position_side = "NO" if side == "BUY_NO" else "YES"
             self.balance -= amount_usd
-            self.entry_price = exec_price
             self.entry_ts = time.time()
-            logging.info(f"🟢 [SIM BUY] Price: {exec_price:.4f} | Size: {amount_usd}$")
+            logging.info(
+                "🟢 [SIM %s] Price: %.4f | Size: %.2f$ | Shares: %.4f | Avg: %.4f",
+                side,
+                exec_price,
+                amount_usd,
+                self.inventory,
+                self.entry_price,
+            )
 
         elif side == "SELL":
             if self.inventory <= 0: return
             
-            exec_price = price * (1 - self.fee_rate) # Продаем чуть дешевле рынка
+            exec_price = price * (1 - self.fee_rate)
             revenue = self.inventory * exec_price
             profit = revenue - (self.inventory * self.entry_price)
             
@@ -51,6 +68,15 @@ class PnLTracker:
             
             self.inventory = 0.0
             self.entry_price = 0.0
+            self.position_side = None
+
+    def get_unrealized_pnl(self, current_price: float) -> float:
+        """Return mark-to-market PnL for open shares."""
+        if self.inventory <= 0:
+            return 0.0
+        if self.position_side == "YES":
+            return (current_price - self.entry_price) * self.inventory
+        return (self.entry_price - current_price) * self.inventory
 
 class RealExecutor:
     """Заглушка для реального API Polymarket."""

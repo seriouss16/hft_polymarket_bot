@@ -37,7 +37,7 @@ async def main():
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = 60  # Отчет раз в минуту
-    PULSE_INTERVAL = 2   # Пульс цен раз в 2 секунды
+    PULSE_INTERVAL =0.5   # Пульс цен раз в 2 секунды
     
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
@@ -113,11 +113,15 @@ async def main():
                 if now - last_pulse_time > PULSE_INTERVAL:
                     diff = fast_price - poly_book.book['mid']
                     trend = engine.get_trend_state()
+                    bid_size = float(poly_book.book.get("bid_size_top", 1.0))
+                    ask_size = float(poly_book.book.get("ask_size_top", 1.0))
+                    imbalance = bid_size / (bid_size + ask_size + 1e-9)
+                    upnl = pnl.get_unrealized_pnl(poly_book.book["mid"])
                     print(
                         f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
-                        f"Forecast: {forecast:.2f}",
+                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Forecast: {forecast:.2f}",
                         flush=True,
                     )
                     last_pulse_time = now
