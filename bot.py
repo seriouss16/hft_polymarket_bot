@@ -162,11 +162,16 @@ async def main():
                     asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
+            _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG", "0") == "1"
+            if _net_dbg:
+                _nw_t0 = time.perf_counter()
             if USE_SMART_FAST:
                 fast_price = aggregator.get_weighted_price()
             else:
                 fast_price = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             primary_data = aggregator.get_primary_history()
+            if _net_dbg:
+                _nw_t1 = time.perf_counter()
             
             # 3. Инференс LSTM (интервал LSTM_INFERENCE_SEC; 0 = каждый тик главного цикла).
             if primary_data and (
@@ -192,6 +197,8 @@ async def main():
                     CLOB_PULL_INTERVAL <= 0.0
                     or (now - last_book_pull_time) >= CLOB_PULL_INTERVAL
                 ):
+                    if _net_dbg:
+                        _nw_t2 = time.perf_counter()
                     try:
                         up_bid = 0.0
                         up_ask = 0.0
@@ -239,27 +246,45 @@ async def main():
                     except Exception:
                         pass
                     last_book_pull_time = now
+                    if _net_dbg:
+                        _nw_t3 = time.perf_counter()
+                        logging.info(
+                            "NetworkCheck read_fast=%.1fms clob_roundtrip=%.1fms",
+                            (_nw_t1 - _nw_t0) * 1000.0,
+                            (_nw_t3 - _nw_t2) * 1000.0,
+                        )
 
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
-                latency_ms = aggregator.get_latency_ms(float(poly_book.book.get("ts", 0.0)))
-                if latency_ms < -100.0 and (now - last_skew_warn_time) >= 60.0:
-                    logging.warning(
-                        "Clock skew (latency_ms=%.0f): sync NTP/chrony; Poly tick ahead of local Coinbase.",
-                        latency_ms,
-                    )
-                    last_skew_warn_time = now
+                _ft = aggregator.feed_timing(
+                    float(poly_book.book.get("ts", 0.0)),
+                    now_loop=now,
+                )
+                latency_ms = float(_ft["staleness_ms"])
+                skew_ms = float(_ft["skew_ms"])
                 if (
                     engine.entry_max_latency_ms > 0.0
                     and latency_ms > engine.entry_max_latency_ms
                     and (now - last_high_latency_warn_time) >= 30.0
                 ):
                     logging.info(
-                        "Latency %.0f ms above entry_max_latency_ms=%.0f (engine may block entries).",
+                        "Feed staleness %.0f ms above entry_max_latency_ms=%.0f (engine may block entries).",
                         latency_ms,
                         engine.entry_max_latency_ms,
                     )
                     last_high_latency_warn_time = now
+                if (
+                    abs(skew_ms) > 800.0
+                    and (now - last_skew_warn_time) >= 120.0
+                ):
+                    logging.warning(
+                        "Large cross-feed skew skew_ms=%.0f (cb_age=%.0f poly_age=%.0f ms); "
+                        "not wall-clock NTP — local recv order of WS messages.",
+                        skew_ms,
+                        float(_ft["coinbase_age_ms"]),
+                        float(_ft["poly_age_ms"]),
+                    )
+                    last_skew_warn_time = now
                 equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book)
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
@@ -292,19 +317,19 @@ async def main():
                     bn_px = aggregator.get_binance_price()
                     cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
                     bn_s = f"{bn_px:.2f}" if bn_px else "n/a"
-                    y_bid = float(poly_book.book.get("bid", 0.0))
-                    y_ask = float(poly_book.book.get("ask", 0.0))
+                    up_bid = float(poly_book.book.get("bid", 0.0))
+                    up_ask = float(poly_book.book.get("ask", 0.0))
                     d_bid = float(poly_book.book.get("down_bid", 0.0))
                     d_ask = float(poly_book.book.get("down_ask", 0.0))
                     if not (0.0 < d_bid < d_ask <= 1.0):
-                        d_bid = max(0.01, min(0.99, 1.0 - y_ask))
-                        d_ask = max(0.01, min(0.99, 1.0 - y_bid))
+                        d_bid = max(0.01, min(0.99, 1.0 - up_ask))
+                        d_ask = max(0.01, min(0.99, 1.0 - up_bid))
                     if trend["trend"] == "UP":
-                        book_focus = f"UP b/a {y_bid:.3f}/{y_ask:.3f}"
+                        book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f}"
                     elif trend["trend"] == "DOWN":
                         book_focus = f"DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
                     else:
-                        book_focus = f"UP b/a {y_bid:.3f}/{y_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+                        book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
                     print(
                         f"DEBUG: Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
                         f"PolyRTDS: {poly_btc:.2f} | "
@@ -313,7 +338,9 @@ async def main():
                         f"Book: {book_focus} | "
                         f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
                         f"Δ={rsi_st['slope']:+.2f} | "
-                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | Lat: {latency_ms:+.0f}ms | "
+                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
+                        f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
+                        f"(cb {float(_ft['coinbase_age_ms']):.0f} poly {float(_ft['poly_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Forecast: {forecast:.2f}",
                         flush=True,
@@ -349,14 +376,14 @@ async def main():
                             "cost_usd": decision.get("cost_usd"),
                             "cost_basis_usd": decision.get("cost_basis_usd"),
                             "proceeds_usd": decision.get("proceeds_usd"),
-                            "entry_yes_bid": decision.get("entry_yes_bid"),
-                            "entry_yes_ask": decision.get("entry_yes_ask"),
-                            "entry_no_bid": decision.get("entry_no_bid"),
-                            "entry_no_ask": decision.get("entry_no_ask"),
-                            "exit_yes_bid": decision.get("exit_yes_bid"),
-                            "exit_yes_ask": decision.get("exit_yes_ask"),
-                            "exit_no_bid": decision.get("exit_no_bid"),
-                            "exit_no_ask": decision.get("exit_no_ask"),
+                            "entry_up_bid": decision.get("entry_up_bid"),
+                            "entry_up_ask": decision.get("entry_up_ask"),
+                            "entry_down_bid": decision.get("entry_down_bid"),
+                            "entry_down_ask": decision.get("entry_down_ask"),
+                            "exit_up_bid": decision.get("exit_up_bid"),
+                            "exit_up_ask": decision.get("exit_up_ask"),
+                            "exit_down_bid": decision.get("exit_down_bid"),
+                            "exit_down_ask": decision.get("exit_down_ask"),
                         }
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():

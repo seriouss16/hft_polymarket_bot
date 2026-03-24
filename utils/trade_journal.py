@@ -32,14 +32,14 @@ _FIELDNAMES = [
     "cost_usd",
     "cost_basis_usd",
     "proceeds_usd",
-    "entry_yes_bid",
-    "entry_yes_ask",
-    "entry_no_bid",
-    "entry_no_ask",
-    "exit_yes_bid",
-    "exit_yes_ask",
-    "exit_no_bid",
-    "exit_no_ask",
+    "entry_up_bid",
+    "entry_up_ask",
+    "entry_down_bid",
+    "entry_down_ask",
+    "exit_up_bid",
+    "exit_up_ask",
+    "exit_down_bid",
+    "exit_down_ask",
 ]
 
 

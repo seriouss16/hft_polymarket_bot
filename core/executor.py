@@ -4,56 +4,56 @@ import time
 from typing import Optional
 
 
-def _yes_outcome_quotes_ok(yes_bid: float, yes_ask: float) -> bool:
-    """Return True when bid/ask look like YES token prices in (0, 1)."""
+def _up_outcome_quotes_ok(up_bid: float, up_ask: float) -> bool:
+    """Return True when bid/ask look like UP-outcome token prices in (0, 1)."""
     return (
-        0.0 < yes_bid < 1.0
-        and 0.0 < yes_ask <= 1.0
-        and yes_ask > yes_bid
-        and (yes_ask - yes_bid) < 0.45
+        0.0 < up_bid < 1.0
+        and 0.0 < up_ask <= 1.0
+        and up_ask > up_bid
+        and (up_ask - up_bid) < 0.45
     )
 
 
 def mark_price_for_side(book: dict, side: Optional[str]) -> float:
     """Return outcome token mid for UP or DOWN using explicit legs when present."""
-    yes_bid = float(book.get("bid") or 0.0)
-    yes_ask = float(book.get("ask") or 0.0)
+    up_bid = float(book.get("bid") or 0.0)
+    up_ask = float(book.get("ask") or 0.0)
     down_bid = float(book.get("down_bid") or 0.0)
     down_ask = float(book.get("down_ask") or 0.0)
-    if side in ("UP", "YES"):
-        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
-            return (yes_bid + yes_ask) / 2.0
+    if side == "UP":
+        if _up_outcome_quotes_ok(up_bid, up_ask):
+            return (up_bid + up_ask) / 2.0
         m = float(book.get("mid") or 0.0)
         if 0.0 < m < 1.0:
             return m
         return 0.0
-    if side in ("DOWN", "NO"):
+    if side == "DOWN":
         if 0.0 < down_bid < down_ask <= 1.0:
             return (down_bid + down_ask) / 2.0
-        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
-            no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
-            no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
-            return (no_bid + no_ask) / 2.0
+        if _up_outcome_quotes_ok(up_bid, up_ask):
+            d_bid = max(0.01, min(0.99, 1.0 - up_ask))
+            d_ask = max(0.01, min(0.99, 1.0 - up_bid))
+            return (d_bid + d_ask) / 2.0
         return 0.0
     return 0.0
 
 
 def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
     """Return conservative liquidation bid for the held outcome (long mark-to-market)."""
-    yes_bid = float(book.get("bid") or 0.0)
-    yes_ask = float(book.get("ask") or 0.0)
+    up_bid = float(book.get("bid") or 0.0)
+    up_ask = float(book.get("ask") or 0.0)
     down_bid = float(book.get("down_bid") or 0.0)
     down_ask = float(book.get("down_ask") or 0.0)
-    if side in ("UP", "YES"):
-        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
-            return yes_bid
+    if side == "UP":
+        if _up_outcome_quotes_ok(up_bid, up_ask):
+            return up_bid
         m = mark_price_for_side(book, side)
         return m
-    if side in ("DOWN", "NO"):
+    if side == "DOWN":
         if 0.0 < down_bid < down_ask <= 1.0:
             return down_bid
-        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
-            return max(0.01, min(0.99, 1.0 - yes_ask))
+        if _up_outcome_quotes_ok(up_bid, up_ask):
+            return max(0.01, min(0.99, 1.0 - up_ask))
         return mark_price_for_side(book, side)
     return 0.0
 
@@ -64,18 +64,17 @@ class PnLTracker:
     def __init__(self, initial_balance=1000.0):
         self.initial_balance = initial_balance
         self.balance = initial_balance
-        self.inventory = 0.0  # Кол-во токенов (YES или NO)
+        self.inventory = 0.0
         self.entry_price = 0.0
         self.entry_ts = 0
         self.position_side = None
-        
-        # Метрики
+
         self.trades_count = 0
         self.wins = 0
         self.total_pnl = 0.0
         self.max_drawdown = 0.0
         self.peak_balance = initial_balance
-        
+
         self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE", "0.001"))
         self.last_realized_pnl = 0.0
         self.last_close_ts = 0.0
@@ -85,7 +84,7 @@ class PnLTracker:
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
-        if side in ("BUY", "BUY_YES", "BUY_NO", "BUY_UP", "BUY_DOWN"):
+        if side in ("BUY", "BUY_UP", "BUY_DOWN"):
             if self.balance < amount_usd:
                 return None
 
@@ -99,7 +98,7 @@ class PnLTracker:
             else:
                 self.inventory = new_shares
                 self.entry_price = exec_price
-                self.position_side = "DOWN" if side in ("BUY_NO", "BUY_DOWN") else "UP"
+                self.position_side = "DOWN" if side == "BUY_DOWN" else "UP"
             self.balance -= amount_usd
             self.entry_ts = time.time()
             logging.info(
@@ -188,11 +187,10 @@ class PnLTracker:
 
 class RealExecutor:
     """Заглушка для реального API Polymarket."""
+
     def __init__(self, private_key):
         self.private_key = private_key
-        # Тут будет инициализация Polymarket CLOB Client
-    
+
     async def place_order(self, side, token_id, price, amount):
         logging.info(f"🚀 [REAL TRADE] Sending {side} for {token_id} at {price}")
-        # Реальная отправка через SDK
         return True

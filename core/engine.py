@@ -41,10 +41,18 @@ class HFTEngine:
         # --- RSI логика ---
         self.rsi_period = 14
         self._last_rsi = 50.0
-        self.rsi_entry_yes_low = float(os.getenv("HFT_RSI_ENTRY_YES_LOW", "20.0"))
-        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "80.0"))
-        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "20.0"))
-        self.rsi_entry_no_high = float(os.getenv("HFT_RSI_ENTRY_NO_HIGH", "80.0"))
+        self.rsi_entry_up_low = float(
+            os.getenv("HFT_RSI_ENTRY_UP_LOW", os.getenv("HFT_RSI_ENTRY_YES_LOW", "20.0"))
+        )
+        self.rsi_entry_up_high = float(
+            os.getenv("HFT_RSI_ENTRY_UP_HIGH", os.getenv("HFT_RSI_ENTRY_YES_HIGH", "80.0"))
+        )
+        self.rsi_entry_down_low = float(
+            os.getenv("HFT_RSI_ENTRY_DOWN_LOW", os.getenv("HFT_RSI_ENTRY_NO_LOW", "20.0"))
+        )
+        self.rsi_entry_down_high = float(
+            os.getenv("HFT_RSI_ENTRY_DOWN_HIGH", os.getenv("HFT_RSI_ENTRY_NO_HIGH", "80.0"))
+        )
         
         # Выходы по RSI
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE", "85"))
@@ -58,14 +66,18 @@ class HFTEngine:
 
         # --- RSI Slope (Наклон) ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "1") == "1"
-        self.rsi_slope_yes_exit = -2.0 # Выходим из YES если RSI резко падает
-        self.rsi_slope_no_exit = 2.0  # Выходим из NO если RSI резко растет
+        self.rsi_slope_up_exit = -2.0
+        self.rsi_slope_down_exit = 2.0
         self._rsi_tick_history = deque(maxlen=10)
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
-        self.rsi_hold_yes_floor = float(os.getenv("HFT_RSI_HOLD_YES_FLOOR", "40.0"))
-        self.rsi_hold_no_ceiling = float(os.getenv("HFT_RSI_HOLD_NO_CEILING", "60.0"))
+        self.rsi_hold_up_floor = float(
+            os.getenv("HFT_RSI_HOLD_UP_FLOOR", os.getenv("HFT_RSI_HOLD_YES_FLOOR", "40.0"))
+        )
+        self.rsi_hold_down_ceiling = float(
+            os.getenv("HFT_RSI_HOLD_DOWN_CEILING", os.getenv("HFT_RSI_HOLD_NO_CEILING", "60.0"))
+        )
 
         # --- Подтверждение входа (Entry Confirm) ---
         self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.1"))
@@ -99,8 +111,8 @@ class HFTEngine:
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "30"))
         self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.015")) # Не входим если спред > 1.5%
-        self._prev_yes_mid = None
-        self._prev_no_mid = None
+        self._prev_up_mid = None
+        self._prev_down_mid = None
         self._book_stall_ticks = 0
         self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT", "2.0"))
         self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT", "3.0"))
@@ -110,7 +122,7 @@ class HFTEngine:
         self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED", "1") == "1"
 
         # --- Задержка (Latency Guard) ---
-        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "600.0"))
+        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "400.0"))
         self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
         self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
         self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
@@ -197,10 +209,10 @@ class HFTEngine:
 
     def _rsi_suppresses_soft_exit(self, position_side, rsi):
         """Block trend/speed/imbalance exits while RSI still matches the held thesis."""
-        if position_side in ("UP", "YES"):
-            return rsi >= self.rsi_hold_yes_floor
-        if position_side in ("DOWN", "NO"):
-            return rsi <= self.rsi_hold_no_ceiling
+        if position_side == "UP":
+            return rsi >= self.rsi_hold_up_floor
+        if position_side == "DOWN":
+            return rsi <= self.rsi_hold_down_ceiling
         return False
 
     def _rsi_range_exit_triggered(self, position_side, current_rsi, unrealized):
@@ -208,16 +220,16 @@ class HFTEngine:
         margin = self.rsi_range_exit_band_margin
         min_p = self.rsi_range_exit_min_profit_usd
         tp_line, _ = self._pnl_target_and_stop_lines()
-        if position_side in ("UP", "YES"):
-            if current_rsi >= self.rsi_entry_yes_high and unrealized >= tp_line:
+        if position_side == "UP":
+            if current_rsi >= self.rsi_entry_up_high and unrealized >= tp_line:
                 return True
-            if current_rsi <= self.rsi_entry_yes_low - margin:
+            if current_rsi <= self.rsi_entry_up_low - margin:
                 return unrealized > min_p or current_rsi <= self.rsi_extreme_low
             return False
-        if position_side in ("DOWN", "NO"):
-            if current_rsi <= self.rsi_entry_no_low and unrealized >= tp_line:
+        if position_side == "DOWN":
+            if current_rsi <= self.rsi_entry_down_low and unrealized >= tp_line:
                 return True
-            if current_rsi >= self.rsi_entry_no_high + margin:
+            if current_rsi >= self.rsi_entry_down_high + margin:
                 return unrealized > min_p or current_rsi >= self.rsi_extreme_high
             return False
         return False
@@ -280,8 +292,8 @@ class HFTEngine:
         self.trend_dir = "FLAT"
         self.trend_since_ts = 0.0
         self.trend_depth = 0.0
-        self._prev_yes_mid = None
-        self._prev_no_mid = None
+        self._prev_up_mid = None
+        self._prev_down_mid = None
         self._book_stall_ticks = 0
         self._speed_samples.clear()
         self._zscore_samples.clear()
@@ -314,7 +326,7 @@ class HFTEngine:
         return abs(edge) >= self.buy_edge * self.aggressive_edge_mult
 
     def _latency_expiry_edge_multiplier(self, latency_ms: float, seconds_to_expiry: float | None) -> float:
-        """Raise required edge when latency is high or the market slot is near expiry."""
+        """Raise required edge when feed staleness_ms is high or the market slot is near expiry."""
         if self.no_entry_guards:
             return 1.0
         m = 1.0
@@ -337,7 +349,7 @@ class HFTEngine:
         return 1.0
 
     def entry_latency_allows_entry(self, latency_ms: float) -> bool:
-        """Block entries when Poly vs fast-feed latency is too high (stale book)."""
+        """Block entries when max feed staleness_ms exceeds entry_max_latency_ms."""
         if self.entry_max_latency_ms <= 0.0:
             return True
         return float(latency_ms) <= self.entry_max_latency_ms
@@ -353,9 +365,9 @@ class HFTEngine:
         if not self.entry_rsi_slope_filter_enabled:
             return True
         slope = float(self._last_rsi_slope)
-        if side in ("UP", "YES"):
+        if side == "UP":
             return current_rsi < self.rsi_up_entry_max and slope > self.rsi_up_slope_min
-        if side in ("DOWN", "NO"):
+        if side == "DOWN":
             return current_rsi > self.rsi_down_entry_min and slope < self.rsi_down_slope_max
         return True
 
@@ -366,20 +378,20 @@ class HFTEngine:
 
     def entry_liquidity_spread_ok(
         self,
-        spread_yes: float,
-        spread_no: float,
+        spread_up: float,
+        spread_down: float,
         edge: float,
         trend_dir: str,
     ) -> bool:
-        """Return False when YES/NO book spread is too wide unless oracle edge is very large."""
+        """Return False when UP/DOWN book spread is too wide unless oracle edge is very large."""
         if self.entry_liquidity_max_spread <= 0.0:
             return True
         mx = self.entry_liquidity_max_spread
         strong = abs(edge) >= self.wide_spread_min_edge
         if trend_dir == "UP":
-            return spread_yes <= mx or strong
+            return spread_up <= mx or strong
         if trend_dir == "DOWN":
-            return spread_no <= mx or strong
+            return spread_down <= mx or strong
         return True
 
     def entry_speed_acceleration_ok(self, trend_dir: str, speed: float) -> bool:
@@ -476,8 +488,8 @@ class HFTEngine:
         price_history,
         recent_pnl=0.0,
         latency_ms=0.0,
-        yes_mid=0.0,
-        no_mid=0.0,
+        up_mid=0.0,
+        down_mid=0.0,
         edge_mult=1.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
@@ -513,8 +525,8 @@ class HFTEngine:
             abs(edge) < self.entry_extreme_min_edge
             and not strong
             and (
-                (yes_mid > 0.0 and (yes_mid < low or yes_mid > high))
-                or (no_mid > 0.0 and (no_mid < low or no_mid > high))
+                (up_mid > 0.0 and (up_mid < low or up_mid > high))
+                or (down_mid > 0.0 and (down_mid < low or down_mid > high))
             )
         ):
             return None
@@ -542,13 +554,13 @@ class HFTEngine:
 
     def _is_reversal_confirmed(self, side, trend):
         """Return True when trend has clearly flipped against open position."""
-        if side in ("UP", "YES"):
+        if side == "UP":
             return (
                 trend["trend"] == "DOWN"
                 and trend["age"] >= self.reversal_confirm_age
                 and trend["speed"] <= -self.reversal_speed_floor
             )
-        if side in ("DOWN", "NO"):
+        if side == "DOWN":
             return (
                 trend["trend"] == "UP"
                 and trend["age"] >= self.reversal_confirm_age
@@ -604,8 +616,8 @@ class HFTEngine:
             price_history,
             recent_pnl=recent_pnl,
             latency_ms=latency_ms,
-            yes_mid=0.0,
-            no_mid=0.0,
+            up_mid=0.0,
+            down_mid=0.0,
             edge_mult=1.0,
         )
 
@@ -668,38 +680,38 @@ class HFTEngine:
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
         db_top = float(poly_orderbook.get("down_bid_size_top", 0.0))
         da_top = float(poly_orderbook.get("down_ask_size_top", 0.0))
-        if self.pnl.inventory > 0 and self.pnl.position_side in ("DOWN", "NO") and db_top + da_top > 0.0:
+        if self.pnl.inventory > 0 and self.pnl.position_side == "DOWN" and db_top + da_top > 0.0:
             imbalance = db_top / (db_top + da_top + 1e-9)
         else:
             imbalance = bid_size / (bid_size + ask_size + 1e-9)
 
-        yes_ask = float(poly_orderbook["ask"])
-        yes_bid = float(poly_orderbook["bid"])
-        yes_mid = (yes_bid + yes_ask) * 0.5
+        up_ask = float(poly_orderbook["ask"])
+        up_bid = float(poly_orderbook["bid"])
+        up_mid = (up_bid + up_ask) * 0.5
         down_bid_raw = float(poly_orderbook.get("down_bid", 0.0))
         down_ask_raw = float(poly_orderbook.get("down_ask", 0.0))
         if 0.0 < down_bid_raw < down_ask_raw <= 1.0:
-            no_bid = down_bid_raw
-            no_ask = down_ask_raw
+            down_bid = down_bid_raw
+            down_ask = down_ask_raw
         else:
-            no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
-            no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
-        no_mid = (no_bid + no_ask) * 0.5
+            down_ask = max(0.01, min(0.99, 1.0 - up_bid))
+            down_bid = max(0.01, min(0.99, 1.0 - up_ask))
+        down_mid = (down_bid + down_ask) * 0.5
 
         self.update_trend(fast_price, poly_mid)
         trend = self.get_trend_state()
         edge_now = trend["edge"]
-        spread_yes = max(0.0, yes_ask - yes_bid)
-        spread_no = max(0.0, no_ask - no_bid)
+        spread_up = max(0.0, up_ask - up_bid)
+        spread_down = max(0.0, down_ask - down_bid)
         edge_mult = self._latency_expiry_edge_multiplier(latency_ms, seconds_to_expiry)
         self._record_entry_samples(trend["speed"], float(zscore))
         spread_gate_legacy = (
             self.max_entry_spread <= 0.0
-            or spread_yes <= self.max_entry_spread
+            or spread_up <= self.max_entry_spread
             or abs(edge_now) >= self.wide_spread_min_edge
         )
         liquidity_ok = self.entry_liquidity_spread_ok(
-            spread_yes, spread_no, edge_now, trend["trend"]
+            spread_up, spread_down, edge_now, trend["trend"]
         )
         entry_context_ok = (
             self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
@@ -728,8 +740,8 @@ class HFTEngine:
                 price_history,
                 recent_pnl=recent_pnl,
                 latency_ms=latency_ms,
-                yes_mid=yes_mid,
-                no_mid=no_mid,
+                up_mid=up_mid,
+                down_mid=down_mid,
                 edge_mult=edge_mult,
             )
             if signal is None:
@@ -744,49 +756,49 @@ class HFTEngine:
                 )
 
         if self.pnl.inventory == 0:
-            abs_move_yes, aligned_yes = self._book_move_for_outcome(yes_mid, "_prev_yes_mid", want_up=True)
-            abs_move_no, aligned_no = self._book_move_for_outcome(no_mid, "_prev_no_mid", want_up=True)
+            abs_move_up, aligned_up = self._book_move_for_outcome(up_mid, "_prev_up_mid", want_up=True)
+            abs_move_down, aligned_down = self._book_move_for_outcome(down_mid, "_prev_down_mid", want_up=True)
             if self.book_move_entry_min <= 0.0:
-                book_entry_yes = True
-                book_entry_no = True
+                book_entry_up = True
+                book_entry_down = True
             else:
-                book_entry_yes = aligned_yes and abs_move_yes >= self.book_move_entry_min
-                book_entry_no = aligned_no and abs_move_no >= self.book_move_entry_min
+                book_entry_up = aligned_up and abs_move_up >= self.book_move_entry_min
+                book_entry_down = aligned_down and abs_move_down >= self.book_move_entry_min
         else:
-            book_entry_yes = False
-            book_entry_no = False
+            book_entry_up = False
+            book_entry_down = False
 
         strong_rsi = self._is_strong_oracle_edge(edge_now)
         if self.no_entry_guards:
             rsi_ok_up = True
             rsi_ok_down = True
-            book_ok_yes = True
-            book_ok_no = True
+            book_ok_up = True
+            book_ok_down = True
         elif self.entry_rsi_slope_filter_enabled:
             rsi_ok_up = strong_rsi or self.entry_rsi_slope_allows("UP", current_rsi)
             rsi_ok_down = strong_rsi or self.entry_rsi_slope_allows("DOWN", current_rsi)
-            book_ok_yes = book_entry_yes or strong_rsi
-            book_ok_no = book_entry_no or strong_rsi
+            book_ok_up = book_entry_up or strong_rsi
+            book_ok_down = book_entry_down or strong_rsi
         else:
             rsi_ok_up = strong_rsi or (
-                self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
+                self.rsi_entry_up_low < current_rsi < self.rsi_entry_up_high
             )
             rsi_ok_down = strong_rsi or (
-                self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
+                self.rsi_entry_down_low < current_rsi < self.rsi_entry_down_high
             )
-            book_ok_yes = book_entry_yes or strong_rsi
-            book_ok_no = book_entry_no or strong_rsi
+            book_ok_up = book_entry_up or strong_rsi
+            book_ok_down = book_entry_down or strong_rsi
 
         if (
             signal == "BUY_UP"
             and self.pnl.inventory == 0
             and self.can_trade()
             and rsi_ok_up
-            and book_ok_yes
+            and book_ok_up
             and spread_gate
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_UP", yes_ask, self._calc_dynamic_amount(yes_ask))
+            open_event = await self.execute("BUY_UP", up_ask, self._calc_dynamic_amount(up_ask))
             self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
@@ -803,10 +815,10 @@ class HFTEngine:
                 "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
                 "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
                 "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                "entry_yes_bid": yes_bid,
-                "entry_yes_ask": yes_ask,
-                "entry_no_bid": no_bid,
-                "entry_no_ask": no_ask,
+                "entry_up_bid": up_bid,
+                "entry_up_ask": up_ask,
+                "entry_down_bid": down_bid,
+                "entry_down_ask": down_ask,
             }
             logging.info(
                 "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
@@ -823,11 +835,11 @@ class HFTEngine:
             and self.pnl.inventory == 0
             and self.can_trade()
             and rsi_ok_down
-            and book_ok_no
+            and book_ok_down
             and spread_gate
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_DOWN", no_ask, self._calc_dynamic_amount(no_ask))
+            open_event = await self.execute("BUY_DOWN", down_ask, self._calc_dynamic_amount(down_ask))
             self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
@@ -844,10 +856,10 @@ class HFTEngine:
                 "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
                 "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
                 "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                "entry_yes_bid": yes_bid,
-                "entry_yes_ask": yes_ask,
-                "entry_no_bid": no_bid,
-                "entry_no_ask": no_ask,
+                "entry_up_bid": up_bid,
+                "entry_up_ask": up_ask,
+                "entry_down_bid": down_bid,
+                "entry_down_ask": down_ask,
             }
             logging.info(
                 "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
@@ -866,7 +878,7 @@ class HFTEngine:
             if self.entry_poly_mid and self.entry_poly_mid > 0:
                 poly_move = (poly_mid - self.entry_poly_mid) / self.entry_poly_mid
 
-            if self.pnl.position_side in ("DOWN", "NO"):
+            if self.pnl.position_side == "DOWN":
                 reaction_confirmed = self._hold_met(hold_sec) and poly_move <= -self.poly_take_profit_move
                 protective_stop = self._hold_met(hold_sec) and poly_move >= self.poly_stop_move
             else:
@@ -913,7 +925,7 @@ class HFTEngine:
                     upper_b,
                     self._last_rsi_slope,
                 )
-                exit_price = no_bid if self.pnl.position_side in ("DOWN", "NO") else yes_bid
+                exit_price = down_bid if self.pnl.position_side == "DOWN" else up_bid
                 pos_side = self.pnl.position_side or "UP"
                 close_event = await self.execute("SELL", exit_price)
                 ce = close_event or {}
@@ -939,12 +951,12 @@ class HFTEngine:
                     "cost_usd": self.entry_context.get("cost_usd", 0.0),
                     "proceeds_usd": float(ce.get("proceeds_usd") or 0.0),
                     "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
-                    "entry_yes_bid": self.entry_context.get("entry_yes_bid"),
-                    "entry_yes_ask": self.entry_context.get("entry_yes_ask"),
-                    "exit_yes_bid": yes_bid,
-                    "exit_yes_ask": yes_ask,
-                    "exit_no_bid": no_bid,
-                    "exit_no_ask": no_ask,
+                    "entry_up_bid": self.entry_context.get("entry_up_bid"),
+                    "entry_up_ask": self.entry_context.get("entry_up_ask"),
+                    "exit_up_bid": up_bid,
+                    "exit_up_ask": up_ask,
+                    "exit_down_bid": down_bid,
+                    "exit_down_ask": down_ask,
                 }
                 self.entry_poly_mid = None
                 self.entry_fast_price = None
@@ -952,8 +964,8 @@ class HFTEngine:
                 self.position_trend = "FLAT"
                 self.entry_context = {}
                 self._book_stall_ticks = 0
-                self._prev_yes_mid = None
-                self._prev_no_mid = None
+                self._prev_up_mid = None
+                self._prev_down_mid = None
                 return result
 
     async def execute(self, side, price, amount_usd=None):

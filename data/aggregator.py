@@ -1,6 +1,8 @@
 import asyncio
 import logging
 from collections import deque
+from typing import Any
+
 import numpy as np
 
 class FastPriceAggregator:
@@ -93,12 +95,41 @@ class FastPriceAggregator:
         """Проверка, накоплено ли достаточно данных для работы (например, для LSTM)."""
         return len(self.get_primary_history()) >= 100
 
-    def get_latency_ms(self, poly_ts: float) -> float:
-        """Return Coinbase-to-Poly latency estimate in milliseconds.
+    def feed_timing(self, poly_ts: float, now_loop: float | None = None) -> dict[str, Any]:
+        """Return receive-time ages and cross-feed skew using one monotonic clock.
 
-        Negative values mean the Poly timestamp is ahead of the local Coinbase tick (clock skew).
+        Timestamps on feeds are ``asyncio`` loop time when each message was handled locally
+        (not exchange wall time). ``staleness_ms`` is max age of the slowest leg; use it for
+        gates. ``skew_ms`` is (coinbase_recv - poly_recv) in ms: who was updated last; sign is
+        not NTP skew by itself.
         """
+        if now_loop is None:
+            now_loop = asyncio.get_event_loop().time()
+        _MISSING = 1e9
         c_ts = float(self.data.get("coinbase", {}).get("timestamp", 0.0))
-        if c_ts <= 0 or poly_ts <= 0:
-            return 0.0
-        return (c_ts - poly_ts) * 1000.0
+        b_ts = float(self.data.get("binance", {}).get("timestamp", 0.0))
+        p_ts = float(poly_ts or 0.0)
+        coinbase_age_ms = max(0.0, (now_loop - c_ts) * 1000.0) if c_ts > 0.0 else _MISSING
+        binance_age_ms = max(0.0, (now_loop - b_ts) * 1000.0) if b_ts > 0.0 else _MISSING
+        poly_age_ms = max(0.0, (now_loop - p_ts) * 1000.0) if p_ts > 0.0 else _MISSING
+        skew_ms = (c_ts - p_ts) * 1000.0 if c_ts > 0.0 and p_ts > 0.0 else 0.0
+        ages: list[float] = []
+        if c_ts > 0.0:
+            ages.append(coinbase_age_ms)
+        if p_ts > 0.0:
+            ages.append(poly_age_ms)
+        if b_ts > 0.0:
+            ages.append(binance_age_ms)
+        staleness_ms = max(ages) if ages else _MISSING
+        return {
+            "now_loop": now_loop,
+            "coinbase_age_ms": coinbase_age_ms,
+            "binance_age_ms": binance_age_ms,
+            "poly_age_ms": poly_age_ms,
+            "skew_ms": skew_ms,
+            "staleness_ms": staleness_ms,
+        }
+
+    def get_latency_ms(self, poly_ts: float) -> float:
+        """Return max receive-age across feeds in ms (staleness); API name kept for callers."""
+        return float(self.feed_timing(poly_ts)["staleness_ms"])

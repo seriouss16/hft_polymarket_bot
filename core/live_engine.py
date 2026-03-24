@@ -173,7 +173,7 @@ class LiveExecutionEngine:
         logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
 
     async def execute(self, signal: str, token_id: str) -> None:
-        """Validate spread and place limit order for BUY_YES/BUY_NO."""
+        """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
@@ -181,10 +181,10 @@ class LiveExecutionEngine:
             return
 
         size = self.min_order_size
-        if signal in ("BUY_YES", "BUY_UP"):
+        if signal == "BUY_UP":
             price = max(0.01, min(0.99, best_ask - 0.002))
             await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
-        elif signal in ("BUY_NO", "BUY_DOWN"):
+        elif signal == "BUY_DOWN":
             price = max(0.01, min(0.99, best_ask - 0.002))
             await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
 
