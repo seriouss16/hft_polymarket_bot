@@ -23,6 +23,19 @@ _FIELDNAMES = [
     "rsi_band_lower",
     "rsi_band_upper",
     "rsi_slope",
+    "entry_book_px",
+    "entry_exec_px",
+    "exit_book_px",
+    "exit_exec_px",
+    "shares_bought",
+    "shares_sold",
+    "cost_usd",
+    "cost_basis_usd",
+    "proceeds_usd",
+    "entry_yes_bid",
+    "entry_yes_ask",
+    "exit_yes_bid",
+    "exit_yes_ask",
 ]
 
 

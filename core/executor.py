@@ -59,8 +59,9 @@ class PnLTracker:
         if side in ("BUY", "BUY_YES", "BUY_NO"):
             if self.balance < amount_usd:
                 return None
-            
-            exec_price = price * (1 + self.fee_rate) # Покупаем чуть дороже рынка
+
+            book_px = float(price)
+            exec_price = book_px * (1 + self.fee_rate)
             new_shares = amount_usd / exec_price
             if self.inventory > 0:
                 total_cost = self.entry_price * self.inventory + exec_price * new_shares
@@ -73,52 +74,77 @@ class PnLTracker:
             self.balance -= amount_usd
             self.entry_ts = time.time()
             logging.info(
-                "🟢 [SIM %s] Price: %.4f | Size: %.2f$ | Shares: %.4f | Avg: %.4f",
+                "🟢 [SIM %s] book=%.4f exec=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
                 side,
+                book_px,
                 exec_price,
                 amount_usd,
+                new_shares,
                 self.inventory,
                 self.entry_price,
             )
             return {
                 "event": "OPEN",
                 "side": self.position_side,
-                "price": exec_price,
+                "book_px": book_px,
+                "exec_px": exec_price,
                 "amount_usd": amount_usd,
+                "shares_filled": new_shares,
+                "shares_position": self.inventory,
+                "price": exec_price,
                 "shares": self.inventory,
             }
 
         elif side == "SELL":
             if self.inventory <= 0:
                 return None
-            
-            exec_price = price * (1 - self.fee_rate)
-            revenue = self.inventory * exec_price
-            profit = revenue - (self.inventory * self.entry_price)
-            
-            self.balance += revenue
+
+            book_px = float(price)
+            shares_sold = float(self.inventory)
+            exec_price = book_px * (1 - self.fee_rate)
+            cost_basis_usd = shares_sold * self.entry_price
+            proceeds_usd = shares_sold * exec_price
+            profit = proceeds_usd - cost_basis_usd
+
+            self.balance += proceeds_usd
             self.total_pnl += profit
             self.last_realized_pnl = profit
             self.last_close_ts = time.time()
             self.trades_count += 1
-            if profit > 0: self.wins += 1
-            
-            # Расчет Drawdown
-            if self.balance > self.peak_balance: self.peak_balance = self.balance
+            if profit > 0:
+                self.wins += 1
+
+            if self.balance > self.peak_balance:
+                self.peak_balance = self.balance
             dd = (self.peak_balance - self.balance) / self.peak_balance
-            if dd > self.max_drawdown: self.max_drawdown = dd
-            
+            if dd > self.max_drawdown:
+                self.max_drawdown = dd
+
             win_rate = (self.wins / self.trades_count) * 100
-            logging.info(f"🔴 [SIM SELL] Price: {exec_price:.4f} | PnL: {profit:>+6.2f}$ | WR: {win_rate:.1f}% | Balance: {self.balance:.2f}$")
-            
+            logging.info(
+                "🔴 [SIM SELL] book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%",
+                book_px,
+                exec_price,
+                shares_sold,
+                cost_basis_usd,
+                proceeds_usd,
+                profit,
+                win_rate,
+            )
+
             self.inventory = 0.0
             self.entry_price = 0.0
             self.position_side = None
             return {
                 "event": "CLOSE",
-                "price": exec_price,
+                "book_px": book_px,
+                "exec_px": exec_price,
+                "shares_sold": shares_sold,
+                "cost_basis_usd": cost_basis_usd,
+                "proceeds_usd": proceeds_usd,
                 "pnl": profit,
                 "balance": self.balance,
+                "price": exec_price,
             }
         return None
 

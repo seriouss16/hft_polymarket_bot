@@ -272,6 +272,12 @@ class HFTEngine:
                 "entry_depth": trend["depth"],
                 "entry_imbalance": imbalance,
                 "latency_ms": latency_ms,
+                "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                "entry_yes_bid": yes_bid,
+                "entry_yes_ask": yes_ask,
             }
             logging.info(
                 "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
@@ -303,6 +309,12 @@ class HFTEngine:
                 "entry_depth": trend["depth"],
                 "entry_imbalance": imbalance,
                 "latency_ms": latency_ms,
+                "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                "entry_yes_bid": yes_bid,
+                "entry_yes_ask": yes_ask,
             }
             logging.info(
                 "🧭 Entry context: side=BUY_NO poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
@@ -424,6 +436,7 @@ class HFTEngine:
                 exit_price = no_bid if self.pnl.position_side == "NO" else yes_bid
                 pos_side = self.pnl.position_side or "YES"
                 close_event = await self.execute("SELL", exit_price)
+                ce = close_event or {}
                 result = {
                     "event": "CLOSE",
                     "reason": reason,
@@ -435,8 +448,21 @@ class HFTEngine:
                     "entry_depth": self.entry_context.get("entry_depth", 0.0),
                     "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
                     "latency_ms": self.entry_context.get("latency_ms", 0.0),
-                    "pnl": (close_event or {}).get("pnl", 0.0),
+                    "pnl": float(ce.get("pnl") or 0.0),
                     "side": pos_side,
+                    "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
+                    "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
+                    "exit_book_px": float(ce.get("book_px") or exit_price),
+                    "exit_exec_px": float(ce.get("exec_px") or 0.0),
+                    "shares_bought": self.entry_context.get("shares_bought", 0.0),
+                    "shares_sold": float(ce.get("shares_sold") or 0.0),
+                    "cost_usd": self.entry_context.get("cost_usd", 0.0),
+                    "proceeds_usd": float(ce.get("proceeds_usd") or 0.0),
+                    "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
+                    "entry_yes_bid": self.entry_context.get("entry_yes_bid"),
+                    "entry_yes_ask": self.entry_context.get("entry_yes_ask"),
+                    "exit_yes_bid": yes_bid,
+                    "exit_yes_ask": yes_ask,
                 }
                 self.entry_poly_mid = None
                 self.entry_fast_price = None

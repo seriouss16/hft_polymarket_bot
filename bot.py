@@ -217,6 +217,19 @@ async def main():
                             "rsi_band_lower": _rs.get("lower"),
                             "rsi_band_upper": _rs.get("upper"),
                             "rsi_slope": _rs.get("slope"),
+                            "entry_book_px": decision.get("entry_book_px"),
+                            "entry_exec_px": decision.get("entry_exec_px"),
+                            "exit_book_px": decision.get("exit_book_px"),
+                            "exit_exec_px": decision.get("exit_exec_px"),
+                            "shares_bought": decision.get("shares_bought"),
+                            "shares_sold": decision.get("shares_sold"),
+                            "cost_usd": decision.get("cost_usd"),
+                            "cost_basis_usd": decision.get("cost_basis_usd"),
+                            "proceeds_usd": decision.get("proceeds_usd"),
+                            "entry_yes_bid": decision.get("entry_yes_bid"),
+                            "entry_yes_ask": decision.get("entry_yes_ask"),
+                            "exit_yes_bid": decision.get("exit_yes_bid"),
+                            "exit_yes_ask": decision.get("exit_yes_ask"),
                         }
                     )
                 if LIVE_MODE and current_token_id and live_risk.can_trade():
