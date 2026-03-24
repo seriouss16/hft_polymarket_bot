@@ -34,6 +34,7 @@ class HFTEngine:
         self.trend_dir = "FLAT"
         self.trend_since_ts = 0.0
         self.trend_depth = 0.0
+        self.entry_context = {}
 
     def can_trade(self):
         """Return True when risk limits allow new trade."""
@@ -73,23 +74,29 @@ class HFTEngine:
         age = now - self.trend_since_ts if self.trend_since_ts else 0.0
         return edge, speed, self.trend_depth, age, self.trend_dir
 
-    def dynamic_edge_threshold(self, price_history):
+    def dynamic_edge_threshold(self, price_history, recent_pnl=0.0, latency_ms=0.0):
         """Return adaptive edge threshold in price units from recent volatility."""
         if not price_history or len(price_history) < 30:
             return self.buy_edge, abs(self.sell_edge)
         arr = np.array(price_history[-50:], dtype=np.float64)
         vol = float(np.std(arr))
-        edge = max(2.0, min(20.0, vol * 0.6))
+        pnl_penalty = 1.15 if recent_pnl < 0 else 1.0
+        latency_boost = 1.10 if latency_ms > 250 else 1.0
+        edge = max(2.0, min(20.0, vol * 0.6 * pnl_penalty * latency_boost))
         return edge, edge
 
-    def generate_signal(self, fast_price, poly_mid, zscore, lstm_forecast, price_history):
+    def generate_signal(self, fast_price, poly_mid, zscore, lstm_forecast, price_history, recent_pnl=0.0, latency_ms=0.0):
         """Return BUY_YES or BUY_NO or None based on edge/zscore/cooldown."""
         now = time.time()
         if now - self.last_trade_time < self.cooldown:
             return None
 
         edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
-        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(price_history=price_history)
+        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
+            price_history=price_history,
+            recent_pnl=recent_pnl,
+            latency_ms=latency_ms,
+        )
         if abs(edge) < self.noise_edge:
             return None
 
@@ -139,7 +146,17 @@ class HFTEngine:
             "age": age,
         }
 
-    async def process_tick(self, fast_price, poly_orderbook, price_history, lstm_forecast, zscore=0.0):
+    async def process_tick(
+        self,
+        fast_price,
+        poly_orderbook,
+        price_history,
+        lstm_forecast,
+        zscore=0.0,
+        latency_ms=0.0,
+        recent_pnl=0.0,
+        meta_enabled=True,
+    ):
         if not fast_price or not poly_orderbook['ask']:
             return
 
@@ -149,9 +166,21 @@ class HFTEngine:
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
         imbalance = bid_size / (bid_size + ask_size + 1e-9)
-        signal = self.generate_signal(fast_price, poly_mid, zscore, lstm_forecast, price_history)
+        signal = self.generate_signal(
+            fast_price,
+            poly_mid,
+            zscore,
+            lstm_forecast,
+            price_history,
+            recent_pnl=recent_pnl,
+            latency_ms=latency_ms,
+        )
         trend = self.get_trend_state()
-        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(price_history)
+        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
+            price_history,
+            recent_pnl=recent_pnl,
+            latency_ms=latency_ms,
+        )
 
         yes_ask = float(poly_orderbook["ask"])
         yes_bid = float(poly_orderbook["bid"])
@@ -167,12 +196,21 @@ class HFTEngine:
             and self.can_trade()
             and current_rsi < 85
             and pre_reaction_yes
+            and meta_enabled
         ):
-            await self.execute("BUY_YES", yes_ask)
+            open_event = await self.execute("BUY_YES", yes_ask)
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
             self.entry_time = time.time()
             self.position_trend = trend["trend"]
+            self.entry_context = {
+                "entry_edge": fast_price - poly_mid,
+                "entry_trend": trend["trend"],
+                "entry_speed": trend["speed"],
+                "entry_depth": trend["depth"],
+                "entry_imbalance": imbalance,
+                "latency_ms": latency_ms,
+            }
             logging.info(
                 "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
                 poly_mid,
@@ -181,7 +219,7 @@ class HFTEngine:
                 self.position_trend,
                 imbalance,
             )
-            return
+            return {"event": "OPEN", "side": "YES", "trade": open_event}
 
         if (
             signal == "BUY_NO"
@@ -189,12 +227,21 @@ class HFTEngine:
             and self.can_trade()
             and current_rsi > 15
             and pre_reaction_no
+            and meta_enabled
         ):
-            await self.execute("BUY_NO", no_ask)
+            open_event = await self.execute("BUY_NO", no_ask)
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
             self.entry_time = time.time()
             self.position_trend = trend["trend"]
+            self.entry_context = {
+                "entry_edge": fast_price - poly_mid,
+                "entry_trend": trend["trend"],
+                "entry_speed": trend["speed"],
+                "entry_depth": trend["depth"],
+                "entry_imbalance": imbalance,
+                "latency_ms": latency_ms,
+            }
             logging.info(
                 "🧭 Entry context: side=BUY_NO poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
                 poly_mid,
@@ -203,7 +250,7 @@ class HFTEngine:
                 self.position_trend,
                 imbalance,
             )
-            return
+            return {"event": "OPEN", "side": "NO", "trade": open_event}
 
         if self.pnl.inventory > 0:
             now = time.time()
@@ -270,12 +317,29 @@ class HFTEngine:
                     imbalance,
                 )
                 exit_price = no_bid if self.pnl.position_side == "NO" else yes_bid
-                await self.execute("SELL", exit_price)
+                pos_side = self.pnl.position_side or "YES"
+                close_event = await self.execute("SELL", exit_price)
+                result = {
+                    "event": "CLOSE",
+                    "reason": reason,
+                    "entry_edge": self.entry_context.get("entry_edge", 0.0),
+                    "exit_edge": fast_price - poly_mid,
+                    "duration_sec": hold_sec,
+                    "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
+                    "entry_speed": self.entry_context.get("entry_speed", 0.0),
+                    "entry_depth": self.entry_context.get("entry_depth", 0.0),
+                    "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
+                    "latency_ms": self.entry_context.get("latency_ms", 0.0),
+                    "pnl": (close_event or {}).get("pnl", 0.0),
+                    "side": pos_side,
+                }
                 self.entry_poly_mid = None
                 self.entry_fast_price = None
                 self.entry_time = 0.0
                 self.position_trend = "FLAT"
+                self.entry_context = {}
+                return result
 
     async def execute(self, side, price):
         """Execute simulated trade."""
-        self.pnl.log_trade(side, price, self.trade_amount_usd)
+        return self.pnl.log_trade(side, price, self.trade_amount_usd)

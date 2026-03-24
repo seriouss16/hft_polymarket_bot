@@ -20,10 +20,13 @@ class PnLTracker:
         self.peak_balance = initial_balance
         
         self.fee_rate = 0.001 # 0.1% (комиссия + среднее проскальзывание)
+        self.last_realized_pnl = 0.0
+        self.last_close_ts = 0.0
 
     def log_trade(self, side, price, amount_usd=100.0):
         if side in ("BUY", "BUY_YES", "BUY_NO"):
-            if self.balance < amount_usd: return
+            if self.balance < amount_usd:
+                return None
             
             exec_price = price * (1 + self.fee_rate) # Покупаем чуть дороже рынка
             new_shares = amount_usd / exec_price
@@ -45,9 +48,17 @@ class PnLTracker:
                 self.inventory,
                 self.entry_price,
             )
+            return {
+                "event": "OPEN",
+                "side": self.position_side,
+                "price": exec_price,
+                "amount_usd": amount_usd,
+                "shares": self.inventory,
+            }
 
         elif side == "SELL":
-            if self.inventory <= 0: return
+            if self.inventory <= 0:
+                return None
             
             exec_price = price * (1 - self.fee_rate)
             revenue = self.inventory * exec_price
@@ -55,6 +66,8 @@ class PnLTracker:
             
             self.balance += revenue
             self.total_pnl += profit
+            self.last_realized_pnl = profit
+            self.last_close_ts = time.time()
             self.trades_count += 1
             if profit > 0: self.wins += 1
             
@@ -69,6 +82,13 @@ class PnLTracker:
             self.inventory = 0.0
             self.entry_price = 0.0
             self.position_side = None
+            return {
+                "event": "CLOSE",
+                "price": exec_price,
+                "pnl": profit,
+                "balance": self.balance,
+            }
+        return None
 
     def get_unrealized_pnl(self, current_price: float) -> float:
         """Return mark-to-market PnL for open shares."""

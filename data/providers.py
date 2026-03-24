@@ -45,7 +45,8 @@ class FastExchangeProvider:
                                 price = float(data['price'])
                         
                         if price:
-                            self.update_callback(self.name, price)
+                            ts = asyncio.get_event_loop().time()
+                            self.update_callback(self.name, price, ts)
                             
             except Exception as e:
                 logging.error(f"❌ [{self.name}] Ошибка: {e}")

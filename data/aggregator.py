@@ -18,9 +18,9 @@ class FastPriceAggregator:
         }
         self.history = deque(maxlen=500)
 
-    def update(self, exchange, price):
+    def update(self, exchange, price, ts=None):
         """Обновление данных из провайдеров."""
-        current_time = asyncio.get_event_loop().time()
+        current_time = ts if ts is not None else asyncio.get_event_loop().time()
         self.data[exchange] = {
             "price": price,
             "timestamp": current_time
@@ -76,3 +76,10 @@ class FastPriceAggregator:
     def is_ready(self):
         """Проверка, накоплено ли достаточно данных для работы (например, для LSTM)."""
         return len(self.get_primary_history()) >= 100
+
+    def get_latency_ms(self, poly_ts: float) -> float:
+        """Return Coinbase-to-Poly latency estimate in milliseconds."""
+        c_ts = float(self.data.get("coinbase", {}).get("timestamp", 0.0))
+        if c_ts <= 0 or poly_ts <= 0:
+            return 0.0
+        return (c_ts - poly_ts) * 1000.0
