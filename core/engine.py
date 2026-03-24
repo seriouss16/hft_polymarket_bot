@@ -15,16 +15,16 @@ class HFTEngine:
         self.is_test_mode = is_test_mode
         
         # --- Базовый Edge (в пунктах цены) ---
-        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "0.5"))   # Игнорим шум менее 0.5 пункта
-        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "2.0"))      # Вход при разнице > 2.0
-        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "2.0"))
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "1.0"))   # Игнорим шум менее 0.5 пункта
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "6.0"))      # Вход при разнице > 2.0
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "6.0"))
         
         # --- Тайминги и объемы ---
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.1"))
         self.last_trade_time = 0.0
         self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "100.0"))
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "50.0"))
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.0"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
         self.entry_poly_mid = None
         self.entry_fast_price = None

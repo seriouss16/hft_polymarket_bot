@@ -85,7 +85,7 @@ async def main():
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
-    STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "0"))
+    STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "120"))
     # All intervals default to 0: no artificial throttling (set env >0 only to limit CPU/API load).
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
     MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
@@ -141,6 +141,7 @@ async def main():
 
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
 
+    shutdown_reason = "shutdown"
     try:
         while True:
             now = asyncio.get_event_loop().time()
@@ -402,9 +403,10 @@ async def main():
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
 
-            # 5. Вывод статистики (STATS_INTERVAL_SEC<=0 отключает периодический отчёт).
-            if STATS_INTERVAL > 0.0 and (now - last_stats_time > STATS_INTERVAL):
+            # 5. Промежуточный отчёт (STATS_INTERVAL_SEC<=0 отключает).
+            if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
                 stats.show_report()
+                logging.info("Intermediate stats report (STATS_INTERVAL_SEC=%s).", STATS_INTERVAL)
                 last_stats_time = now
 
             # When MAIN_LOOP_SLEEP is 0, asyncio.sleep(0) only yields to the event loop (no wall delay).
@@ -412,27 +414,25 @@ async def main():
 
     except KeyboardInterrupt:
         print("\n🛑 Остановка пользователем...")
-        stats.show_final_report(
-            journal_path=journal.path,
-            shutdown_reason="KeyboardInterrupt",
-        )
+        shutdown_reason = "KeyboardInterrupt"
     except Exception:
         logging.error("💥 КРИТИЧЕСКАЯ ОШИБКА В ГЛАВНОМ ЦИКЛЕ")
-        # Выводит подробный Traceback (стек вызовов)
         logging.error(traceback.format_exc())
-        
-        # Дополнительный дебаг состояния данных перед падением
+        shutdown_reason = "exception"
         try:
             bp = aggregator.data.get("coinbase")
             pp = poly_book.book if poly_book else "None"
-            logging.debug(f"DEBUG DATA AT CRASH -> Coinbase: {bp} | Poly: {pp}")
-        except:
+            logging.debug("DEBUG DATA AT CRASH -> Coinbase: %s | Poly: %s", bp, pp)
+        except Exception:
             pass
-            
-        stats.show_final_report(
-            journal_path=journal.path,
-            shutdown_reason="exception",
-        )
+    finally:
+        try:
+            stats.show_final_report(
+                journal_path=journal.path,
+                shutdown_reason=shutdown_reason,
+            )
+        except Exception as exc:
+            logging.error("Final report failed: %s", exc)
 
 if __name__ == "__main__":
     try:
