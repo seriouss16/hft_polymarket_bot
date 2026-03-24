@@ -26,7 +26,10 @@ class FastPriceAggregator:
 
     # В data/aggregator.py
     def get_weighted_price(self):
-        # Приоритет Binance как в bot2.py
+        # Priory Coinbase as requested to reduce drift vs Polymarket.
+        c = self.data.get("coinbase")
+        if c and c["price"] > 0:
+            return c["price"]
         b = self.data.get("binance")
         if b and b["price"] > 0:
             return b["price"]
@@ -34,4 +37,4 @@ class FastPriceAggregator:
 
     def is_ready(self):
         """Проверка, накоплено ли достаточно данных для работы (например, для LSTM)."""
-        return len(self.prices.get("binance", [])) >= 100
+        return len(self.prices.get("coinbase", [])) >= 100

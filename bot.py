@@ -48,9 +48,8 @@ async def main():
     # Отключаем GPU для предсказаний
     tf.config.set_visible_devices([], 'GPU')
 
-    # --- Запуск провайдеров быстрых цен (Binance + Coinbase) ---
+    # --- Запуск провайдеров быстрых цен (Coinbase as primary) ---
     providers = [
-        FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update),
         FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
     ]
     for p in providers:
@@ -84,11 +83,11 @@ async def main():
 
             # 2. Получение данных
             fast_price = aggregator.get_weighted_price()
-            binance_data = aggregator.prices.get("binance")
+            primary_data = aggregator.prices.get("coinbase")
             
             # 3. Инференс LSTM (раз в 1 секунду, чтобы не грузить CPU)
-            if binance_data and now - last_lstm_time > 1.0:
-                forecast = await lstm.predict(binance_data)
+            if primary_data and now - last_lstm_time > 1.0:
+                forecast = await lstm.predict(primary_data)
                 last_lstm_time = now
 
             # Fast-start fallback: keep forecast on realistic price scale before warmup.
@@ -107,11 +106,11 @@ async def main():
                 await engine.process_tick(
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
-                    price_history=list(binance_data) if binance_data else [],
+                    price_history=list(primary_data) if primary_data else [],
                     lstm_forecast=forecast
                 )
             elif now - last_pulse_time > PULSE_INTERVAL:
-                logging.warning("⏳ Ожидание полной синхронизации данных (Binance/Poly)...")
+                logging.warning("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
 
             # 5. Вывод статистики
@@ -132,9 +131,9 @@ async def main():
         
         # Дополнительный дебаг состояния данных перед падением
         try:
-            bp = aggregator.data.get("binance")
+            bp = aggregator.data.get("coinbase")
             pp = poly_book.book if poly_book else "None"
-            logging.debug(f"DEBUG DATA AT CRASH -> Binance: {bp} | Poly: {pp}")
+            logging.debug(f"DEBUG DATA AT CRASH -> Coinbase: {bp} | Poly: {pp}")
         except:
             pass
             
