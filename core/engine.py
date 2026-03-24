@@ -1,6 +1,7 @@
 import numpy as np
 import time
 import logging
+import os
 from collections import deque
 
 from ml.indicators import compute_rsi, dynamic_rsi_bands
@@ -11,24 +12,24 @@ class HFTEngine:
     def __init__(self, pnl_tracker, is_test_mode=True):
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
-        self.noise_edge = 3.0
-        self.buy_edge = 6.0
-        self.sell_edge = -6.0
-        self.cooldown = 1.0
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "1.5"))
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "3.5"))
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "3.5"))
+        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.35"))
         self.last_trade_time = 0.0
         self.max_position = 100.0
         self.trade_amount_usd = 100.0
-        self.min_hold_sec = 3.0
-        self.reaction_timeout_sec = 20.0
-        self.poly_take_profit_move = 0.0004
-        self.poly_stop_move = 0.0003
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.2"))
+        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "8.0"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.00025"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.00022"))
         self.entry_poly_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
         self.position_trend = "FLAT"
-        self.target_profit_usd = 0.30
-        self.stop_loss_usd = 0.30
-        self.speed_floor = 0.8
+        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "0.60"))
+        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.50"))
+        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.15"))
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
         self.trend_dir = "FLAT"
@@ -38,10 +39,10 @@ class HFTEngine:
         self._last_rsi = 50.0
         self.rsi_hold_yes_floor = 40.0
         self.rsi_hold_no_ceiling = 60.0
-        self.rsi_entry_yes_low = 28.0
-        self.rsi_entry_yes_high = 78.0
-        self.rsi_entry_no_low = 22.0
-        self.rsi_entry_no_high = 72.0
+        self.rsi_entry_yes_low = float(os.getenv("HFT_RSI_ENTRY_YES_LOW", "32.0"))
+        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "74.0"))
+        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "32.0"))
+        self.rsi_entry_no_high = float(os.getenv("HFT_RSI_ENTRY_NO_HIGH", "68.0"))
         self.rsi_period = 14
         self.rsi_exit_upper_base = 70.0
         self.rsi_exit_lower_base = 30.0
@@ -53,6 +54,9 @@ class HFTEngine:
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.25"))
+        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.35"))
+        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
 
     def get_last_rsi(self):
         """Return RSI of the last tick (fast price series)."""
@@ -146,8 +150,8 @@ class HFTEngine:
         if abs(edge) < self.noise_edge:
             return None
 
-        trend_ok_up = trend == "UP" and speed >= -0.2 and depth >= buy_edge_dyn and age >= 0.15
-        trend_ok_down = trend == "DOWN" and speed <= 0.2 and depth >= sell_edge_dyn and age >= 0.15
+        trend_ok_up = trend == "UP" and speed >= 0.0 and depth >= buy_edge_dyn and age >= self.entry_confirm_age
+        trend_ok_down = trend == "DOWN" and speed <= 0.0 and depth >= sell_edge_dyn and age >= self.entry_confirm_age
 
         if edge > buy_edge_dyn and zscore > 0.25 and lstm_forecast >= fast_price and trend_ok_up:
             self.last_trade_time = now
@@ -157,18 +161,34 @@ class HFTEngine:
             return "BUY_NO"
         return None
 
+    def _is_reversal_confirmed(self, side, trend):
+        """Return True when trend has clearly flipped against open position."""
+        if side == "YES":
+            return (
+                trend["trend"] == "DOWN"
+                and trend["age"] >= self.reversal_confirm_age
+                and trend["speed"] <= -self.reversal_speed_floor
+            )
+        if side == "NO":
+            return (
+                trend["trend"] == "UP"
+                and trend["age"] >= self.reversal_confirm_age
+                and trend["speed"] >= self.reversal_speed_floor
+            )
+        return False
+
     def generate_live_signal(self, fast_price, poly_mid, zscore):
         """Return production-style signal without position side-effects."""
         now = time.time()
         if now - self.last_trade_time < self.cooldown:
             return None
         edge, speed, depth, age, trend = self.update_trend(fast_price, poly_mid)
-        if abs(edge) < 4.0:
+        if abs(edge) < 2.0:
             return None
-        if edge > 8.0 and zscore > 0.4 and trend == "UP" and speed >= -0.2 and depth >= 8.0 and age >= 0.15:
+        if edge > 4.0 and zscore > 0.25 and trend == "UP" and speed >= -0.2 and depth >= 4.0 and age >= 0.10:
             self.last_trade_time = now
             return "BUY_YES"
-        if edge < -8.0 and zscore < -0.4 and trend == "DOWN" and speed <= 0.2 and depth >= 8.0 and age >= 0.15:
+        if edge < -4.0 and zscore < -0.25 and trend == "DOWN" and speed <= 0.2 and depth >= 4.0 and age >= 0.10:
             self.last_trade_time = now
             return "BUY_NO"
         return None
@@ -343,37 +363,33 @@ class HFTEngine:
                 imbalance_flip = imbalance < -0.20 and hold_sec >= self.min_hold_sec
             timeout_no_reaction = (
                 hold_sec >= self.reaction_timeout_sec
-                and (
-                    abs(fast_price - poly_mid) < self.noise_edge
-                    or signal == "BUY_NO"
-                    or current_rsi > 80
-                )
+                and abs(fast_price - poly_mid) < self.noise_edge
             )
-            trend_lost = (
-                hold_sec >= self.min_hold_sec
-                and trend["trend"] != self.position_trend
-                and trend["age"] > 0.5
-            )
-            speed_slowdown = abs(trend["speed"]) < self.speed_floor and hold_sec >= self.min_hold_sec
+            reversal_confirmed = hold_sec >= self.min_hold_sec and self._is_reversal_confirmed(side=self.pnl.position_side or "YES", trend=trend)
+            trend_lost = reversal_confirmed
+            speed_slowdown = False
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
-            pnl_tp = unrealized >= self.target_profit_usd
-            pnl_sl = unrealized <= -self.stop_loss_usd
+            pnl_tp = hold_sec >= self.min_hold_sec and unrealized >= self.target_profit_usd
+            pnl_sl = hold_sec >= self.min_hold_sec and unrealized <= -self.stop_loss_usd
 
             side = self.pnl.position_side or "YES"
             if self._rsi_suppresses_soft_exit(side, current_rsi):
                 trend_lost = False
                 speed_slowdown = False
                 imbalance_flip = False
+                timeout_no_reaction = False
 
             rsi_overbought_exit = (
                 hold_sec >= self.min_hold_sec
                 and side == "YES"
                 and current_rsi >= upper_b
+                and reversal_confirmed
             )
             rsi_oversold_exit = (
                 hold_sec >= self.min_hold_sec
                 and side == "NO"
                 and current_rsi <= lower_b
+                and reversal_confirmed
             )
             rsi_slope_exit = (
                 self.rsi_slope_exit_enabled
@@ -382,6 +398,7 @@ class HFTEngine:
                     (side == "YES" and self._last_rsi_slope <= self.rsi_slope_yes_exit)
                     or (side == "NO" and self._last_rsi_slope >= self.rsi_slope_no_exit)
                 )
+                and reversal_confirmed
             )
 
             should_close = (
