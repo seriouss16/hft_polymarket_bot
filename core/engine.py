@@ -61,7 +61,7 @@ class HFTEngine:
         self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "10.0"))
         self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "90"))
         self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "10"))
-        self.rsi_band_vol_k = 0.12
+        self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K", "0.12"))
         self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.6"))
 
         # --- RSI Slope (Наклон) ---
@@ -149,7 +149,7 @@ class HFTEngine:
 
         # --- Вспомогательные состояния ---
         self.soft_exits_enabled = True
-        self.no_entry_guards = False # ВКЛЮЧАЕМ защиту (False значит guards активны)
+        self.no_entry_guards = os.getenv("HFT_NO_ENTRY_GUARDS", "0") == "1"
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
         self.trend_dir = "FLAT"

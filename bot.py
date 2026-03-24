@@ -2,7 +2,32 @@ import os
 import sys
 import asyncio
 import logging
+from pathlib import Path
 
+
+def _load_dotenv_if_present() -> None:
+    """Merge key=value lines from hft_bot/.env into os.environ (existing keys are not overwritten)."""
+    path = Path(__file__).resolve().parent / ".env"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_load_dotenv_if_present()
 
 _UVLOOP_ACTIVE = False
 
@@ -26,7 +51,6 @@ import traceback
 import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 # --- Форсируем вывод и отключаем мусор TF ---
 os.environ['PYTHONUNBUFFERED'] = '1'
