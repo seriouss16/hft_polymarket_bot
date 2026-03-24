@@ -48,8 +48,9 @@ async def main():
     # Отключаем GPU для предсказаний
     tf.config.set_visible_devices([], 'GPU')
 
-    # --- Запуск провайдеров быстрых цен (Coinbase as primary) ---
+    # --- Запуск провайдеров быстрых цен (Coinbase anchor + Binance lead) ---
     providers = [
+        FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update),
         FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
     ]
     for p in providers:
@@ -83,7 +84,7 @@ async def main():
 
             # 2. Получение данных
             fast_price = aggregator.get_weighted_price()
-            primary_data = aggregator.prices.get("coinbase")
+            primary_data = aggregator.get_primary_history()
             
             # 3. Инференс LSTM (раз в 1 секунду, чтобы не грузить CPU)
             if primary_data and now - last_lstm_time > 1.0:
@@ -96,10 +97,16 @@ async def main():
 
             # 4. Анализ и "Пульс"
             if fast_price and poly_book and poly_book.book['mid'] > 0:
+                aggregator.add_history(fast_price)
+                zscore = aggregator.get_zscore()
                 # Визуальный пульс в консоль
                 if now - last_pulse_time > PULSE_INTERVAL:
                     diff = fast_price - poly_book.book['mid']
-                    print(f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | Diff: {diff:+.2f} | Forecast: {forecast:.2f}", flush=True)
+                    print(
+                        f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
+                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | Forecast: {forecast:.2f}",
+                        flush=True,
+                    )
                     last_pulse_time = now
                 
                 # Попытка совершить сделку
@@ -107,7 +114,8 @@ async def main():
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
                     price_history=list(primary_data) if primary_data else [],
-                    lstm_forecast=forecast
+                    lstm_forecast=forecast,
+                    zscore=zscore,
                 )
             elif now - last_pulse_time > PULSE_INTERVAL:
                 logging.warning("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
