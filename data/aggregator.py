@@ -49,6 +49,22 @@ class FastPriceAggregator:
         """Backward-compatible alias for smart price."""
         return self.get_price()
 
+    def get_coinbase_price(self):
+        """Return last Coinbase ticker price or None if unset."""
+        c = self.data.get("coinbase")
+        if not c:
+            return None
+        p = float(c.get("price") or 0.0)
+        return p if p > 0.0 else None
+
+    def get_binance_price(self):
+        """Return last Binance book mid or None if unset."""
+        b = self.data.get("binance")
+        if not b:
+            return None
+        p = float(b.get("price") or 0.0)
+        return p if p > 0.0 else None
+
     def add_history(self, price):
         """Append a fast-price sample for z-score calculations."""
         if price is None:

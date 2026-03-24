@@ -38,6 +38,7 @@ async def main():
     # --- Конфигурация ---
     TEST_MODE = True
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
+    USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = 60  # Periodic stats report (seconds).
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0.02"))
@@ -106,7 +107,10 @@ async def main():
                     asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
-            fast_price = aggregator.get_weighted_price()
+            if USE_SMART_FAST:
+                fast_price = aggregator.get_weighted_price()
+            else:
+                fast_price = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             primary_data = aggregator.get_primary_history()
             
             # 3. Инференс LSTM (раз в 1 секунду, чтобы не грузить CPU)
@@ -119,7 +123,14 @@ async def main():
                 forecast = float(fast_price)
 
             # 4. Анализ и "Пульс"
-            if fast_price and poly_book and poly_book.book['mid'] > 0:
+            poly_btc = 0.0
+            if poly_book is not None:
+                poly_btc = float(
+                    poly_book.book.get("btc_oracle")
+                    or poly_book.book.get("mid")
+                    or 0.0
+                )
+            if fast_price and poly_book is not None and poly_btc > 0:
                 if current_token_id and now - last_book_pull_time >= CLOB_PULL_INTERVAL:
                     try:
                         ob = await asyncio.to_thread(live_exec.get_orderbook_snapshot, current_token_id, 5)
@@ -135,7 +146,6 @@ async def main():
                         if is_valid_book:
                             poly_book.book["ask"] = ob["best_ask"]
                             poly_book.book["bid"] = ob["best_bid"]
-                            poly_book.book["mid"] = (ob["best_bid"] + ob["best_ask"]) / 2.0
                             poly_book.book["ask_size_top"] = ob["ask_size_top"]
                             poly_book.book["bid_size_top"] = ob["bid_size_top"]
                     except Exception:
@@ -150,15 +160,20 @@ async def main():
                 trade_allowed = risk.can_trade(time.time(), equity)
                 # Визуальный пульс в консоль
                 if now - last_pulse_time > PULSE_INTERVAL:
-                    diff = fast_price - poly_book.book['mid']
+                    diff = fast_price - poly_btc
                     trend = engine.get_trend_state()
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     imbalance = bid_size / (bid_size + ask_size + 1e-9)
                     upnl = pnl.get_unrealized_pnl(poly_book.book)
                     rsi_st = engine.get_rsi_v5_state()
+                    cb_px = aggregator.get_coinbase_price()
+                    bn_px = aggregator.get_binance_price()
+                    cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
+                    bn_s = f"{bn_px:.2f}" if bn_px else "n/a"
                     print(
-                        f"DEBUG: Fast: {fast_price:.2f} | Poly: {poly_book.book['mid']:.2f} | "
+                        f"DEBUG: Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
+                        f"PolyRTDS: {poly_btc:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
                         f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
@@ -205,7 +220,7 @@ async def main():
                         }
                     )
                 if LIVE_MODE and current_token_id and live_risk.can_trade():
-                    live_signal = engine.generate_live_signal(fast_price, poly_book.book["mid"], zscore)
+                    live_signal = engine.generate_live_signal(fast_price, poly_btc, zscore)
                     if live_signal:
                         await live_exec.execute(live_signal, current_token_id)
             elif now - last_pulse_time > PULSE_INTERVAL:

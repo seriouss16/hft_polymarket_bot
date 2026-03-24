@@ -220,7 +220,11 @@ class HFTEngine:
         self._last_rsi_lower = lower_b
         self._last_rsi_slope = self._rsi_slope_per_tick()
 
-        poly_mid = poly_orderbook.get("mid", 0.0)
+        poly_mid = float(
+            poly_orderbook.get("btc_oracle")
+            or poly_orderbook.get("mid", 0.0)
+            or 0.0
+        )
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
         imbalance = bid_size / (bid_size + ask_size + 1e-9)

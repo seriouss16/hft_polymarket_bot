@@ -3,21 +3,33 @@ import time
 from typing import Optional
 
 
+def _yes_outcome_quotes_ok(yes_bid: float, yes_ask: float) -> bool:
+    """Return True when bid/ask look like YES token prices in (0, 1)."""
+    return (
+        0.0 < yes_bid < 1.0
+        and 0.0 < yes_ask <= 1.0
+        and yes_ask > yes_bid
+        and (yes_ask - yes_bid) < 0.45
+    )
+
+
 def mark_price_for_side(book: dict, side: Optional[str]) -> float:
     """Return outcome token mid for YES or NO from YES outcome order book."""
     yes_bid = float(book.get("bid") or 0.0)
     yes_ask = float(book.get("ask") or 0.0)
     if side == "YES":
-        mid = float(book.get("mid") or 0.0)
-        if mid > 0.0:
-            return mid
-        if yes_bid > 0.0 and yes_ask > yes_bid:
+        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
             return (yes_bid + yes_ask) / 2.0
+        m = float(book.get("mid") or 0.0)
+        if 0.0 < m < 1.0:
+            return m
         return 0.0
     if side == "NO":
-        no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
-        no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
-        return (no_bid + no_ask) / 2.0
+        if _yes_outcome_quotes_ok(yes_bid, yes_ask):
+            no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
+            no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
+            return (no_bid + no_ask) / 2.0
+        return 0.0
     return 0.0
 
 
