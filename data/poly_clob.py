@@ -59,5 +59,5 @@ class PolyOrderBook:
                                 self.book["bid_size_top"] = 1.0
             except Exception as e:
                 logging.error(f"❌ Poly RTDS Error: {e}")
-                delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0.2"))
+                delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0"))
                 await asyncio.sleep(delay)

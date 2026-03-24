@@ -41,6 +41,7 @@ async def main():
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = 60  # Periodic stats report (seconds).
+    # All intervals default to 0: no artificial throttling (set env >0 only to limit CPU/API load).
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
     MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
     CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0"))
@@ -314,10 +315,8 @@ async def main():
                 stats.show_report()
                 last_stats_time = now
 
-            if MAIN_LOOP_SLEEP > 0.0:
-                await asyncio.sleep(MAIN_LOOP_SLEEP)
-            else:
-                await asyncio.sleep(0)
+            # When MAIN_LOOP_SLEEP is 0, asyncio.sleep(0) only yields to the event loop (no wall delay).
+            await asyncio.sleep(MAIN_LOOP_SLEEP if MAIN_LOOP_SLEEP > 0.0 else 0.0)
 
     except KeyboardInterrupt:
         print("\n🛑 Остановка пользователем...")

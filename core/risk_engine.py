@@ -12,7 +12,7 @@ class RiskEngine:
 
     max_drawdown_pct: float = 0.10
     max_position_pct: float = 0.10
-    loss_cooldown_sec: float = 10.0
+    loss_cooldown_sec: float = 0.0
     peak_equity: float = 0.0
     cooldown_until: float = 0.0
 

@@ -79,8 +79,12 @@ class PnLTracker:
         self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE", "0.001"))
         self.last_realized_pnl = 0.0
         self.last_close_ts = 0.0
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
 
-    def log_trade(self, side, price, amount_usd=100.0):
+    def log_trade(self, side, price, amount_usd=None):
+        """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
+        if amount_usd is None:
+            amount_usd = self.trade_amount_usd
         if side in ("BUY", "BUY_YES", "BUY_NO", "BUY_UP", "BUY_DOWN"):
             if self.balance < amount_usd:
                 return None

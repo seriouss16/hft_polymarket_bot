@@ -12,23 +12,23 @@ class HFTEngine:
     def __init__(self, pnl_tracker, is_test_mode=True):
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
-        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "3.0"))
-        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "7.5"))
-        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "7.5"))
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "4.5"))
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "10.0"))
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "10.0"))
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.0"))
         self.last_trade_time = 0.0
-        self.max_position = 100.0
-        self.trade_amount_usd = 100.0
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.5"))
-        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "12.0"))
-        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0025"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0030"))
+        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "120.0"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.2"))
+        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "14.0"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0028"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0035"))
         self.entry_poly_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
         self.position_trend = "FLAT"
-        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "3.5"))
-        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.2"))
+        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "4.2"))
+        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.8"))
         self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.035"))
         self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.022"))
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.15"))
@@ -49,7 +49,7 @@ class HFTEngine:
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE", "85"))
         self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE", "15"))
         self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD", "0.5"))
-        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "10.0"))
+        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "15.0"))
         self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "85"))
         self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "15"))
         self.rsi_band_vol_k = 0.08
@@ -60,20 +60,43 @@ class HFTEngine:
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
-        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "2.5"))
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "4.0"))
         self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "1.8"))
+        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "13.0"))
+        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT", "0.9"))
+        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.5"))
+        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.5"))
+        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "3.0"))
+        self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "40.0"))
+        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "120.0"))
+        self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE", "0.01"))
+        self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD", "30.0"))
+        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.7"))
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
         self.imbalance_exit_yes_floor = float(os.getenv("HFT_IMBALANCE_EXIT_YES_FLOOR", "0.35"))
         self.imbalance_exit_no_ceiling = float(os.getenv("HFT_IMBALANCE_EXIT_NO_CEILING", "0.65"))
         self.rsi_range_hold_yes_floor = float(os.getenv("HFT_RSI_RANGE_HOLD_YES_FLOOR", "40.0"))
         self.rsi_range_hold_no_ceiling = float(os.getenv("HFT_RSI_RANGE_HOLD_NO_CEILING", "60.0"))
-        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.002"))
+        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0030"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0005"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "999"))
         self.soft_exits_enabled = os.getenv("HFT_SOFT_EXITS_ENABLED", "0") == "1"
         self._prev_yes_mid = None
         self._prev_no_mid = None
         self._book_stall_ticks = 0
+
+    def _calc_dynamic_amount(self, exec_price: float) -> float:
+        """Size notional USD so a 0.01 token move risks roughly a fixed USD amount."""
+        px = float(exec_price)
+        if px < self.dynamic_min_exec_price:
+            return self.dynamic_floor_notional_usd
+        tick = 0.01
+        shares = self.dynamic_risk_per_tick_usd / tick
+        amount = shares * px
+        return min(
+            self.dynamic_amount_max_usd,
+            max(self.dynamic_amount_min_usd, amount),
+        )
 
     def get_last_rsi(self):
         """Return RSI of the last tick (fast price series)."""
@@ -210,6 +233,8 @@ class HFTEngine:
         price_history,
         recent_pnl=0.0,
         latency_ms=0.0,
+        yes_mid=0.0,
+        no_mid=0.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
         buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
@@ -220,21 +245,36 @@ class HFTEngine:
         if abs(edge) < self.noise_edge:
             return None
         depth = self.trend_depth
+        dm = self.entry_depth_mult
         if (
             trend == "UP"
             and age >= self.entry_confirm_age
-            and depth >= buy_edge_dyn
+            and depth >= buy_edge_dyn * dm
             and edge >= buy_edge_dyn
             and speed >= self.speed_floor
+            and speed >= self.entry_up_speed_min
         ):
+            if (
+                yes_mid > 0.0
+                and (yes_mid < 0.15 or yes_mid > 0.85)
+                and abs(edge) < self.entry_extreme_min_edge
+            ):
+                return None
             return "BUY_UP"
         if (
             trend == "DOWN"
             and age >= self.entry_confirm_age
-            and depth >= sell_edge_dyn
+            and depth >= sell_edge_dyn * dm
             and edge <= -sell_edge_dyn
             and speed <= -self.speed_floor
+            and speed <= self.entry_down_speed_max
         ):
+            if (
+                no_mid > 0.0
+                and (no_mid < 0.15 or no_mid > 0.85)
+                and abs(edge) < self.entry_extreme_min_edge
+            ):
+                return None
             return "BUY_DOWN"
         return None
 
@@ -302,6 +342,8 @@ class HFTEngine:
             price_history,
             recent_pnl=recent_pnl,
             latency_ms=latency_ms,
+            yes_mid=0.0,
+            no_mid=0.0,
         )
 
     def get_trend_state(self):
@@ -367,20 +409,6 @@ class HFTEngine:
         else:
             imbalance = bid_size / (bid_size + ask_size + 1e-9)
 
-        self.update_trend(fast_price, poly_mid)
-        trend = self.get_trend_state()
-        signal = None
-        if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
-            signal = self._entry_candidate_from_state(
-                trend["edge"],
-                trend["age"],
-                trend["trend"],
-                trend["speed"],
-                price_history,
-                recent_pnl=recent_pnl,
-                latency_ms=latency_ms,
-            )
-
         yes_ask = float(poly_orderbook["ask"])
         yes_bid = float(poly_orderbook["bid"])
         yes_mid = (yes_bid + yes_ask) * 0.5
@@ -393,6 +421,22 @@ class HFTEngine:
             no_ask = max(0.01, min(0.99, 1.0 - yes_bid))
             no_bid = max(0.01, min(0.99, 1.0 - yes_ask))
         no_mid = (no_bid + no_ask) * 0.5
+
+        self.update_trend(fast_price, poly_mid)
+        trend = self.get_trend_state()
+        signal = None
+        if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
+            signal = self._entry_candidate_from_state(
+                trend["edge"],
+                trend["age"],
+                trend["trend"],
+                trend["speed"],
+                price_history,
+                recent_pnl=recent_pnl,
+                latency_ms=latency_ms,
+                yes_mid=yes_mid,
+                no_mid=no_mid,
+            )
 
         if self.pnl.inventory == 0:
             abs_move_yes, aligned_yes = self._book_move_for_outcome(yes_mid, "_prev_yes_mid", want_up=True)
@@ -415,7 +459,7 @@ class HFTEngine:
             and book_entry_yes
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_UP", yes_ask)
+            open_event = await self.execute("BUY_UP", yes_ask, self._calc_dynamic_amount(yes_ask))
             self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
@@ -455,7 +499,7 @@ class HFTEngine:
             and book_entry_no
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_DOWN", no_ask)
+            open_event = await self.execute("BUY_DOWN", no_ask, self._calc_dynamic_amount(no_ask))
             self.last_trade_time = time.time()
             self.entry_poly_mid = poly_mid
             self.entry_fast_price = fast_price
@@ -542,6 +586,11 @@ class HFTEngine:
                 side in ("UP", "YES")
                 and current_rsi > self.rsi_range_hold_yes_floor
                 and unrealized < tp_line
+            ):
+                rsi_out_of_bounds = False
+            if (
+                rsi_out_of_bounds
+                and unrealized < self.target_profit_usd * self.rsi_range_exit_profit_frac
             ):
                 rsi_out_of_bounds = False
 
@@ -674,6 +723,8 @@ class HFTEngine:
                 self._prev_no_mid = None
                 return result
 
-    async def execute(self, side, price):
-        """Execute simulated trade."""
-        return self.pnl.log_trade(side, price, self.trade_amount_usd)
+    async def execute(self, side, price, amount_usd=None):
+        """Execute simulated trade with optional notional override."""
+        if amount_usd is None:
+            amount_usd = self.trade_amount_usd
+        return self.pnl.log_trade(side, price, amount_usd)
