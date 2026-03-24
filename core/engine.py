@@ -5,122 +5,106 @@ import os
 from collections import deque
 
 from ml.indicators import compute_rsi, dynamic_rsi_bands
-
-class HFTEngine:
-    """Signal, risk, and execution engine for Polymarket latency strategy."""
-
-    def __init__(self, pnl_tracker, is_test_mode=True):
+def __init__(self, pnl_tracker, is_test_mode=True):
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
-        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "4.5"))
-        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "10.0"))
-        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "10.0"))
-        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.0"))
+        
+        # --- Базовый Edge (в пунктах цены) ---
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "0.5"))   # Игнорим шум менее 0.5 пункта
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "2.0"))      # Вход при разнице > 2.0
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "2.0"))
+        
+        # --- Тайминги и объемы ---
+        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.1"))
         self.last_trade_time = 0.0
-        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "90.0"))
-        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.5"))
-        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "16.0"))
+        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "100.0"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "50.0"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "1.0"))
+        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
+        
+        # --- Тейки и Стопы (в пунктах и USD) ---
         self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0040"))
-        self.entry_poly_mid = None
-        self.entry_fast_price = None
-        self.entry_time = 0.0
-        self.position_trend = "FLAT"
-        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "4.2"))
-        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "2.8"))
-        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.042"))
-        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.018"))
-        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.15"))
-        self.edge_window = deque(maxlen=120)
-        self.last_edge_sign = 0
-        self.trend_dir = "FLAT"
-        self.trend_since_ts = 0.0
-        self.trend_depth = 0.0
-        self.entry_context = {}
-        self._last_rsi = 50.0
-        self.rsi_hold_yes_floor = 40.0
-        self.rsi_hold_no_ceiling = 60.0
-        self.rsi_entry_yes_low = float(os.getenv("HFT_RSI_ENTRY_YES_LOW", "32.0"))
-        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "85.0"))
-        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "15.0"))
-        self.rsi_entry_no_high = float(os.getenv("HFT_RSI_ENTRY_NO_HIGH", "68.0"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
+        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "2.5"))
+        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "1.5"))
+        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.05"))
+        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.02"))
+
+        # --- RSI логика ---
         self.rsi_period = 14
+        self._last_rsi = 50.0
+        self.rsi_entry_yes_low = float(os.getenv("HFT_RSI_ENTRY_YES_LOW", "20.0"))
+        self.rsi_entry_yes_high = float(os.getenv("HFT_RSI_ENTRY_YES_HIGH", "80.0"))
+        self.rsi_entry_no_low = float(os.getenv("HFT_RSI_ENTRY_NO_LOW", "20.0"))
+        self.rsi_entry_no_high = float(os.getenv("HFT_RSI_ENTRY_NO_HIGH", "80.0"))
+        
+        # Выходы по RSI
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE", "85"))
         self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE", "15"))
-        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD", "0.5"))
-        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "15.0"))
-        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "85"))
-        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "15"))
-        self.rsi_band_vol_k = 0.08
-        self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "0") == "1"
-        self.rsi_slope_yes_exit = -2.5
-        self.rsi_slope_no_exit = 2.5
+        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD", "0.3"))
+        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "10.0"))
+        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "90"))
+        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "10"))
+        self.rsi_band_vol_k = 0.12
+        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.6"))
+
+        # --- RSI Slope (Наклон) ---
+        self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "1") == "1"
+        self.rsi_slope_yes_exit = -2.0 # Выходим из YES если RSI резко падает
+        self.rsi_slope_no_exit = 2.0  # Выходим из NO если RSI резко растет
         self._rsi_tick_history = deque(maxlen=10)
-        self._last_rsi_upper = 70.0
-        self._last_rsi_lower = 30.0
-        self._last_rsi_slope = 0.0
-        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "5.0"))
-        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "1.8"))
-        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "15.0"))
-        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW", "0.20"))
-        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH", "0.80"))
-        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT", "0.9"))
-        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.5"))
-        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.5"))
-        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "2.0"))
-        self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "40.0"))
-        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "90.0"))
-        self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE", "0.01"))
-        self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD", "30.0"))
-        self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW", "0.20"))
-        self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE", "0.70"))
-        self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
-        self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
-        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.7"))
-        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.20"))
-        self.imbalance_exit_yes_floor = float(os.getenv("HFT_IMBALANCE_EXIT_YES_FLOOR", "0.35"))
-        self.imbalance_exit_no_ceiling = float(os.getenv("HFT_IMBALANCE_EXIT_NO_CEILING", "0.65"))
-        self.rsi_range_hold_yes_floor = float(os.getenv("HFT_RSI_RANGE_HOLD_YES_FLOOR", "40.0"))
-        self.rsi_range_hold_no_ceiling = float(os.getenv("HFT_RSI_RANGE_HOLD_NO_CEILING", "60.0"))
-        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0030"))
-        self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0005"))
-        self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "999"))
-        self.soft_exits_enabled = False
-        self._prev_yes_mid = None
-        self._prev_no_mid = None
-        self._book_stall_ticks = 0
-        self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT", "2.0"))
-        self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT", "3.0"))
-        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "0.35"))
-        self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.0"))
-        self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE", "12.0"))
-        self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD", "0.03"))
+        
+        # --- Подтверждение входа (Entry Confirm) ---
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.1"))
+        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.2"))
+        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "5.0"))
+        
+        # --- Скорость и Акселерация ---
+        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
         self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "1") == "1"
-        self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN", "0.15"))
-        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "0") == "1"
-        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "3"))
-        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "500.0"))
-        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.5"))
-        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
-        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT", "2.0"))
-        self.entry_cex_imbalance_enabled = os.getenv("HFT_ENTRY_CEX_IMBALANCE_ENABLED", "0") == "1"
-        self.cex_imbalance_up_min = float(os.getenv("HFT_CEX_IMBALANCE_UP_MIN", "0.55"))
-        self.cex_imbalance_down_max = float(os.getenv("HFT_CEX_IMBALANCE_DOWN_MAX", "0.45"))
-        self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED", "0") == "1"
+        self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN", "0.10"))
+        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.15"))
+
+        # --- Динамический объем (Risk Management) ---
+        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "5.0"))
+        self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "20.0"))
+        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "100.0"))
+        self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW", "0.30"))
+        self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE", "0.70"))
+
+        # --- Стакан (Orderbook) и Ликвидность ---
+        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0001"))
+        self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
+        self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "30"))
+        self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.015")) # Не входим если спред > 1.5%
+
+        # --- Задержка (Latency Guard) ---
+        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "600.0"))
+        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
+        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
+
+        # --- Z-Score (Статистический вход) ---
+        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "5"))
+
+        # --- CEX Дисбаланс (Coinbase/Binance) ---
+        self.entry_cex_imbalance_enabled = os.getenv("HFT_ENTRY_CEX_IMBALANCE_ENABLED", "1") == "1"
+        self.cex_imbalance_up_min = float(os.getenv("HFT_CEX_IMBALANCE_UP_MIN", "0.60"))
+        self.cex_imbalance_down_max = float(os.getenv("HFT_CEX_IMBALANCE_DOWN_MAX", "0.40"))
+
+        # --- Вспомогательные состояния ---
+        self.soft_exits_enabled = True
+        self.no_entry_guards = False # ВКЛЮЧАЕМ защиту (False значит guards активны)
+        self.edge_window = deque(maxlen=120)
         self._speed_samples = deque(maxlen=12)
         self._zscore_samples = deque(maxlen=12)
-        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "400.0"))
-        self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC", "2.0"))
-        self.entry_rsi_slope_filter_enabled = os.getenv(
-            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "1"
-        ) == "1"
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "30.0"))
-        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "70.0"))
-        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
-        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
-        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
+        self.position_trend = "FLAT"
+        self.entry_context = {}
+
+        
+    def _hold_met(self, hold_sec: float) -> bool:
+        """Return True when min-hold delay does not apply or is satisfied."""
+        return self.min_hold_sec <= 0.0 or hold_sec >= self.min_hold_sec
 
     def _calc_dynamic_amount(self, exec_price: float) -> float:
         """Size notional USD conservatively: cheap tokens use smaller $, mid via risk-per-tick."""
@@ -238,7 +222,8 @@ class HFTEngine:
         arr = np.array(price_history[-50:], dtype=np.float64)
         vol = float(np.std(arr))
         pnl_penalty = 1.15 if recent_pnl < 0 else 1.0
-        edge = max(2.0, min(20.0, vol * 0.6 * pnl_penalty))
+        lo = 0.0 if self.no_entry_guards else 2.0
+        edge = max(lo, min(20.0, vol * 0.6 * pnl_penalty))
         edge *= float(extra_mult)
         return edge, edge
 
@@ -284,6 +269,8 @@ class HFTEngine:
 
     def _latency_expiry_edge_multiplier(self, latency_ms: float, seconds_to_expiry: float | None) -> float:
         """Raise required edge when latency is high or the market slot is near expiry."""
+        if self.no_entry_guards:
+            return 1.0
         m = 1.0
         if latency_ms > self.latency_high_ms:
             m *= self.latency_high_edge_mult
@@ -676,12 +663,15 @@ class HFTEngine:
         chop_latency_ok = self.entry_latency_allows_entry(
             latency_ms
         ) and self.entry_trend_flip_settled_ok(trend["age"])
-        spread_gate = (
-            spread_gate_legacy
-            and liquidity_ok
-            and entry_context_ok
-            and chop_latency_ok
-        )
+        if self.no_entry_guards:
+            spread_gate = True
+        else:
+            spread_gate = (
+                spread_gate_legacy
+                and liquidity_ok
+                and entry_context_ok
+                and chop_latency_ok
+            )
         signal = None
         if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
             signal = self._entry_candidate_from_state(
@@ -721,9 +711,16 @@ class HFTEngine:
             book_entry_no = False
 
         strong_rsi = self._is_strong_oracle_edge(edge_now)
-        if self.entry_rsi_slope_filter_enabled:
+        if self.no_entry_guards:
+            rsi_ok_up = True
+            rsi_ok_down = True
+            book_ok_yes = True
+            book_ok_no = True
+        elif self.entry_rsi_slope_filter_enabled:
             rsi_ok_up = strong_rsi or self.entry_rsi_slope_allows("UP", current_rsi)
             rsi_ok_down = strong_rsi or self.entry_rsi_slope_allows("DOWN", current_rsi)
+            book_ok_yes = book_entry_yes or strong_rsi
+            book_ok_no = book_entry_no or strong_rsi
         else:
             rsi_ok_up = strong_rsi or (
                 self.rsi_entry_yes_low < current_rsi < self.rsi_entry_yes_high
@@ -731,8 +728,8 @@ class HFTEngine:
             rsi_ok_down = strong_rsi or (
                 self.rsi_entry_no_low < current_rsi < self.rsi_entry_no_high
             )
-        book_ok_yes = book_entry_yes or strong_rsi
-        book_ok_no = book_entry_no or strong_rsi
+            book_ok_yes = book_entry_yes or strong_rsi
+            book_ok_no = book_entry_no or strong_rsi
 
         if (
             signal == "BUY_UP"
@@ -824,19 +821,20 @@ class HFTEngine:
                 poly_move = (poly_mid - self.entry_poly_mid) / self.entry_poly_mid
 
             if self.pnl.position_side in ("DOWN", "NO"):
-                reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_take_profit_move
-                protective_stop = hold_sec >= self.min_hold_sec and poly_move >= self.poly_stop_move
+                reaction_confirmed = self._hold_met(hold_sec) and poly_move <= -self.poly_take_profit_move
+                protective_stop = self._hold_met(hold_sec) and poly_move >= self.poly_stop_move
             else:
-                reaction_confirmed = hold_sec >= self.min_hold_sec and poly_move >= self.poly_take_profit_move
-                protective_stop = hold_sec >= self.min_hold_sec and poly_move <= -self.poly_stop_move
+                reaction_confirmed = self._hold_met(hold_sec) and poly_move >= self.poly_take_profit_move
+                protective_stop = self._hold_met(hold_sec) and poly_move <= -self.poly_stop_move
             timeout_no_reaction = (
-                hold_sec >= self.reaction_timeout_sec
+                self.reaction_timeout_sec > 0.0
+                and hold_sec >= self.reaction_timeout_sec
                 and abs(fast_price - poly_mid) < self.noise_edge
             )
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             tp_line, sl_line = self._pnl_target_and_stop_lines()
-            pnl_tp = hold_sec >= self.min_hold_sec and unrealized >= tp_line
-            pnl_sl = hold_sec >= self.min_hold_sec and unrealized <= -sl_line
+            pnl_tp = self._hold_met(hold_sec) and unrealized >= tp_line
+            pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
 
             should_close = (
                 reaction_confirmed

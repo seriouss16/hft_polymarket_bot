@@ -5,6 +5,8 @@ import logging
 import traceback
 import time
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 # --- Форсируем вывод и отключаем мусор TF ---
 os.environ['PYTHONUNBUFFERED'] = '1'
@@ -27,20 +29,40 @@ from ml.model import AsyncLSTMPredictor
 from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+def _setup_logging() -> None:
+    """Configure stdout logging and rotating file log (5 MiB, 3 backups)."""
+    log_dir = Path(os.getenv("HFT_LOG_DIR", str(Path(__file__).resolve().parent / "reports" / "logs")))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / os.getenv("HFT_LOG_BASENAME", "bot.log")
+    fmt = "%(asctime)s | %(levelname)s | %(message)s"
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.handlers.clear()
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(logging.Formatter(fmt))
+    root.addHandler(sh)
+    max_bytes = int(os.getenv("HFT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+    backups = int(os.getenv("HFT_LOG_BACKUP_COUNT", "3"))
+    fh = RotatingFileHandler(
+        log_path,
+        maxBytes=max_bytes,
+        backupCount=backups,
+        encoding="utf-8",
+    )
+    fh.setFormatter(logging.Formatter(fmt))
+    root.addHandler(fh)
+
+
+_setup_logging()
 
 async def main():
     # --- Конфигурация ---
+    BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     TEST_MODE = True
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
-    STATS_INTERVAL = 60  # Periodic stats report (seconds).
+    STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "0"))
     # All intervals default to 0: no artificial throttling (set env >0 only to limit CPU/API load).
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
     MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
@@ -60,12 +82,12 @@ async def main():
         funder=os.getenv("FUNDER"),
         test_mode=not LIVE_MODE,
         min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
-        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "0.10")),
+        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "1.0")),
     )
-    live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-50")))
+    live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-1e12")))
     risk = RiskEngine(
-        max_drawdown_pct=float(os.getenv("MAX_DRAWDOWN_PCT", "0.12")),
-        max_position_pct=float(os.getenv("MAX_POSITION_PCT", "0.10")),
+        max_drawdown_pct=float(os.getenv("MAX_DRAWDOWN_PCT", "0.99")),
+        max_position_pct=float(os.getenv("MAX_POSITION_PCT", "1.0")),
         loss_cooldown_sec=float(os.getenv("LOSS_COOLDOWN_SEC", "0")),
     )
     journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
@@ -208,7 +230,7 @@ async def main():
                     zscore=zscore,
                     latency_ms=latency_ms,
                     recent_pnl=pnl.last_realized_pnl,
-                    meta_enabled=trade_allowed,
+                    meta_enabled=trade_allowed or BYPASS_META_GATE,
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                 )
                 if PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
@@ -311,8 +333,8 @@ async def main():
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
 
-            # 5. Вывод статистики
-            if now - last_stats_time > STATS_INTERVAL:
+            # 5. Вывод статистики (STATS_INTERVAL_SEC<=0 отключает периодический отчёт).
+            if STATS_INTERVAL > 0.0 and (now - last_stats_time > STATS_INTERVAL):
                 stats.show_report()
                 last_stats_time = now
 
