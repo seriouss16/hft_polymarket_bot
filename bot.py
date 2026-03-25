@@ -5,9 +5,8 @@ import logging
 from pathlib import Path
 
 
-def _load_dotenv_if_present() -> None:
-    """Merge key=value lines from hft_bot/.env into os.environ (existing keys are not overwritten)."""
-    path = Path(__file__).resolve().parent / ".env"
+def _load_env_file(path: Path, overwrite: bool = False) -> None:
+    """Merge key=value pairs from path into process environment."""
     if not path.is_file():
         return
     try:
@@ -23,11 +22,20 @@ def _load_dotenv_if_present() -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         val = val.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if not key:
+            continue
+        if overwrite or key not in os.environ:
             os.environ[key] = val
 
 
-_load_dotenv_if_present()
+def _load_runtime_env() -> None:
+    """Load layered runtime configuration files."""
+    root = Path(__file__).resolve().parent
+    _load_env_file(root / "config" / "runtime.env", overwrite=False)
+    _load_env_file(root / ".env", overwrite=True)
+
+
+_load_runtime_env()
 
 _UVLOOP_ACTIVE = False
 
