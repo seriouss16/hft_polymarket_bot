@@ -215,6 +215,7 @@ class HFTEngine:
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
+        self._last_entry_cap_deny_log_ts = 0.0
         self._init_entry_profiles()
 
     _PROFILE_ATTRS = (
@@ -532,6 +533,7 @@ class HFTEngine:
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
+        self._last_entry_cap_deny_log_ts = 0.0
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -1039,11 +1041,10 @@ class HFTEngine:
         liquidity_ok = self.entry_liquidity_spread_ok(
             spread_up, spread_down, edge_now, trend["trend"]
         )
-        entry_context_ok = (
-            self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
-            and self.entry_zscore_trend_ok(trend["trend"])
-            and self.entry_cex_bid_imbalance_ok(trend["trend"], cex_bid_imbalance)
-        )
+        speed_ok = self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
+        z_ok = self.entry_zscore_trend_ok(trend["trend"])
+        cex_ok = self.entry_cex_bid_imbalance_ok(trend["trend"], cex_bid_imbalance)
+        entry_context_ok = speed_ok and z_ok and cex_ok
         chop_latency_ok = (
             self.entry_latency_allows_entry(latency_ms)
             and self.entry_skew_allows_entry(skew_ms)
@@ -1099,13 +1100,21 @@ class HFTEngine:
                 ):
                     logging.info(
                         "Entry blocked by spread_gate: signal=%s stale=%.0fms skew=%.0fms "
-                        "lat_ok=%s skew_ok=%s flip_age_ok=%s",
+                        "spread_legacy=%s liq=%s speed_z_cex=%s/%s/%s chop_lat_skew_flip=%s/%s/%s "
+                        "edge_jump=%s agr_age=%s",
                         signal,
                         latency_ms,
                         skew_ms,
+                        spread_gate_legacy,
+                        liquidity_ok,
+                        speed_ok,
+                        z_ok,
+                        cex_ok,
                         self.entry_latency_allows_entry(latency_ms),
                         self.entry_skew_allows_entry(skew_ms),
                         self.entry_trend_flip_settled_ok(trend["age"]),
+                        edge_jump_ok,
+                        aggressive_age_ok,
                     )
                     self._last_feed_gate_log_ts = _now
 
@@ -1160,6 +1169,35 @@ class HFTEngine:
             ) or rsi_agg_bypass
             book_ok_up = book_entry_up or strong_rsi or aggressive_edge
             book_ok_down = book_entry_down or strong_rsi or aggressive_edge
+
+        _t_cap = time.time()
+        _cap_log_sec = float(os.getenv("HFT_ENTRY_CAP_DENY_LOG_SEC", "20.0"))
+        if (
+            self.pnl.inventory == 0
+            and signal == "BUY_UP"
+            and not self._entry_outcome_price_allows("UP", up_ask, down_ask)
+            and _cap_log_sec > 0.0
+            and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
+        ):
+            logging.info(
+                "Entry blocked: BUY_UP up_ask=%.4f above HFT_ENTRY_MAX_ASK_UP=%.4f.",
+                up_ask,
+                self.entry_max_ask_up_cap,
+            )
+            self._last_entry_cap_deny_log_ts = _t_cap
+        if (
+            self.pnl.inventory == 0
+            and signal == "BUY_DOWN"
+            and not self._entry_outcome_price_allows("DOWN", up_ask, down_ask)
+            and _cap_log_sec > 0.0
+            and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
+        ):
+            logging.info(
+                "Entry blocked: BUY_DOWN down_ask=%.4f above HFT_ENTRY_MAX_ASK_DOWN=%.4f.",
+                down_ask,
+                self.entry_max_ask_down_cap,
+            )
+            self._last_entry_cap_deny_log_ts = _t_cap
 
         if (
             signal == "BUY_UP"

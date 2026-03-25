@@ -369,6 +369,17 @@ async def main():
                             (_nw_t3 - _nw_t2) * 1000.0,
                         )
 
+                # Re-read fast anchor after CLOB awaits; feeds advance while the event loop is in thread/network work.
+                _fp_before_refresh = fast_price
+                if USE_SMART_FAST:
+                    fast_price = aggregator.get_weighted_price()
+                else:
+                    fast_price = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
+                if fast_price is None:
+                    fast_price = _fp_before_refresh
+                if fast_price and (forecast <= 0 or abs(forecast - fast_price) > 0.2 * fast_price):
+                    forecast = float(fast_price)
+
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
                 _ft = aggregator.feed_timing(float(poly_book.book.get("ts", 0.0)))
