@@ -59,7 +59,7 @@ class PolyOrderBook:
                                 self.book["ask"] = min(0.99, ym + half_spread)
                                 self.book["bid"] = max(0.01, ym - half_spread)
                             # Local monotonic receive time (same clock as aggregator WS handlers).
-                            self.book["ts"] = asyncio.get_event_loop().time()
+                            self.book["ts"] = asyncio.get_running_loop().time()
                             # RTDS does not provide depth; keep synthetic top sizes for imbalance logic.
                             if float(self.book.get("ask_size_top") or 0.0) <= 0.0:
                                 self.book["ask_size_top"] = 1.0

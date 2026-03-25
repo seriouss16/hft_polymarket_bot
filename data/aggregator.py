@@ -118,7 +118,8 @@ class FastPriceAggregator:
         Timestamps on feeds are ``asyncio`` loop time when each message was handled locally
         (not exchange wall time). ``staleness_ms`` is max age of the slowest leg; use it for
         gates. ``skew_ms`` is (coinbase_recv - poly_recv) in ms: who was updated last; sign is
-        not NTP skew by itself.
+        not NTP skew by itself. Raw ages clamp to 0 ms when negative (future timestamps vs
+        ``now_loop``), which usually means mixed clocks if it happens often.
         """
         if now_loop is None:
             now_loop = asyncio.get_running_loop().time()

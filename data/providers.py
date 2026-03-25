@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from typing import Any
 
 import websockets
 
@@ -53,8 +54,11 @@ class FastExchangeProvider:
                                 price = float(data['price'])
                         
                         if price:
-                            ts = asyncio.get_running_loop().time()
-                            self.update_callback(self.name, price, ts)
+                            self.update_callback(
+                                self.name,
+                                price,
+                                asyncio.get_running_loop().time(),
+                            )
                             
             except Exception as e:
                 logging.error(f"❌ [{self.name}] Ошибка: {e}")

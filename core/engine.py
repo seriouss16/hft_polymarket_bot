@@ -32,9 +32,9 @@ class HFTEngine:
         self.is_test_mode = is_test_mode
         
         # --- Базовый Edge (в пунктах цены) ---
-        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "1.0"))   # Игнорим шум менее 0.5 пункта
-        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "3.0"))      # Вход при разнице > 2.0
-        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "6.0"))
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "0.8"))   # Уменьшаем порог шума для более чувствительного входа
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "2.5"))      # Уменьшаем порог входа для большего количества сигналов
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "5.0"))  # Уменьшаем порог выхода
         
         # --- Тайминги и объемы ---
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.05"))
