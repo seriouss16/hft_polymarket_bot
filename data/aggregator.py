@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import os
 from collections import deque
 from typing import Any
 
@@ -48,7 +49,12 @@ class FastPriceAggregator:
         self.prices[exchange].append(price)
 
     def get_price(self):
-        """Return smart hybrid price: Coinbase anchor + capped Binance lead."""
+        """Return smart hybrid price: Coinbase anchor plus optional Binance lead blend.
+
+        When ``HFT_SMART_CB_BN_BASELINE_USD`` > 0, blend uses excess drift (drift minus baseline)
+        so a typical USDT/USD offset does not constantly pull the anchor. Otherwise the legacy
+        rule applies: blend when absolute raw drift exceeds ``HFT_SMART_DRIFT_THRESHOLD_USD``.
+        """
         c = self.data.get("coinbase")
         b = self.data.get("binance")
         if not c or c["price"] <= 0:
@@ -56,14 +62,24 @@ class FastPriceAggregator:
                 return b["price"]
             return None
 
-        c_price = c["price"]
+        c_price = float(c["price"])
         if not b or b["price"] <= 0:
             return c_price
 
-        drift = b["price"] - c_price
-        if abs(drift) > 5.0:
-            return c_price + drift * 0.4
-        return c_price
+        drift = float(b["price"]) - c_price
+        blend = max(0.0, min(1.0, float(os.getenv("HFT_SMART_BINANCE_BLEND", "0.7"))))
+        baseline = float(os.getenv("HFT_SMART_CB_BN_BASELINE_USD", "0"))
+        thresh = float(os.getenv("HFT_SMART_DRIFT_THRESHOLD_USD", "20.0"))
+        excess_th = float(os.getenv("HFT_SMART_EXCESS_THRESHOLD_USD", "5.0"))
+
+        if baseline > 0.0:
+            excess = drift - baseline
+            if abs(excess) <= excess_th:
+                return c_price
+            return c_price + excess * blend
+        if abs(drift) <= thresh:
+            return c_price
+        return c_price + drift * blend
 
     def get_weighted_price(self):
         """Backward-compatible alias for smart price."""

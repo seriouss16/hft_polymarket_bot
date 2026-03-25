@@ -195,6 +195,12 @@ class HFTEngine:
 
         # --- Anti-spoof: reject one-tick CEX spikes vs lagging Poly oracle. ---
         self.entry_max_edge_jump_pts = float(os.getenv("HFT_ENTRY_MAX_EDGE_JUMP_PTS", "8.0"))
+        self.entry_edge_jump_bypass_abs_speed = float(
+            os.getenv("HFT_ENTRY_EDGE_JUMP_BYPASS_ABS_SPEED", "0")
+        )
+        self.entry_zscore_bypass_abs_speed = float(
+            os.getenv("HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED", "0")
+        )
         self.entry_aggressive_min_trend_age_sec = float(
             os.getenv("HFT_AGGRESSIVE_MIN_TREND_AGE_SEC", "0.0")
         )
@@ -297,6 +303,17 @@ class HFTEngine:
     def get_active_profile(self) -> str:
         """Return the last applied entry profile name."""
         return str(self._active_profile)
+
+    def _regime_allows_new_entries(self) -> bool:
+        """Return True when rolling PnL regime allows new entries (optional soft_flow bypass)."""
+        if os.getenv("HFT_REGIME_FILTER_ENABLED", "1") == "0":
+            return True
+        if (
+            os.getenv("HFT_REGIME_BYPASS_SOFT_FLOW", "0") == "1"
+            and self.get_active_profile() == "soft_flow"
+        ):
+            return True
+        return bool(self.pnl.is_good_regime())
 
     def _display_strategy_name(self) -> str:
         """Return log label for who initiated the trade: phase_router -> latency or soft."""
@@ -611,8 +628,17 @@ class HFTEngine:
             return True
         return abs(float(skew_ms)) <= self.entry_max_skew_ms
 
-    def entry_edge_jump_ok(self, edge_now: float) -> bool:
-        """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly)."""
+    def entry_edge_jump_ok(self, edge_now: float, edge_speed: float = 0.0) -> bool:
+        """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly).
+
+        When ``HFT_ENTRY_EDGE_JUMP_BYPASS_ABS_SPEED`` > 0 and ``abs(edge_speed)`` meets or
+        exceeds it, allow the jump so entries are not blocked during sharp moves.
+        """
+        if (
+            self.entry_edge_jump_bypass_abs_speed > 0.0
+            and abs(float(edge_speed)) >= self.entry_edge_jump_bypass_abs_speed
+        ):
+            return True
         if self.entry_max_edge_jump_pts <= 0.0:
             return True
         if len(self.edge_window) < 2:
@@ -682,8 +708,17 @@ class HFTEngine:
             return acc <= -self.entry_accel_min
         return True
 
-    def entry_zscore_trend_ok(self, trend_dir: str) -> bool:
-        """Require z-score to move monotonically with the intended side for several ticks."""
+    def entry_zscore_trend_ok(self, trend_dir: str, edge_speed: float = 0.0) -> bool:
+        """Require z-score to move monotonically with the intended side for several ticks.
+
+        When ``HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED`` > 0 and ``abs(edge_speed)`` meets or exceeds
+        it, skip the monotonic z-score requirement so fast price breaks are not delayed.
+        """
+        if (
+            self.entry_zscore_bypass_abs_speed > 0.0
+            and abs(float(edge_speed)) >= self.entry_zscore_bypass_abs_speed
+        ):
+            return True
         if not self.entry_zscore_trend_enabled:
             return True
         k = max(2, self.entry_zscore_strict_ticks)
@@ -730,7 +765,7 @@ class HFTEngine:
         edge_mult: float,
     ):
         """Secondary entry path: momentum + monotone z-score + acceleration without full trend age."""
-        if not self.pnl.is_good_regime():
+        if not self._regime_allows_new_entries():
             return None
         if not self.entry_momentum_alt_enabled:
             return None
@@ -769,7 +804,7 @@ class HFTEngine:
         edge_mult=1.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
-        if not self.pnl.is_good_regime():
+        if not self._regime_allows_new_entries():
             return None
         buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
             price_history=price_history,
@@ -975,12 +1010,14 @@ class HFTEngine:
             return
         _ = lstm_forecast
 
-        if self.pnl.inventory == 0 and not self.pnl.is_good_regime():
+        if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
             _now = time.time()
             _regime_log_sec = float(os.getenv("HFT_REGIME_SKIP_LOG_MIN_SEC", "15.0"))
             if _regime_log_sec <= 0.0 or _now - self._last_regime_skip_log_ts >= _regime_log_sec:
                 logging.info(
-                    "Regime filter: recent performance is bad -> skip all entries"
+                    "Regime filter: recent performance is bad -> skip all entries "
+                    "(set HFT_REGIME_BYPASS_SOFT_FLOW=1 to allow soft_flow despite bad streak, "
+                    "or HFT_REGIME_FILTER_ENABLED=0 to disable)."
                 )
                 self._last_regime_skip_log_ts = _now
             return None
@@ -1050,7 +1087,7 @@ class HFTEngine:
             and self.entry_skew_allows_entry(skew_ms)
             and self.entry_trend_flip_settled_ok(trend["age"])
         )
-        edge_jump_ok = self.entry_edge_jump_ok(edge_now)
+        edge_jump_ok = self.entry_edge_jump_ok(edge_now, trend["speed"])
         aggressive_age_ok = self.entry_aggressive_trend_age_ok(edge_now, trend["age"])
         if self.no_entry_guards:
             spread_gate = True

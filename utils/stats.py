@@ -51,7 +51,7 @@ class StatsCollector:
         report.append("=" * 45 + "\n")
 
         text = "\n".join(report)
-        print(text, flush=True)
+        logging.info(text)
         logging.info(
             "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s",
             self.pnl.balance,
