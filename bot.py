@@ -80,9 +80,10 @@ def _setup_logging() -> None:
     log_path = log_dir / os.getenv("HFT_LOG_BASENAME", "bot.log")
     fmt = "%(asctime)s | %(levelname)s | %(message)s"
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG)
     root.handlers.clear()
     sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
     sh.setFormatter(logging.Formatter(fmt))
     root.addHandler(sh)
     max_bytes = int(os.getenv("HFT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
@@ -93,6 +94,7 @@ def _setup_logging() -> None:
         backupCount=backups,
         encoding="utf-8",
     )
+    fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(fmt))
     root.addHandler(fh)
 
@@ -378,8 +380,9 @@ async def main():
                         book_focus = f"DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
                     else:
                         book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
-                    print(
-                        f"DEBUG: Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
+                    
+                    logging.info(
+                        f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
                         f"PolyRTDS: {poly_btc:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
@@ -393,7 +396,6 @@ async def main():
                         f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Forecast: {forecast:.2f}",
-                        flush=True,
                     )
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
