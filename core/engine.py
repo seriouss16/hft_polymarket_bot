@@ -297,6 +297,20 @@ class HFTEngine:
         """Return the last applied entry profile name."""
         return str(self._active_profile)
 
+    def _display_strategy_name(self) -> str:
+        """Return log label for who initiated the trade: phase_router -> latency or soft."""
+        if self._strategy_label != "phase_router":
+            return self._strategy_label
+        return "soft" if self.get_active_profile() == "soft_flow" else "latency"
+
+    def _strategy_name_for_sim_log(self, side: str) -> str:
+        """SIM log tag: open uses current profile label; close uses entry attribution."""
+        if side == "SELL" and self.entry_context:
+            sn = self.entry_context.get("strategy_name")
+            if sn:
+                return str(sn)
+        return self._display_strategy_name()
+
     def max_entry_latency_ms_all_profiles(self) -> float:
         """Return the largest entry_max_latency_ms across profiles for feed warnings."""
         lat = self._profile_snapshots["latency"]["entry_max_latency_ms"]
@@ -1159,43 +1173,52 @@ class HFTEngine:
             and slot_entry_ok
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_UP", up_ask, self._calc_dynamic_amount(up_ask))
-            self.last_trade_time = time.time()
-            self.entry_poly_mid = poly_mid
-            self.entry_fast_price = fast_price
-            self.entry_time = time.time()
-            self.position_trend = trend["trend"]
-            self.entry_context = {
-                "entry_edge": fast_price - poly_mid,
-                "entry_trend": trend["trend"],
-                "entry_speed": trend["speed"],
-                "entry_depth": trend["depth"],
-                "entry_imbalance": imbalance,
-                "latency_ms": latency_ms,
-                "skew_ms": float(skew_ms),
-                "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
-                "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
-                "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
-                "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                "entry_up_bid": up_bid,
-                "entry_up_ask": up_ask,
-                "entry_down_bid": down_bid,
-                "entry_down_ask": down_ask,
-                "strategy_name": self._strategy_label,
-                "entry_profile": self.get_active_profile(),
-            }
-            logging.info(
-                "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
-                "strategy=%s profile=%s",
-                poly_mid,
-                fast_price,
-                fast_price - poly_mid,
-                self.position_trend,
-                imbalance,
-                self._strategy_label,
-                self.get_active_profile(),
-            )
-            return {"event": "OPEN", "side": "UP", "trade": open_event}
+            _notional_up = self._calc_dynamic_amount(up_ask)
+            open_event = await self.execute("BUY_UP", up_ask, _notional_up)
+            if not open_event:
+                logging.warning(
+                    "SIM BUY_UP skipped: no fill (balance=%.2f notional=%.2f ask=%.4f).",
+                    float(self.pnl.balance),
+                    float(_notional_up),
+                    float(up_ask),
+                )
+            else:
+                self.last_trade_time = time.time()
+                self.entry_poly_mid = poly_mid
+                self.entry_fast_price = fast_price
+                self.entry_time = time.time()
+                self.position_trend = trend["trend"]
+                self.entry_context = {
+                    "entry_edge": fast_price - poly_mid,
+                    "entry_trend": trend["trend"],
+                    "entry_speed": trend["speed"],
+                    "entry_depth": trend["depth"],
+                    "entry_imbalance": imbalance,
+                    "latency_ms": latency_ms,
+                    "skew_ms": float(skew_ms),
+                    "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                    "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                    "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                    "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                    "entry_up_bid": up_bid,
+                    "entry_up_ask": up_ask,
+                    "entry_down_bid": down_bid,
+                    "entry_down_ask": down_ask,
+                    "strategy_name": self._display_strategy_name(),
+                    "entry_profile": self.get_active_profile(),
+                }
+                logging.info(
+                    "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
+                    "strategy=%s profile=%s",
+                    poly_mid,
+                    fast_price,
+                    fast_price - poly_mid,
+                    self.position_trend,
+                    imbalance,
+                    self._display_strategy_name(),
+                    self.get_active_profile(),
+                )
+                return {"event": "OPEN", "side": "UP", "trade": open_event}
 
         if (
             signal == "BUY_DOWN"
@@ -1209,43 +1232,52 @@ class HFTEngine:
             and slot_entry_ok
             and meta_enabled
         ):
-            open_event = await self.execute("BUY_DOWN", down_ask, self._calc_dynamic_amount(down_ask))
-            self.last_trade_time = time.time()
-            self.entry_poly_mid = poly_mid
-            self.entry_fast_price = fast_price
-            self.entry_time = time.time()
-            self.position_trend = trend["trend"]
-            self.entry_context = {
-                "entry_edge": fast_price - poly_mid,
-                "entry_trend": trend["trend"],
-                "entry_speed": trend["speed"],
-                "entry_depth": trend["depth"],
-                "entry_imbalance": imbalance,
-                "latency_ms": latency_ms,
-                "skew_ms": float(skew_ms),
-                "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
-                "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
-                "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
-                "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                "entry_up_bid": up_bid,
-                "entry_up_ask": up_ask,
-                "entry_down_bid": down_bid,
-                "entry_down_ask": down_ask,
-                "strategy_name": self._strategy_label,
-                "entry_profile": self.get_active_profile(),
-            }
-            logging.info(
-                "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
-                "strategy=%s profile=%s",
-                poly_mid,
-                fast_price,
-                fast_price - poly_mid,
-                self.position_trend,
-                imbalance,
-                self._strategy_label,
-                self.get_active_profile(),
-            )
-            return {"event": "OPEN", "side": "DOWN", "trade": open_event}
+            _notional_dn = self._calc_dynamic_amount(down_ask)
+            open_event = await self.execute("BUY_DOWN", down_ask, _notional_dn)
+            if not open_event:
+                logging.warning(
+                    "SIM BUY_DOWN skipped: no fill (balance=%.2f notional=%.2f ask=%.4f).",
+                    float(self.pnl.balance),
+                    float(_notional_dn),
+                    float(down_ask),
+                )
+            else:
+                self.last_trade_time = time.time()
+                self.entry_poly_mid = poly_mid
+                self.entry_fast_price = fast_price
+                self.entry_time = time.time()
+                self.position_trend = trend["trend"]
+                self.entry_context = {
+                    "entry_edge": fast_price - poly_mid,
+                    "entry_trend": trend["trend"],
+                    "entry_speed": trend["speed"],
+                    "entry_depth": trend["depth"],
+                    "entry_imbalance": imbalance,
+                    "latency_ms": latency_ms,
+                    "skew_ms": float(skew_ms),
+                    "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                    "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                    "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                    "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                    "entry_up_bid": up_bid,
+                    "entry_up_ask": up_ask,
+                    "entry_down_bid": down_bid,
+                    "entry_down_ask": down_ask,
+                    "strategy_name": self._display_strategy_name(),
+                    "entry_profile": self.get_active_profile(),
+                }
+                logging.info(
+                    "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
+                    "strategy=%s profile=%s",
+                    poly_mid,
+                    fast_price,
+                    fast_price - poly_mid,
+                    self.position_trend,
+                    imbalance,
+                    self._display_strategy_name(),
+                    self.get_active_profile(),
+                )
+                return {"event": "OPEN", "side": "DOWN", "trade": open_event}
 
         if self.pnl.inventory > 0:
             now = time.time()
@@ -1433,7 +1465,7 @@ class HFTEngine:
         """Build attribution key from entry context and engine label."""
         if not self.entry_context:
             return None
-        name = str(self.entry_context.get("strategy_name") or self._strategy_label)
+        name = str(self.entry_context.get("strategy_name") or self._display_strategy_name())
         prof = str(self.entry_context.get("entry_profile") or self.get_active_profile())
         return f"{name}:{prof}"
 
@@ -1444,14 +1476,34 @@ class HFTEngine:
         perf_key = None
         if side == "SELL":
             perf_key = self._build_performance_key()
-        return self.pnl.log_trade(
-            side,
-            price,
-            amount_usd,
-            settlement_fill=settlement_fill,
-            performance_key=perf_key,
-            strategy_name=self._strategy_label,
-        )
+        try:
+            sn = self._strategy_name_for_sim_log(side)
+        except Exception:
+            logging.exception("HFT: strategy name for SIM log failed; using raw label.")
+            sn = self._strategy_label
+        try:
+            return self.pnl.log_trade(
+                side,
+                price,
+                amount_usd,
+                settlement_fill=settlement_fill,
+                performance_key=perf_key,
+                strategy_name=sn,
+            )
+        except TypeError as err:
+            if "strategy_name" not in str(err) and "unexpected keyword" not in str(err):
+                raise
+            logging.warning(
+                "HFT: log_trade has no strategy_name= (old executor); retrying without it: %s",
+                err,
+            )
+            return self.pnl.log_trade(
+                side,
+                price,
+                amount_usd,
+                settlement_fill=settlement_fill,
+                performance_key=perf_key,
+            )
 
 
 LegacyLatencyEngine = HFTEngine

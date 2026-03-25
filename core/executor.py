@@ -118,7 +118,7 @@ class PnLTracker:
     ):
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted.
 
-        For SELL, performance_key (e.g. phase_router:soft_flow) attributes realized PnL to a bucket.
+        For SELL, performance_key (e.g. latency:latency or soft:soft_flow) attributes realized PnL to a bucket.
         Optional strategy_name labels SIM logs for attribution.
         """
         if amount_usd is None:
