@@ -610,8 +610,8 @@ class HFTEngine:
             and speed >= self.speed_floor
             and up_speed_ok
         ):
-            if len(self.edge_window) >= 4:
-                last_edges = [e for _, e in list(self.edge_window)[-4:]]
+            if len(self.edge_window) >= 3:
+                last_edges = [e for _, e in list(self.edge_window)[-3:]]
                 if not all(e > 0 for e in last_edges):
                     return None
             return "BUY_UP"
@@ -629,8 +629,8 @@ class HFTEngine:
             and speed_ok_down
             and down_speed_ok
         ):
-            if len(self.edge_window) >= 4:
-                last_edges = [e for _, e in list(self.edge_window)[-4:]]
+            if len(self.edge_window) >= 3:
+                last_edges = [e for _, e in list(self.edge_window)[-3:]]
                 if not all(e < 0 for e in last_edges):
                     return None
             return "BUY_DOWN"
@@ -990,6 +990,56 @@ class HFTEngine:
             poly_move = 0.0
             if self.entry_poly_mid and self.entry_poly_mid > 0:
                 poly_move = (poly_mid - self.entry_poly_mid) / self.entry_poly_mid
+
+            if seconds_to_expiry is not None and seconds_to_expiry < 45:
+                logging.warning(
+                    "Slot expiry close: seconds_to_expiry=%.1f -> force close at 0.99/0.01",
+                    float(seconds_to_expiry),
+                )
+                exit_price = 0.01 if self.pnl.position_side == "DOWN" else 0.99
+                pos_side = self.pnl.position_side or "UP"
+                close_event = await self.execute("SELL", exit_price)
+                ce = close_event or {}
+                result = {
+                    "event": "CLOSE",
+                    "reason": "EXPIRY_FORCE_CLOSE",
+                    "entry_edge": self.entry_context.get("entry_edge", 0.0),
+                    "exit_edge": fast_price - poly_mid,
+                    "duration_sec": hold_sec,
+                    "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
+                    "entry_speed": self.entry_context.get("entry_speed", 0.0),
+                    "entry_depth": self.entry_context.get("entry_depth", 0.0),
+                    "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
+                    "latency_ms": self.entry_context.get("latency_ms", 0.0),
+                    "pnl": float(ce.get("pnl") or 0.0),
+                    "side": pos_side,
+                    "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
+                    "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
+                    "exit_book_px": float(ce.get("book_px") or exit_price),
+                    "exit_exec_px": float(ce.get("exec_px") or 0.0),
+                    "shares_bought": self.entry_context.get("shares_bought", 0.0),
+                    "shares_sold": float(ce.get("shares_sold") or 0.0),
+                    "cost_usd": self.entry_context.get("cost_usd", 0.0),
+                    "proceeds_usd": float(ce.get("proceeds_usd") or 0.0),
+                    "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
+                    "entry_up_bid": self.entry_context.get("entry_up_bid"),
+                    "entry_up_ask": self.entry_context.get("entry_up_ask"),
+                    "entry_down_bid": self.entry_context.get("entry_down_bid"),
+                    "entry_down_ask": self.entry_context.get("entry_down_ask"),
+                    "exit_up_bid": up_bid,
+                    "exit_up_ask": up_ask,
+                    "exit_down_bid": down_bid,
+                    "exit_down_ask": down_ask,
+                }
+                self.entry_poly_mid = None
+                self.entry_fast_price = None
+                self.entry_time = 0.0
+                self.position_trend = "FLAT"
+                self.entry_context = {}
+                self._book_stall_ticks = 0
+                self._prev_up_mid = None
+                self._prev_down_mid = None
+                return result
 
             if self.pnl.position_side == "DOWN":
                 reaction_confirmed = self._hold_met(hold_sec) and poly_move <= -self.poly_take_profit_move
