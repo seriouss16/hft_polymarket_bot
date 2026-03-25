@@ -174,6 +174,7 @@ async def main():
     last_book_pull_time = 0
     forecast = 0.0
     last_slot_check_time = 0.0
+    last_slot_ts: int | None = None
     last_skew_warn_time = 0.0
     last_high_latency_warn_time = 0.0
 
@@ -190,12 +191,21 @@ async def main():
         while True:
             now = asyncio.get_event_loop().time()
             
-            # 1. Авто-переключение слота (без фиксированной паузы: чаще = быстрее реакция на новый рынок).
+            # 1. Авто-переключение слота.
+            # React immediately when UTC time crosses an exact 5m boundary.
             slot_poll = SLOT_POLL_SEC if SLOT_POLL_SEC > 0.0 else MIN_SLOT_POLL_SEC
             slot_poll = max(slot_poll, MIN_SLOT_POLL_SEC)
-            if (now - last_slot_check_time) >= slot_poll:
+            current_slot_ts = selector.get_current_slot_timestamp()
+            slot_boundary_crossed = last_slot_ts is not None and current_slot_ts != last_slot_ts
+            should_check_slot = slot_boundary_crossed or (now - last_slot_check_time) >= slot_poll
+            if should_check_slot:
                 last_slot_check_time = now
-                ts = selector.get_current_slot_timestamp()
+                ts = current_slot_ts
+                if last_slot_ts is None:
+                    last_slot_ts = ts
+                elif slot_boundary_crossed:
+                    logging.info("🕒 Новый 5m-слот: UTC boundary ts=%s.", ts)
+                    last_slot_ts = ts
                 slug = selector.format_slug(ts)
                 current_slug = slug
                 up_id, down_id, question = await selector.fetch_up_down_token_ids(slug)
