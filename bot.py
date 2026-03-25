@@ -213,7 +213,17 @@ async def main():
     try:
         while True:
             now = asyncio.get_event_loop().time()
-            
+
+            # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
+            if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
+                stats.show_report()
+                logging.info(
+                    "Intermediate stats (STATS_INTERVAL_SEC=%s, loop.now=%.3f).",
+                    STATS_INTERVAL,
+                    now,
+                )
+                last_stats_time = now
+
             # 1. Авто-переключение слота.
             # React immediately when UTC time crosses an exact 5m boundary.
             slot_poll = SLOT_POLL_SEC if SLOT_POLL_SEC > 0.0 else MIN_SLOT_POLL_SEC
@@ -535,12 +545,6 @@ async def main():
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
-
-            # 5. Промежуточный отчёт (STATS_INTERVAL_SEC<=0 отключает).
-            if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
-                stats.show_report()
-                logging.info("Intermediate stats report (STATS_INTERVAL_SEC=%s).", STATS_INTERVAL)
-                last_stats_time = now
 
             # When MAIN_LOOP_SLEEP is 0, asyncio.sleep(0) only yields to the event loop (no wall delay).
             await asyncio.sleep(MAIN_LOOP_SLEEP if MAIN_LOOP_SLEEP > 0.0 else 0.0)

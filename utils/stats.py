@@ -50,7 +50,17 @@ class StatsCollector:
             report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
         report.append("=" * 45 + "\n")
 
-        logging.info("\n".join(report))
+        text = "\n".join(report)
+        print(text, flush=True)
+        logging.info(
+            "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s",
+            self.pnl.balance,
+            self.pnl.total_pnl,
+            self.pnl.trades_count,
+            win_rate,
+            self.pnl.max_drawdown * 100.0,
+            "yes" if self.pnl.inventory > 0 else "no",
+        )
 
     def _journal_aggregates(self, journal_path: Path | None):
         """Return (rows_n, pnl_csv_sum, exit_reason_counts) from journal CSV if present."""
