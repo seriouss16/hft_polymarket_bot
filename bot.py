@@ -242,6 +242,15 @@ async def main():
                         pnl.reset_strategy_performance()
                     if poly_connect_task is not None and not poly_connect_task.done():
                         poly_connect_task.cancel()
+                        try:
+                            await poly_connect_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            logging.debug(
+                                "Poly RTDS task ended after market switch cancel: %s",
+                                exc,
+                            )
                     poly_book = PolyOrderBook(symbol="bitcoin")
                     poly_connect_task = asyncio.create_task(poly_book.connect())
 
