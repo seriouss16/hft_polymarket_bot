@@ -137,8 +137,8 @@ class HFTEngine:
         self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
         self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
 
-        self.deposit_usd = float(os.getenv("HFT_DEPOSIT_USD", "1000.0"))
-        self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT", "0"))
+        self.deposit_usd = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
+        self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT", "10"))
         self.fixed_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
 
         # --- Стакан (Orderbook) и Ликвидность ---
@@ -221,20 +221,15 @@ class HFTEngine:
         return hold_sec >= req
 
     def _deposit_trade_notional(self) -> float:
-        """Return target notional USD from deposit, optional percent, and 10% hard cap."""
+        """Return target trade USD from fixed size and optional percent sizing."""
         dep = max(0.0, self.deposit_usd)
-        ten_pct = dep * 0.10
         fixed = max(0.0, self.fixed_trade_usd)
         pct = self.trade_pct_of_deposit
         if pct <= 0.0:
-            n = fixed
-        else:
-            raw = dep * (pct / 100.0)
-            if raw < ten_pct:
-                n = fixed
-            else:
-                n = min(raw, ten_pct)
-        return max(0.0, min(n, ten_pct, dep))
+            return min(fixed, dep)
+        pct_amount = dep * (pct / 100.0)
+        chosen = max(fixed, pct_amount)
+        return max(0.0, min(chosen, dep))
 
     def _tier_dynamic_amount(self, exec_price: float) -> float:
         """Compute notional from price tier and risk-per-tick before deposit cap."""

@@ -67,7 +67,7 @@ class PnLTracker:
         if initial_balance is not None:
             self.initial_balance = float(initial_balance)
         else:
-            self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "1000.0"))
+            self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
         self.balance = self.initial_balance
         self.inventory = 0.0
         self.entry_price = 0.0
