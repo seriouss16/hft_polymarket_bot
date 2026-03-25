@@ -69,7 +69,7 @@ print(">>> Инициализация HFT системы...", flush=True)
 # Импорты после настройки окружения
 import tensorflow as tf
 from core.selector import MarketSelector
-from core.executor import PnLTracker
+from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.risk_engine import RiskEngine
 from core.strategies import LatencyArbitrageStrategy
@@ -367,7 +367,11 @@ async def main():
                         float(_ft["poly_age_ms"]),
                     )
                     last_skew_warn_time = now
-                equity = pnl.balance + pnl.get_unrealized_pnl(poly_book.book)
+                mark_px = mark_price_for_side(poly_book.book, pnl.position_side)
+                if pnl.inventory > 0 and mark_px > 0.0:
+                    equity = pnl.balance + (pnl.inventory * mark_px)
+                else:
+                    equity = pnl.balance
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
 
