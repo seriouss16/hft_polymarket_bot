@@ -72,7 +72,7 @@ from core.selector import MarketSelector
 from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.risk_engine import RiskEngine
-from core.strategies import LatencyArbitrageStrategy
+from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
@@ -145,7 +145,12 @@ async def main():
     stats = StatsCollector(pnl)
     strategy_hub = StrategyHub()
     strategy_hub.register(LatencyArbitrageStrategy(pnl, is_test_mode=TEST_MODE))
-    default_strategy = os.getenv("HFT_ACTIVE_STRATEGY", "latency_arbitrage")
+    if os.getenv("HFT_ENABLE_PHASE_ROUTING", "0") == "1":
+        strategy_hub.register(PhaseRouterStrategy(pnl, is_test_mode=TEST_MODE))
+    default_strategy = os.getenv(
+        "HFT_ACTIVE_STRATEGY",
+        "phase_router" if os.getenv("HFT_ENABLE_PHASE_ROUTING", "0") == "1" else "latency_arbitrage",
+    )
     if default_strategy in strategy_hub.list_strategies():
         strategy_hub.set_active(default_strategy)
     strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES", "0") == "1")
@@ -389,6 +394,15 @@ async def main():
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
                     trend = strategy_hub.get_trend_state()
+                    profile_suffix = ""
+                    if os.getenv("HFT_LOG_MARKET_PROFILE", "0") == "1":
+                        _gp = getattr(
+                            strategy_hub.get_active_strategy(),
+                            "get_active_profile",
+                            None,
+                        )
+                        if callable(_gp):
+                            profile_suffix = f" | Profile: {_gp()}"
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
@@ -431,7 +445,7 @@ async def main():
                         f"poly {float(_ft['poly_age_ms']):.0f} "
                         f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
-                        f"Forecast: {forecast:.2f}",
+                        f"Forecast: {forecast:.2f}{profile_suffix}",
                     )
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":

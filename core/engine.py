@@ -204,6 +204,93 @@ class HFTEngine:
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
         self.entry_context = {}
+        self._init_entry_profiles()
+
+    _PROFILE_ATTRS = (
+        "noise_edge",
+        "buy_edge",
+        "sell_edge",
+        "entry_confirm_age",
+        "reversal_confirm_age",
+        "entry_confirm_age_strong",
+        "strong_edge_rsi_mult",
+        "aggressive_edge_mult",
+        "entry_momentum_alt_enabled",
+        "entry_max_edge_jump_pts",
+        "entry_max_latency_ms",
+        "speed_floor",
+        "entry_low_speed_abs",
+        "entry_low_speed_edge_mult",
+        "entry_aggressive_min_trend_age_sec",
+        "rsi_allow_bypass_on_aggressive_edge",
+    )
+
+    def _capture_profile_tuple(self) -> dict[str, float | bool]:
+        """Return a copy of entry-related parameters for profile switching."""
+        out: dict[str, float | bool] = {}
+        for name in self._PROFILE_ATTRS:
+            out[name] = getattr(self, name)
+        return out
+
+    def _build_soft_flow_profile(self, latency_base: dict[str, float | bool]) -> dict[str, float | bool]:
+        """Build soft-flow profile from HFT_SOFT_* env with calmer defaults than latency."""
+        sell_abs = os.getenv("HFT_SELL_EDGE_ABS", "5.0")
+        soft: dict[str, float | bool] = dict(latency_base)
+        soft["noise_edge"] = float(os.getenv("HFT_SOFT_NOISE_EDGE", "1.2"))
+        soft["buy_edge"] = float(os.getenv("HFT_SOFT_BUY_EDGE", "4.0"))
+        soft["sell_edge"] = -float(os.getenv("HFT_SOFT_SELL_EDGE_ABS", sell_abs))
+        soft["entry_confirm_age"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_SEC", "1.0"))
+        soft["reversal_confirm_age"] = float(
+            os.getenv("HFT_SOFT_REVERSAL_CONFIRM_AGE_SEC", str(latency_base["reversal_confirm_age"]))
+        )
+        soft["entry_confirm_age_strong"] = float(
+            os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "2.0")
+        )
+        soft["strong_edge_rsi_mult"] = float(os.getenv("HFT_SOFT_STRONG_EDGE_RSI_MULT", "2.5"))
+        soft["aggressive_edge_mult"] = float(os.getenv("HFT_SOFT_AGGRESSIVE_EDGE_MULT", "8.0"))
+        soft["entry_momentum_alt_enabled"] = (
+            os.getenv("HFT_SOFT_ENTRY_MOMENTUM_ALT_ENABLED", "0") == "1"
+        )
+        soft["entry_max_edge_jump_pts"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_EDGE_JUMP_PTS", "4.0"))
+        soft["entry_max_latency_ms"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_LATENCY_MS", "900.0"))
+        soft["speed_floor"] = float(os.getenv("HFT_SOFT_SPEED_FLOOR", str(latency_base["speed_floor"])))
+        soft["entry_low_speed_abs"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_ABS", "0.5"))
+        soft["entry_low_speed_edge_mult"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_EDGE_MULT", "1.5"))
+        soft["entry_aggressive_min_trend_age_sec"] = float(
+            os.getenv("HFT_SOFT_ENTRY_AGGRESSIVE_MIN_TREND_AGE_SEC", "1.0")
+        )
+        soft["rsi_allow_bypass_on_aggressive_edge"] = (
+            os.getenv("HFT_SOFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "0") == "1"
+        )
+        return soft
+
+    def _init_entry_profiles(self) -> None:
+        """Snapshot latency parameters and build soft-flow profile for apply_profile()."""
+        latency = self._capture_profile_tuple()
+        self._profile_snapshots = {
+            "latency": latency,
+            "soft_flow": self._build_soft_flow_profile(latency),
+        }
+        self._active_profile = "latency"
+
+    def apply_profile(self, name: str) -> None:
+        """Apply a named parameter snapshot (latency or soft_flow) to this engine."""
+        snap = self._profile_snapshots.get(name)
+        if not snap:
+            return
+        for key, val in snap.items():
+            setattr(self, key, val)
+        self._active_profile = str(name)
+
+    def get_active_profile(self) -> str:
+        """Return the last applied entry profile name."""
+        return str(self._active_profile)
+
+    def max_entry_latency_ms_all_profiles(self) -> float:
+        """Return the largest entry_max_latency_ms across profiles for feed warnings."""
+        lat = self._profile_snapshots["latency"]["entry_max_latency_ms"]
+        soft = self._profile_snapshots["soft_flow"]["entry_max_latency_ms"]
+        return max(float(lat), float(soft))
 
     def _entry_ask_allows_open(self, ask_px: float) -> bool:
         """Return False when best ask is at or above max entry price (no buys at 99¢+)."""
@@ -376,6 +463,7 @@ class HFTEngine:
         self._book_stall_ticks = 0
         self._speed_samples.clear()
         self._zscore_samples.clear()
+        self.apply_profile("latency")
 
     def _position_notional_usd(self):
         """Return absolute position notional in USD for percent-based TP/SL."""
