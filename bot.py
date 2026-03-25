@@ -50,7 +50,6 @@ _install_uvloop_policy()
 import traceback
 import time
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
 
 # --- Форсируем вывод и отключаем мусор TF ---
 os.environ['PYTHONUNBUFFERED'] = '1'
@@ -74,10 +73,23 @@ from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
 def _setup_logging() -> None:
-    """Configure stdout logging and rotating file log (5 MiB, 3 backups)."""
+    """Configure stdout logging and per-run file logs with retention."""
     log_dir = Path(os.getenv("HFT_LOG_DIR", str(Path(__file__).resolve().parent / "reports" / "logs")))
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / os.getenv("HFT_LOG_BASENAME", "bot.log")
+    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES", "5"))
+    start_tag = datetime.now().strftime("%d%m%y_%H%M%S")
+    log_basename = f"bot_{start_tag}.log"
+    log_path = log_dir / log_basename
+    existing = sorted(
+        log_dir.glob("bot_*.log"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    while len(existing) >= keep_files:
+        old = existing.pop(0)
+        try:
+            old.unlink()
+        except OSError:
+            break
     fmt = "%(asctime)s | %(levelname)s | %(message)s"
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
@@ -86,17 +98,11 @@ def _setup_logging() -> None:
     sh.setLevel(logging.INFO)
     sh.setFormatter(logging.Formatter(fmt))
     root.addHandler(sh)
-    max_bytes = int(os.getenv("HFT_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
-    backups = int(os.getenv("HFT_LOG_BACKUP_COUNT", "3"))
-    fh = RotatingFileHandler(
-        log_path,
-        maxBytes=max_bytes,
-        backupCount=backups,
-        encoding="utf-8",
-    )
+    fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(fmt))
     root.addHandler(fh)
+    logging.info("File logging initialized: %s (retention=%s)", log_path.name, keep_files)
 
 
 _setup_logging()
@@ -486,7 +492,15 @@ async def main():
         if poly_connect_task is not None:
             _bg.append(poly_connect_task)
         if _bg:
-            await asyncio.gather(*_bg, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*_bg, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logging.warning(
+                    "Shutdown timeout while cancelling background tasks; exiting anyway."
+                )
         try:
             stats.show_final_report(
                 journal_path=journal.path,

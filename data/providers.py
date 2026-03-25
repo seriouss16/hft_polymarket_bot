@@ -60,6 +60,9 @@ class FastExchangeProvider:
                                 asyncio.get_running_loop().time(),
                             )
                             
+            except asyncio.CancelledError:
+                logging.info("🛑 [%s] WebSocket task cancelled; stopping provider.", self.name)
+                raise
             except Exception as e:
                 logging.error(f"❌ [{self.name}] Ошибка: {e}")
                 delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0"))

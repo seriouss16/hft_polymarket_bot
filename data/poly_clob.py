@@ -65,6 +65,9 @@ class PolyOrderBook:
                                 self.book["ask_size_top"] = 1.0
                             if float(self.book.get("bid_size_top") or 0.0) <= 0.0:
                                 self.book["bid_size_top"] = 1.0
+            except asyncio.CancelledError:
+                logging.info("🛑 Poly RTDS task cancelled; stopping feed.")
+                raise
             except Exception as e:
                 logging.error(f"❌ Poly RTDS Error: {e}")
                 delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0"))
