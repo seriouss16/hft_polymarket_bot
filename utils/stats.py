@@ -1,6 +1,8 @@
 import csv
 import logging
+import time
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 
@@ -9,26 +11,36 @@ class StatsCollector:
 
     def __init__(self, pnl_tracker):
         self.pnl = pnl_tracker
+        self.started_ts = time.time()
 
     def show_report(self):
         """Print compact PnL summary to stdout (legacy block format)."""
+        now_ts = time.time()
         win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
         roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
+        cooldown_until = float(getattr(self.pnl, "regime_cooldown_until", 0.0) or 0.0)
+        started_at = datetime.fromtimestamp(self.started_ts).isoformat(timespec="seconds")
+        report_at = datetime.fromtimestamp(now_ts).isoformat(timespec="seconds")
+        uptime_min = (now_ts - self.started_ts) / 60.0
 
         report = [
             "\n" + "=" * 45,
             f"📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ (HFT SIM)",
             "=" * 45,
+            f"🕒 Старт сессии:      {started_at}",
+            f"🧾 Время отчета:      {report_at}",
+            f"⏱️ Аптайм:            {uptime_min:>10.1f} min",
             f"💰 Текущий баланс:    {self.pnl.balance:>10.2f} USD",
             f"📈 Чистая прибыль:    {self.pnl.total_pnl:>10.2f} USD ({roi:+.2f}%)",
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
             f"🎯 Процент побед:     {win_rate:>10.1f}%",
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
             f"📦 В позиции:         {'ДА' if self.pnl.inventory > 0 else 'НЕТ'}",
+            f"⏸️ Regime cooldown:   {cooldown_until:>10.0f} (unix ts)",
             "=" * 45 + "\n",
         ]
 
-        print("\n".join(report))
+        logging.info("\n".join(report))
 
     def _journal_aggregates(self, journal_path: Path | None):
         """Return (rows_n, pnl_csv_sum, exit_reason_counts) from journal CSV if present."""
@@ -55,9 +67,13 @@ class StatsCollector:
     def show_final_report(self, journal_path=None, shutdown_reason: str = "shutdown"):
         """Print full session summary with a tabular report and optional journal breakdown."""
         self.show_report()
+        now_ts = time.time()
         win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
         roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
         losses = self.pnl.trades_count - self.pnl.wins
+        started_at = datetime.fromtimestamp(self.started_ts).isoformat(timespec="seconds")
+        report_at = datetime.fromtimestamp(now_ts).isoformat(timespec="seconds")
+        uptime_min = (now_ts - self.started_ts) / 60.0
 
         jp = Path(journal_path) if journal_path else None
         j_rows, j_pnl, j_reasons = self._journal_aggregates(jp)
@@ -76,6 +92,9 @@ class StatsCollector:
             row("Итоговая таблица (сессия)", ""),
             sep,
             row("Причина завершения", shutdown_reason),
+            row("Старт сессии", started_at),
+            row("Время отчета", report_at),
+            row("Аптайм, min", f"{uptime_min:.1f}"),
             row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
             row("Текущий баланс USD", f"{self.pnl.balance:.2f}"),
             row("Чистая прибыль USD", f"{self.pnl.total_pnl:+.2f}"),

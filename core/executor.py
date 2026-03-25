@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from collections import deque
 from typing import Optional
 
 
@@ -80,6 +81,20 @@ class PnLTracker:
         self.last_close_ts = 0.0
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
 
+        self.recent_pnls = deque(
+            maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME", "12"))
+        )
+        self.regime_cooldown_until = 0.0
+
+    def is_good_regime(self) -> bool:
+        """Return True when new entries are allowed based on recent realized PnL."""
+        if time.time() < getattr(self, "regime_cooldown_until", 0.0):
+            return False
+        if len(self.recent_pnls) < 6:
+            return True
+        winrate = sum(1 for p in self.recent_pnls if p > 0) / len(self.recent_pnls)
+        return winrate >= float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.55"))
+
     def log_trade(self, side, price, amount_usd=None):
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
         if amount_usd is None:
@@ -141,6 +156,23 @@ class PnLTracker:
             self.trades_count += 1
             if profit > 0:
                 self.wins += 1
+
+            self.recent_pnls.append(profit)
+            if len(self.recent_pnls) >= 6:
+                winrate = sum(1 for p in self.recent_pnls if p > 0) / len(
+                    self.recent_pnls
+                )
+                avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
+                bad_wr = float(os.getenv("HFT_BAD_REGIME_WINRATE", "0.48"))
+                cooldown_sec = float(os.getenv("HFT_REGIME_COOLDOWN_SEC", "150"))
+                if winrate < bad_wr or avg_pnl < -0.5:
+                    self.regime_cooldown_until = time.time() + cooldown_sec
+                    logging.warning(
+                        "BAD REGIME detected: WR=%.1f%% avgPnL=%.2f$ -> cooldown %ss",
+                        winrate * 100.0,
+                        avg_pnl,
+                        int(cooldown_sec),
+                    )
 
             if self.balance > self.peak_balance:
                 self.peak_balance = self.balance

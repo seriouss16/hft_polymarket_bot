@@ -517,6 +517,8 @@ class HFTEngine:
         edge_mult: float,
     ):
         """Secondary entry path: momentum + monotone z-score + acceleration without full trend age."""
+        if not self.pnl.is_good_regime():
+            return None
         if not self.entry_momentum_alt_enabled:
             return None
         buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
@@ -554,6 +556,8 @@ class HFTEngine:
         edge_mult=1.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
+        if not self.pnl.is_good_regime():
+            return None
         buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
             price_history=price_history,
             recent_pnl=recent_pnl,
@@ -606,6 +610,10 @@ class HFTEngine:
             and speed >= self.speed_floor
             and up_speed_ok
         ):
+            if len(self.edge_window) >= 4:
+                last_edges = [e for _, e in list(self.edge_window)[-4:]]
+                if not all(e > 0 for e in last_edges):
+                    return None
             return "BUY_UP"
         speed_ok_down = speed <= -self.speed_floor or (
             aggressive
@@ -621,6 +629,10 @@ class HFTEngine:
             and speed_ok_down
             and down_speed_ok
         ):
+            if len(self.edge_window) >= 4:
+                last_edges = [e for _, e in list(self.edge_window)[-4:]]
+                if not all(e < 0 for e in last_edges):
+                    return None
             return "BUY_DOWN"
         return None
 
@@ -728,6 +740,13 @@ class HFTEngine:
         if not fast_price or not poly_orderbook['ask']:
             return
         _ = lstm_forecast
+
+        if self.pnl.inventory == 0 and not self.pnl.is_good_regime():
+            if int(time.time()) % 15 == 0:
+                logging.info(
+                    "Regime filter: recent performance is bad -> skip all entries"
+                )
+            return None
 
         px = _price_array_for_rsi(price_history, self.rsi_price_len)
         current_rsi = float(compute_rsi(px, period=self.rsi_period))
