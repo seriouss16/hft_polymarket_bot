@@ -84,6 +84,8 @@ class HFTEngine:
         self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K", "0.12"))
         self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.6"))
         self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC", "0.0"))
+        self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH", "99.0"))
+        self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW", "1.0"))
 
         # --- RSI Slope (Наклон) ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "1") == "1"
@@ -207,6 +209,8 @@ class HFTEngine:
         self.position_trend = "FLAT"
         self.entry_context = {}
         self._last_entry_noise_log_ts = 0.0
+        self._last_regime_skip_log_ts = 0.0
+        self._last_slot_expiry_info_log_ts = 0.0
         self._init_entry_profiles()
 
     _PROFILE_ATTRS = (
@@ -384,6 +388,14 @@ class HFTEngine:
             return rsi <= self.rsi_hold_down_ceiling
         return False
 
+    def _exit_rsi(self, rsi: float) -> float:
+        """Clamp RSI for exit logic to limit spurious 100/0 from short price history."""
+        hi = float(self.rsi_exit_clamp_high)
+        lo = float(self.rsi_exit_clamp_low)
+        if hi > lo:
+            return min(max(float(rsi), lo), hi)
+        return float(rsi)
+
     def _rsi_range_exit_triggered(
         self, position_side, current_rsi, unrealized, hold_sec: float = 0.0
     ):
@@ -396,21 +408,29 @@ class HFTEngine:
         min_p = self.rsi_range_exit_min_profit_usd
         tp_line, _ = self._pnl_target_and_stop_lines()
         min_hold = float(self.rsi_range_exit_min_hold_sec)
+        fade_need_pos = os.getenv("HFT_RSI_RANGE_EXIT_FADE_REQUIRE_POSITIVE", "0") == "1"
+        rx = self._exit_rsi(current_rsi)
         if position_side == "UP":
-            if current_rsi >= self.rsi_entry_up_high and unrealized >= tp_line:
+            if rx >= self.rsi_entry_up_high and unrealized >= tp_line:
                 return True
-            if current_rsi <= self.rsi_entry_up_low - margin:
+            if rx <= self.rsi_entry_up_low - margin:
                 if min_hold > 0.0 and hold_sec < min_hold:
                     return False
-                return unrealized > min_p or current_rsi <= self.rsi_extreme_low
+                cond = unrealized > min_p or rx <= self.rsi_extreme_low
+                if fade_need_pos and unrealized <= 0.0:
+                    return unrealized > min_p
+                return cond
             return False
         if position_side == "DOWN":
-            if current_rsi <= self.rsi_entry_down_low and unrealized >= tp_line:
+            if rx <= self.rsi_entry_down_low and unrealized >= tp_line:
                 return True
-            if current_rsi >= self.rsi_entry_down_high + margin:
+            if rx >= self.rsi_entry_down_high + margin:
                 if min_hold > 0.0 and hold_sec < min_hold:
                     return False
-                return unrealized > min_p or current_rsi >= self.rsi_extreme_high
+                cond = unrealized > min_p or rx >= self.rsi_extreme_high
+                if fade_need_pos and unrealized <= 0.0:
+                    return unrealized > min_p
+                return cond
             return False
         return False
 
@@ -477,6 +497,8 @@ class HFTEngine:
         self._book_stall_ticks = 0
         self._speed_samples.clear()
         self._zscore_samples.clear()
+        self._last_regime_skip_log_ts = 0.0
+        self._last_slot_expiry_info_log_ts = 0.0
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -723,7 +745,7 @@ class HFTEngine:
         aggressive = self._is_aggressive_oracle_edge(edge)
         if aggressive:
             now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "2.0"))
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "5.0"))
             if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
                 logging.info(
                     "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
@@ -789,8 +811,11 @@ class HFTEngine:
                     return None
             return "BUY_DOWN"
         if abs(edge) >= self.buy_edge * self.aggressive_edge_mult * 1.2:
+            sj_min_age = float(os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC", "0.0"))
+            if sj_min_age > 0.0 and age < sj_min_age:
+                return None
             now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "2.0"))
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "5.0"))
             if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
                 logging.info(
                     "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
@@ -909,10 +934,13 @@ class HFTEngine:
         _ = lstm_forecast
 
         if self.pnl.inventory == 0 and not self.pnl.is_good_regime():
-            if int(time.time()) % 15 == 0:
+            _now = time.time()
+            _regime_log_sec = float(os.getenv("HFT_REGIME_SKIP_LOG_MIN_SEC", "15.0"))
+            if _regime_log_sec <= 0.0 or _now - self._last_regime_skip_log_ts >= _regime_log_sec:
                 logging.info(
                     "Regime filter: recent performance is bad -> skip all entries"
                 )
+                self._last_regime_skip_log_ts = _now
             return None
 
         px = _price_array_for_rsi(price_history, self.rsi_price_len)
@@ -1232,10 +1260,14 @@ class HFTEngine:
                     self._prev_up_mid = None
                     self._prev_down_mid = None
                     return result
-                logging.info(
-                    "⏳ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс), но 99¢ не достигнуты -> продолжаем плановый выход.",
-                    float(seconds_to_expiry),
-                )
+                _now = time.time()
+                _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC", "8.0"))
+                if _slot_log_sec <= 0.0 or _now - self._last_slot_expiry_info_log_ts >= _slot_log_sec:
+                    logging.info(
+                        "⏳ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс), но 99¢ не достигнуты -> продолжаем плановый выход.",
+                        float(seconds_to_expiry),
+                    )
+                    self._last_slot_expiry_info_log_ts = _now
 
             if self.pnl.position_side == "DOWN":
                 reaction_confirmed = self._hold_met(hold_sec) and poly_move <= -self.poly_take_profit_move
@@ -1247,16 +1279,17 @@ class HFTEngine:
             _, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
             pos_side = self.pnl.position_side or "UP"
+            rsi_x = self._exit_rsi(current_rsi)
             if pos_side == "DOWN":
                 internal_reversal = (
                     imbalance >= 0.55
-                    or current_rsi >= upper_b
+                    or rsi_x >= upper_b
                     or self._last_rsi_slope >= self.rsi_slope_down_exit
                 )
             else:
                 internal_reversal = (
                     imbalance <= 0.45
-                    or current_rsi <= lower_b
+                    or rsi_x <= lower_b
                     or self._last_rsi_slope <= self.rsi_slope_up_exit
                 )
             reaction_tp_confirmed = reaction_confirmed and internal_reversal

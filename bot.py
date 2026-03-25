@@ -78,6 +78,7 @@ from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
 from data.poly_clob import PolyOrderBook
 from ml.model import AsyncLSTMPredictor
+from utils.log_dedupe import SameMessageDedupeFilter
 from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
@@ -103,13 +104,16 @@ def _setup_logging() -> None:
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     root.handlers.clear()
+    _dedupe = SameMessageDedupeFilter()
     sh = logging.StreamHandler(sys.stdout)
     sh.setLevel(logging.INFO)
     sh.setFormatter(logging.Formatter(fmt))
+    sh.addFilter(_dedupe)
     root.addHandler(sh)
     fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(fmt))
+    fh.addFilter(_dedupe)
     root.addHandler(fh)
     logging.info("File logging initialized: %s (retention=%s)", log_path.name, keep_files)
 
