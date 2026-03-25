@@ -15,7 +15,11 @@ class LatencyArbitrageStrategy(BaseStrategy):
 
     def __init__(self, pnl_tracker: Any, is_test_mode: bool = True) -> None:
         """Initialize wrapped legacy engine."""
-        self._engine = HFTEngine(pnl_tracker, is_test_mode=is_test_mode)
+        self._engine = HFTEngine(
+            pnl_tracker,
+            is_test_mode=is_test_mode,
+            strategy_label=self.name,
+        )
 
     @property
     def entry_max_latency_ms(self) -> float:

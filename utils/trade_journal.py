@@ -40,6 +40,9 @@ _FIELDNAMES = [
     "exit_up_ask",
     "exit_down_bid",
     "exit_down_ask",
+    "strategy_name",
+    "entry_profile",
+    "performance_key",
 ]
 
 

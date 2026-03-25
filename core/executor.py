@@ -4,6 +4,8 @@ import time
 from collections import deque
 from typing import Optional
 
+from core.strategy_performance import StrategyPerformanceBook
+
 
 def _up_outcome_quotes_ok(up_bid: float, up_ask: float) -> bool:
     """Return True when bid/ask look like UP-outcome token prices in (0, 1)."""
@@ -89,6 +91,11 @@ class PnLTracker:
             maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME", "12"))
         )
         self.regime_cooldown_until = 0.0
+        self.strategy_performance = StrategyPerformanceBook()
+
+    def reset_strategy_performance(self) -> None:
+        """Clear per-strategy PnL buckets when starting a new market (optional)."""
+        self.strategy_performance.reset()
 
     def is_good_regime(self) -> bool:
         """Return True when new entries are allowed based on recent realized PnL."""
@@ -100,8 +107,18 @@ class PnLTracker:
         avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
         return winrate >= float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49")) or avg_pnl > -1.1
 
-    def log_trade(self, side, price, amount_usd=None, settlement_fill=False):
-        """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
+    def log_trade(
+        self,
+        side,
+        price,
+        amount_usd=None,
+        settlement_fill=False,
+        performance_key=None,
+    ):
+        """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted.
+
+        For SELL, performance_key (e.g. phase_router:soft_flow) attributes realized PnL to a bucket.
+        """
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
         if side in ("BUY", "BUY_UP", "BUY_DOWN"):
@@ -166,6 +183,8 @@ class PnLTracker:
                 self.wins += 1
 
             self.recent_pnls.append(profit)
+            if performance_key:
+                self.strategy_performance.record_close(performance_key, profit)
             if len(self.recent_pnls) >= 6:
                 winrate = sum(1 for p in self.recent_pnls if p > 0) / len(
                     self.recent_pnls
@@ -213,6 +232,7 @@ class PnLTracker:
                 "pnl": profit,
                 "balance": self.balance,
                 "price": exec_price,
+                "performance_key": performance_key,
             }
         return None
 

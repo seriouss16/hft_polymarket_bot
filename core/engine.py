@@ -27,9 +27,10 @@ def _price_array_for_rsi(price_history, max_len: int) -> np.ndarray:
 class HFTEngine:
     """Signal, risk, and execution engine for Polymarket latency strategy."""
 
-    def __init__(self, pnl_tracker, is_test_mode=True):
+    def __init__(self, pnl_tracker, is_test_mode=True, strategy_label="latency_arbitrage"):
         self.pnl = pnl_tracker
         self.is_test_mode = is_test_mode
+        self._strategy_label = str(strategy_label)
         
         # --- Базовый Edge (в пунктах цены) ---
         self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "0.8"))   # Уменьшаем порог шума для более чувствительного входа
@@ -82,6 +83,7 @@ class HFTEngine:
         self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "10"))
         self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K", "0.12"))
         self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.6"))
+        self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC", "0.0"))
 
         # --- RSI Slope (Наклон) ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "1") == "1"
@@ -204,6 +206,7 @@ class HFTEngine:
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
         self.entry_context = {}
+        self._last_entry_noise_log_ts = 0.0
         self._init_entry_profiles()
 
     _PROFILE_ATTRS = (
@@ -381,21 +384,32 @@ class HFTEngine:
             return rsi <= self.rsi_hold_down_ceiling
         return False
 
-    def _rsi_range_exit_triggered(self, position_side, current_rsi, unrealized):
-        """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin)."""
+    def _rsi_range_exit_triggered(
+        self, position_side, current_rsi, unrealized, hold_sec: float = 0.0
+    ):
+        """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin).
+
+        Fade exits (RSI past band against the position) respect ``rsi_range_exit_min_hold_sec``
+        to avoid immediate churn when RSI spikes on a short lookback. TP-at-band exits are unchanged.
+        """
         margin = self.rsi_range_exit_band_margin
         min_p = self.rsi_range_exit_min_profit_usd
         tp_line, _ = self._pnl_target_and_stop_lines()
+        min_hold = float(self.rsi_range_exit_min_hold_sec)
         if position_side == "UP":
             if current_rsi >= self.rsi_entry_up_high and unrealized >= tp_line:
                 return True
             if current_rsi <= self.rsi_entry_up_low - margin:
+                if min_hold > 0.0 and hold_sec < min_hold:
+                    return False
                 return unrealized > min_p or current_rsi <= self.rsi_extreme_low
             return False
         if position_side == "DOWN":
             if current_rsi <= self.rsi_entry_down_low and unrealized >= tp_line:
                 return True
             if current_rsi >= self.rsi_entry_down_high + margin:
+                if min_hold > 0.0 and hold_sec < min_hold:
+                    return False
                 return unrealized > min_p or current_rsi >= self.rsi_extreme_high
             return False
         return False
@@ -708,12 +722,16 @@ class HFTEngine:
         strong = self._is_strong_oracle_edge(edge)
         aggressive = self._is_aggressive_oracle_edge(edge)
         if aggressive:
-            logging.info(
-                "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
-                edge,
-                self.aggressive_edge_mult,
-                self.buy_edge,
-            )
+            now_ts = time.time()
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "2.0"))
+            if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
+                logging.info(
+                    "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
+                    edge,
+                    self.aggressive_edge_mult,
+                    self.buy_edge,
+                )
+                self._last_entry_noise_log_ts = now_ts
         age_need = self.entry_confirm_age_strong if strong else self.entry_confirm_age
         up_speed_ok = speed >= self.entry_up_speed_min or (
             strong and speed >= self.speed_floor
@@ -771,10 +789,14 @@ class HFTEngine:
                     return None
             return "BUY_DOWN"
         if abs(edge) >= self.buy_edge * self.aggressive_edge_mult * 1.2:
-            logging.info(
-                "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
-                edge,
-            )
+            now_ts = time.time()
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "2.0"))
+            if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
+                logging.info(
+                    "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
+                    edge,
+                )
+                self._last_entry_noise_log_ts = now_ts
             if trend == "UP" and edge > 0:
                 return "BUY_UP"
             if trend == "DOWN" and edge < 0:
@@ -1080,14 +1102,19 @@ class HFTEngine:
                 "entry_up_ask": up_ask,
                 "entry_down_bid": down_bid,
                 "entry_down_ask": down_ask,
+                "strategy_name": self._strategy_label,
+                "entry_profile": self.get_active_profile(),
             }
             logging.info(
-                "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
+                "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
+                "strategy=%s profile=%s",
                 poly_mid,
                 fast_price,
                 fast_price - poly_mid,
                 self.position_trend,
                 imbalance,
+                self._strategy_label,
+                self.get_active_profile(),
             )
             return {"event": "OPEN", "side": "UP", "trade": open_event}
 
@@ -1123,14 +1150,19 @@ class HFTEngine:
                 "entry_up_ask": up_ask,
                 "entry_down_bid": down_bid,
                 "entry_down_ask": down_ask,
+                "strategy_name": self._strategy_label,
+                "entry_profile": self.get_active_profile(),
             }
             logging.info(
-                "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f",
+                "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
+                "strategy=%s profile=%s",
                 poly_mid,
                 fast_price,
                 fast_price - poly_mid,
                 self.position_trend,
                 imbalance,
+                self._strategy_label,
+                self.get_active_profile(),
             )
             return {"event": "OPEN", "side": "DOWN", "trade": open_event}
 
@@ -1156,6 +1188,7 @@ class HFTEngine:
                     exit_price = 0.99
                     close_event = await self.execute("SELL", exit_price)
                     ce = close_event or {}
+                    _pk = ce.get("performance_key")
                     result = {
                         "event": "CLOSE",
                         "reason": "SLOT_EXPIRY_99C",
@@ -1169,6 +1202,9 @@ class HFTEngine:
                         "latency_ms": self.entry_context.get("latency_ms", 0.0),
                         "pnl": float(ce.get("pnl") or 0.0),
                         "side": pos_side,
+                        "strategy_name": self.entry_context.get("strategy_name"),
+                        "entry_profile": self.entry_context.get("entry_profile"),
+                        "performance_key": _pk,
                         "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
                         "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
                         "exit_book_px": float(ce.get("book_px") or exit_price),
@@ -1228,6 +1264,7 @@ class HFTEngine:
                 pos_side,
                 current_rsi,
                 unrealized,
+                hold_sec,
             )
 
             should_close = (
@@ -1261,6 +1298,7 @@ class HFTEngine:
                 exit_price = down_bid if self.pnl.position_side == "DOWN" else up_bid
                 close_event = await self.execute("SELL", exit_price)
                 ce = close_event or {}
+                _pk = ce.get("performance_key")
                 result = {
                     "event": "CLOSE",
                     "reason": reason,
@@ -1274,6 +1312,9 @@ class HFTEngine:
                     "latency_ms": self.entry_context.get("latency_ms", 0.0),
                     "pnl": float(ce.get("pnl") or 0.0),
                     "side": pos_side,
+                    "strategy_name": self.entry_context.get("strategy_name"),
+                    "entry_profile": self.entry_context.get("entry_profile"),
+                    "performance_key": _pk,
                     "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
                     "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
                     "exit_book_px": float(ce.get("book_px") or exit_price),
@@ -1302,15 +1343,27 @@ class HFTEngine:
                 self._prev_down_mid = None
                 return result
 
+    def _build_performance_key(self) -> str | None:
+        """Build attribution key from entry context and engine label."""
+        if not self.entry_context:
+            return None
+        name = str(self.entry_context.get("strategy_name") or self._strategy_label)
+        prof = str(self.entry_context.get("entry_profile") or self.get_active_profile())
+        return f"{name}:{prof}"
+
     async def execute(self, side, price, amount_usd=None, settlement_fill=False):
         """Execute simulated trade with optional notional override."""
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
+        perf_key = None
+        if side == "SELL":
+            perf_key = self._build_performance_key()
         return self.pnl.log_trade(
             side,
             price,
             amount_usd,
             settlement_fill=settlement_fill,
+            performance_key=perf_key,
         )
 
 

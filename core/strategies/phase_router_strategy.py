@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 
 from core.engine import HFTEngine
-from core.market_phase import select_engine_profile
+from core.market_phase import diagnose_phase, select_engine_profile
 from core.strategy_base import BaseStrategy
 
 
@@ -18,10 +19,15 @@ class PhaseRouterStrategy(BaseStrategy):
 
     def __init__(self, pnl_tracker: Any, is_test_mode: bool = True) -> None:
         """Build engine and cache max latency for feed warnings."""
-        self._engine = HFTEngine(pnl_tracker, is_test_mode=is_test_mode)
+        self._engine = HFTEngine(
+            pnl_tracker,
+            is_test_mode=is_test_mode,
+            strategy_label=self.name,
+        )
         self._max_entry_latency_ms = float(self._engine.max_entry_latency_ms_all_profiles())
         self._last_applied: str | None = None
         self._last_switch_log_ts = 0.0
+        self._last_diag_log_ts = 0.0
 
     @property
     def entry_max_latency_ms(self) -> float:
@@ -50,8 +56,48 @@ class PhaseRouterStrategy(BaseStrategy):
         tr = self._engine.get_trend_state()
         profile = select_engine_profile(tr, latency_ms)
         self._engine.apply_profile(profile)
+        now = time.time()
+        diag = diagnose_phase(tr, latency_ms)
+        if not diag.get("logic_ok", True):
+            logging.warning(
+                "Phase classifier inconsistency: selected=%s soft_eligible=%s (check select_engine_profile vs diagnose_phase).",
+                diag.get("selected"),
+                diag.get("soft_eligible"),
+            )
+        if os.getenv("HFT_LOG_PHASE_DIAGNOSTICS", "0") == "1":
+            if (
+                profile != self._last_applied
+                or now - self._last_diag_log_ts >= float(os.getenv("HFT_LOG_PHASE_DIAGNOSTICS_SEC", "45"))
+            ):
+                th = diag.get("thresholds") or {}
+                obs = diag.get("observed") or {}
+                chk = diag.get("checks") or {}
+                logging.info(
+                    "Phase diag: selected=%s soft_eligible=%s logic_ok=%s | "
+                    "trend=%s speed=%.2f (max_soft %.1f) edge=%.2f (max_soft %.1f) "
+                    "age=%.1f (min %.1f) stale=%.0f (max_soft %.0f) | "
+                    "checks dir=%s age=%s spd=%s edge=%s lat=%s | blockers=%s",
+                    diag.get("selected"),
+                    diag.get("soft_eligible"),
+                    diag.get("logic_ok"),
+                    obs.get("trend"),
+                    float(obs.get("speed", 0.0)),
+                    float(th.get("soft_max_abs_speed", 0.0)),
+                    float(obs.get("edge", 0.0)),
+                    float(th.get("soft_max_abs_edge", 0.0)),
+                    float(obs.get("age", 0.0)),
+                    float(th.get("soft_min_age", 0.0)),
+                    float(obs.get("staleness_ms", 0.0)),
+                    float(th.get("soft_max_latency_ms", 0.0)),
+                    chk.get("directional"),
+                    chk.get("age_ok"),
+                    chk.get("speed_ok"),
+                    chk.get("edge_ok"),
+                    chk.get("latency_ok"),
+                    ",".join(diag.get("blockers") or []) or "-",
+                )
+                self._last_diag_log_ts = now
         if profile != self._last_applied:
-            now = time.time()
             if now - self._last_switch_log_ts >= 15.0 or self._last_applied is None:
                 logging.info(
                     "Market phase profile: %s (trend=%s speed=%.2f edge=%.2f age=%.1fs stale=%.0fms)",

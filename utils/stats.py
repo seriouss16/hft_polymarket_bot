@@ -37,8 +37,18 @@ class StatsCollector:
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
             f"📦 В позиции:         {'ДА' if self.pnl.inventory > 0 else 'НЕТ'}",
             f"⏸️ Regime cooldown:   {cooldown_until:>10.0f} (unix ts)",
-            "=" * 45 + "\n",
         ]
+        sp = getattr(self.pnl, "strategy_performance", None)
+        if sp is not None and sp.slices:
+            report.append("📊 По срезам (strategy:profile), реализовано:")
+            for key in sorted(sp.slices.keys()):
+                sl = sp.slices[key]
+                wr = (sl.wins / sl.trades * 100.0) if sl.trades > 0 else 0.0
+                report.append(
+                    f"   {key:<30} n={sl.trades:>3}  WR={wr:>5.1f}%  PnL={sl.pnl_sum:>+9.2f} USD"
+                )
+            report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
+        report.append("=" * 45 + "\n")
 
         logging.info("\n".join(report))
 

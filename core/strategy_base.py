@@ -11,6 +11,10 @@ class BaseStrategy(ABC):
 
     name: str
 
+    def performance_label(self) -> str:
+        """Return stable key for realized PnL attribution (default: strategy name)."""
+        return str(self.name)
+
     @property
     @abstractmethod
     def entry_max_latency_ms(self) -> float:

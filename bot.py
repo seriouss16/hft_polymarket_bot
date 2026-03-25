@@ -234,6 +234,8 @@ async def main():
                     token_up_id = up_id
                     token_down_id = down_id
                     strategy_hub.reset_for_new_market()
+                    if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET", "0") == "1":
+                        pnl.reset_strategy_performance()
                     if poly_connect_task is not None and not poly_connect_task.done():
                         poly_connect_task.cancel()
                     poly_book = PolyOrderBook(symbol="bitcoin")
@@ -451,6 +453,19 @@ async def main():
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
                     _rs = strategy_hub.get_rsi_v5_state()
+                    _perf_key = decision.get("performance_key")
+                    if _perf_key:
+                        _sl = pnl.strategy_performance.slices.get(str(_perf_key))
+                        _cum = _sl.pnl_sum if _sl else 0.0
+                        logging.info(
+                            "📊 Close attribution: key=%s trade_pnl=%+.4f USD | cumulative_this_key=%+.4f",
+                            _perf_key,
+                            float(decision.get("pnl") or 0.0),
+                            _cum,
+                        )
+                        _sc = pnl.strategy_performance.summary_compact()
+                        if _sc:
+                            logging.info("📊 session_slices: %s", _sc)
                     journal.append(
                         {
                             "ts": time.time(),
@@ -486,6 +501,9 @@ async def main():
                             "exit_up_ask": decision.get("exit_up_ask"),
                             "exit_down_bid": decision.get("exit_down_bid"),
                             "exit_down_ask": decision.get("exit_down_ask"),
+                            "strategy_name": decision.get("strategy_name"),
+                            "entry_profile": decision.get("entry_profile"),
+                            "performance_key": decision.get("performance_key"),
                         }
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
