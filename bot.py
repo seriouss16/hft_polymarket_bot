@@ -300,10 +300,7 @@ async def main():
 
                 aggregator.add_history(fast_price)
                 zscore = aggregator.get_zscore()
-                _ft = aggregator.feed_timing(
-                    float(poly_book.book.get("ts", 0.0)),
-                    now_loop=now,
-                )
+                _ft = aggregator.feed_timing(float(poly_book.book.get("ts", 0.0)))
                 latency_ms = float(_ft["staleness_ms"])
                 skew_ms = float(_ft["skew_ms"])
                 if (
