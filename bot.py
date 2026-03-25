@@ -441,8 +441,14 @@ async def main():
                     rsi_st = strategy_hub.get_rsi_v5_state()
                     cb_px = aggregator.get_coinbase_price()
                     bn_px = aggregator.get_binance_price()
+                    bn_bbo = aggregator.get_binance_bbo()
                     cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
-                    bn_s = f"{bn_px:.2f}" if bn_px else "n/a"
+                    if bn_bbo:
+                        bn_s = f"{bn_bbo[0]:.4f}/{bn_bbo[1]:.4f}"
+                    elif bn_px is not None:
+                        bn_s = f"{bn_px:.4f}"
+                    else:
+                        bn_s = "n/a"
                     up_bid = float(poly_book.book.get("bid", 0.0))
                     up_ask = float(poly_book.book.get("ask", 0.0))
                     d_bid = float(poly_book.book.get("down_bid", 0.0))

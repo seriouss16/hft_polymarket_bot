@@ -13,8 +13,8 @@ class FastPriceAggregator:
 
     def __init__(self, max_age_seconds=2.0):
         self.data = {
-            "binance": {"price": 0.0, "timestamp": 0.0},
-            "coinbase": {"price": 0.0, "timestamp": 0.0}
+            "binance": {"price": 0.0, "timestamp": 0.0, "bid": None, "ask": None},
+            "coinbase": {"price": 0.0, "timestamp": 0.0, "bid": None, "ask": None},
         }
         self.max_age = max_age_seconds
         self.prices = {
@@ -34,14 +34,16 @@ class FastPriceAggregator:
         skip = len(seq) - n
         return list(itertools.islice(seq, skip, None))
 
-    def update(self, exchange, price, ts=None):
+    def update(self, exchange, price, ts=None, bid=None, ask=None):
         """Apply one tick from a websocket feed into local buffers."""
         current_time = (
             ts if ts is not None else asyncio.get_running_loop().time()
         )
         self.data[exchange] = {
             "price": price,
-            "timestamp": current_time
+            "timestamp": current_time,
+            "bid": bid,
+            "ask": ask,
         }
         self.prices[exchange].append(price)
 
@@ -82,6 +84,21 @@ class FastPriceAggregator:
             return None
         p = float(b.get("price") or 0.0)
         return p if p > 0.0 else None
+
+    def get_binance_bbo(self):
+        """Return last Binance best bid and ask from bookTicker, or None if missing."""
+        b = self.data.get("binance")
+        if not b:
+            return None
+        bid = b.get("bid")
+        ask = b.get("ask")
+        if bid is None or ask is None:
+            return None
+        fb = float(bid)
+        fa = float(ask)
+        if fb <= 0.0 or fa <= 0.0:
+            return None
+        return fb, fa
 
     def add_history(self, price):
         """Append a fast-price sample for z-score calculations."""

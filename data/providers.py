@@ -40,25 +40,39 @@ class FastExchangeProvider:
                         await ws.send(json.dumps(sub))
                     
                     async for msg in ws:
-                        data = json.loads(msg)
+                        try:
+                            data = json.loads(msg)
+                        except (TypeError, json.JSONDecodeError):
+                            logging.debug("[%s] Skip non-JSON websocket frame.", self.name)
+                            continue
                         price = None
-                        
+                        bid_px = None
+                        ask_px = None
+
                         if self.name == "binance":
-                            # В Multiplex Stream данные лежат в ключе 'data'
-                            tick = data.get('data', {})
-                            if 'a' in tick and 'b' in tick:
-                                price = (float(tick['a']) + float(tick['b'])) / 2
-                        
+                            # Combined stream wraps payload in ``data``; raw ``/ws/`` sends payload at top level.
+                            tick = data.get("data", data) if isinstance(data, dict) else {}
+                            if isinstance(tick, dict) and "a" in tick and "b" in tick:
+                                bid_px = float(tick["b"])
+                                ask_px = float(tick["a"])
+                                price = (bid_px + ask_px) / 2.0
+
                         elif self.name == "coinbase":
-                            if data.get('type') == 'ticker':
-                                price = float(data['price'])
-                        
+                            if data.get("type") == "ticker":
+                                price = float(data["price"])
+
                         if price:
-                            self.update_callback(
-                                self.name,
-                                price,
-                                asyncio.get_running_loop().time(),
-                            )
+                            loop_ts = asyncio.get_running_loop().time()
+                            if bid_px is not None and ask_px is not None:
+                                self.update_callback(
+                                    self.name,
+                                    price,
+                                    loop_ts,
+                                    bid_px,
+                                    ask_px,
+                                )
+                            else:
+                                self.update_callback(self.name, price, loop_ts)
                             
             except asyncio.CancelledError:
                 logging.info("🛑 [%s] WebSocket task cancelled; stopping provider.", self.name)
