@@ -148,8 +148,10 @@ async def main():
         FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update),
         FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
     ]
-    for p in providers:
-        asyncio.create_task(p.connect())
+    provider_tasks: list[asyncio.Task] = [
+        asyncio.create_task(p.connect()) for p in providers
+    ]
+    poly_connect_task: asyncio.Task | None = None
 
     token_up_id = None
     token_down_id = None
@@ -190,8 +192,10 @@ async def main():
                     token_up_id = up_id
                     token_down_id = down_id
                     engine.reset_for_new_market()
+                    if poly_connect_task is not None and not poly_connect_task.done():
+                        poly_connect_task.cancel()
                     poly_book = PolyOrderBook(symbol="bitcoin")
-                    asyncio.create_task(poly_book.connect())
+                    poly_connect_task = asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
             _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG", "0") == "1"
@@ -381,7 +385,9 @@ async def main():
                         f"Δ={rsi_st['slope']:+.2f} | "
                         f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
                         f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
-                        f"(cb {float(_ft['coinbase_age_ms']):.0f} poly {float(_ft['poly_age_ms']):.0f}) | "
+                        f"(cb {float(_ft['coinbase_age_ms']):.0f} "
+                        f"poly {float(_ft['poly_age_ms']):.0f} "
+                        f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Forecast: {forecast:.2f}",
                         flush=True,
@@ -466,6 +472,16 @@ async def main():
         except Exception:
             pass
     finally:
+        for _t in provider_tasks:
+            if not _t.done():
+                _t.cancel()
+        if poly_connect_task is not None and not poly_connect_task.done():
+            poly_connect_task.cancel()
+        _bg: list[asyncio.Task] = list(provider_tasks)
+        if poly_connect_task is not None:
+            _bg.append(poly_connect_task)
+        if _bg:
+            await asyncio.gather(*_bg, return_exceptions=True)
         try:
             stats.show_final_report(
                 journal_path=journal.path,
