@@ -1450,6 +1450,7 @@ class HFTEngine:
             amount_usd,
             settlement_fill=settlement_fill,
             performance_key=perf_key,
+            strategy_name=self._strategy_label,
         )
 
 

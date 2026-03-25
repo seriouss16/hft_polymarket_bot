@@ -114,10 +114,12 @@ class PnLTracker:
         amount_usd=None,
         settlement_fill=False,
         performance_key=None,
+        strategy_name=None,
     ):
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted.
 
         For SELL, performance_key (e.g. phase_router:soft_flow) attributes realized PnL to a bucket.
+        Optional strategy_name labels SIM logs for attribution.
         """
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
@@ -138,9 +140,11 @@ class PnLTracker:
                 self.position_side = "DOWN" if side == "BUY_DOWN" else "UP"
             self.balance -= amount_usd
             self.entry_ts = time.time()
+            _sn = str(strategy_name).strip() if strategy_name else ""
+            _tag = f"{side} {_sn}".strip() if _sn else side
             logging.info(
                 "🟢 [SIM %s] book=%.4f exec=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
-                side,
+                _tag,
                 book_px,
                 exec_price,
                 amount_usd,
@@ -208,8 +212,11 @@ class PnLTracker:
                 self.max_drawdown = dd
 
             win_rate = (self.wins / self.trades_count) * 100
+            _sn = str(strategy_name).strip() if strategy_name else ""
+            _sell_hdr = f"[SIM SELL {_sn}]" if _sn else "[SIM SELL]"
             logging.info(
-                "🔴 [SIM SELL] book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%",
+                "🔴 %s book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%",
+                _sell_hdr,
                 book_px,
                 exec_price,
                 shares_sold,
