@@ -610,8 +610,8 @@ class HFTEngine:
             and speed >= self.speed_floor
             and up_speed_ok
         ):
-            if len(self.edge_window) >= 3:
-                last_edges = [e for _, e in list(self.edge_window)[-3:]]
+            if len(self.edge_window) >= 2:
+                last_edges = [e for _, e in list(self.edge_window)[-2:]]
                 if not all(e > 0 for e in last_edges):
                     return None
             return "BUY_UP"
@@ -629,11 +629,20 @@ class HFTEngine:
             and speed_ok_down
             and down_speed_ok
         ):
-            if len(self.edge_window) >= 3:
-                last_edges = [e for _, e in list(self.edge_window)[-3:]]
+            if len(self.edge_window) >= 2:
+                last_edges = [e for _, e in list(self.edge_window)[-2:]]
                 if not all(e < 0 for e in last_edges):
                     return None
             return "BUY_DOWN"
+        if abs(edge) >= self.buy_edge * self.aggressive_edge_mult * 1.2:
+            logging.info(
+                "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
+                edge,
+            )
+            if trend == "UP" and edge > 0:
+                return "BUY_UP"
+            if trend == "DOWN" and edge < 0:
+                return "BUY_DOWN"
         return None
 
     def _is_reversal_confirmed(self, side, trend):
@@ -993,7 +1002,7 @@ class HFTEngine:
 
             if seconds_to_expiry is not None and seconds_to_expiry < 45:
                 logging.warning(
-                    "Slot expiry close: seconds_to_expiry=%.1f -> force close at 0.99/0.01",
+                    "⚠️ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс) -> закрываем по 99¢",
                     float(seconds_to_expiry),
                 )
                 exit_price = 0.01 if self.pnl.position_side == "DOWN" else 0.99
@@ -1002,7 +1011,7 @@ class HFTEngine:
                 ce = close_event or {}
                 result = {
                     "event": "CLOSE",
-                    "reason": "EXPIRY_FORCE_CLOSE",
+                    "reason": "SLOT_EXPIRY_99C",
                     "entry_edge": self.entry_context.get("entry_edge", 0.0),
                     "exit_edge": fast_price - poly_mid,
                     "duration_sec": hold_sec,

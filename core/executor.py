@@ -94,8 +94,7 @@ class PnLTracker:
             return True
         winrate = sum(1 for p in self.recent_pnls if p > 0) / len(self.recent_pnls)
         avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
-        good_wr = float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.48"))
-        return winrate >= good_wr or avg_pnl > -1.2
+        return winrate >= float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49")) or avg_pnl > -1.1
 
     def log_trade(self, side, price, amount_usd=None):
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
