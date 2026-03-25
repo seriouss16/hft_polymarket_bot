@@ -1229,3 +1229,6 @@ class HFTEngine:
             amount_usd,
             settlement_fill=settlement_fill,
         )
+
+
+LegacyLatencyEngine = HFTEngine

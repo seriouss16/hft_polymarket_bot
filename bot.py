@@ -62,9 +62,10 @@ print(">>> Инициализация HFT системы...", flush=True)
 import tensorflow as tf
 from core.selector import MarketSelector
 from core.executor import PnLTracker
-from core.engine import HFTEngine
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.risk_engine import RiskEngine
+from core.strategies import LatencyArbitrageStrategy
+from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
 from data.poly_clob import PolyOrderBook
@@ -134,7 +135,12 @@ async def main():
     aggregator = FastPriceAggregator()
     pnl = PnLTracker()
     stats = StatsCollector(pnl)
-    engine = HFTEngine(pnl, is_test_mode=TEST_MODE)
+    strategy_hub = StrategyHub()
+    strategy_hub.register(LatencyArbitrageStrategy(pnl, is_test_mode=TEST_MODE))
+    default_strategy = os.getenv("HFT_ACTIVE_STRATEGY", "latency_arbitrage")
+    if default_strategy in strategy_hub.list_strategies():
+        strategy_hub.set_active(default_strategy)
+    strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES", "0") == "1")
     lstm = AsyncLSTMPredictor(history_len=100)
     live_exec = LiveExecutionEngine(
         private_key=os.getenv("PRIVATE_KEY"),
@@ -214,7 +220,7 @@ async def main():
                     logging.info(f"🎯 Смена рынка: {question}")
                     token_up_id = up_id
                     token_down_id = down_id
-                    engine.reset_for_new_market()
+                    strategy_hub.reset_for_new_market()
                     if poly_connect_task is not None and not poly_connect_task.done():
                         poly_connect_task.cancel()
                     poly_book = PolyOrderBook(symbol="bitcoin")
@@ -331,14 +337,14 @@ async def main():
                 latency_ms = float(_ft["staleness_ms"])
                 skew_ms = float(_ft["skew_ms"])
                 if (
-                    engine.entry_max_latency_ms > 0.0
-                    and latency_ms > engine.entry_max_latency_ms
+                    strategy_hub.entry_max_latency_ms > 0.0
+                    and latency_ms > strategy_hub.entry_max_latency_ms
                     and (now - last_high_latency_warn_time) >= 30.0
                 ):
                     logging.info(
                         "Feed staleness %.0f ms above entry_max_latency_ms=%.0f (engine may block entries).",
                         latency_ms,
-                        engine.entry_max_latency_ms,
+                        strategy_hub.entry_max_latency_ms,
                     )
                     last_high_latency_warn_time = now
                 if (
@@ -357,7 +363,7 @@ async def main():
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
 
-                decision = await engine.process_tick(
+                decision = await strategy_hub.process_tick(
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
                     price_history=primary_data if primary_data else [],
@@ -370,7 +376,7 @@ async def main():
                 )
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
-                    trend = engine.get_trend_state()
+                    trend = strategy_hub.get_trend_state()
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
@@ -380,7 +386,7 @@ async def main():
                     else:
                         imbalance = bid_size / (bid_size + ask_size + 1e-9)
                     upnl = pnl.get_unrealized_pnl(poly_book.book)
-                    rsi_st = engine.get_rsi_v5_state()
+                    rsi_st = strategy_hub.get_rsi_v5_state()
                     cb_px = aggregator.get_coinbase_price()
                     bn_px = aggregator.get_binance_price()
                     cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
@@ -418,7 +424,7 @@ async def main():
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
-                    _rs = engine.get_rsi_v5_state()
+                    _rs = strategy_hub.get_rsi_v5_state()
                     journal.append(
                         {
                             "ts": time.time(),
@@ -457,7 +463,7 @@ async def main():
                         }
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
-                    live_signal = engine.generate_live_signal(
+                    live_signal = strategy_hub.generate_live_signal(
                         fast_price,
                         poly_btc,
                         zscore,
