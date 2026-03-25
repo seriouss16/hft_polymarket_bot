@@ -146,6 +146,7 @@ class HFTEngine:
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "30"))
         self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.015")) # Не входим если спред > 1.5%
+        self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
         self._prev_up_mid = None
         self._prev_down_mid = None
         self._book_stall_ticks = 0
@@ -200,6 +201,10 @@ class HFTEngine:
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
         self.entry_context = {}
+
+    def _entry_ask_allows_open(self, ask_px: float) -> bool:
+        """Return False when best ask is at or above max entry price (no buys at 99¢+)."""
+        return float(ask_px) < self.max_entry_ask
 
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
@@ -947,6 +952,7 @@ class HFTEngine:
             signal == "BUY_UP"
             and self.pnl.inventory == 0
             and self.can_trade()
+            and self._entry_ask_allows_open(up_ask)
             and rsi_ok_up
             and book_ok_up
             and spread_gate
@@ -988,6 +994,7 @@ class HFTEngine:
             signal == "BUY_DOWN"
             and self.pnl.inventory == 0
             and self.can_trade()
+            and self._entry_ask_allows_open(down_ask)
             and rsi_ok_down
             and book_ok_down
             and spread_gate
@@ -1037,9 +1044,26 @@ class HFTEngine:
                     "⚠️ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс) -> закрываем по 99¢",
                     float(seconds_to_expiry),
                 )
-                exit_price = 0.01 if self.pnl.position_side == "DOWN" else 0.99
                 pos_side = self.pnl.position_side or "UP"
-                close_event = await self.execute("SELL", exit_price)
+                settlement_fill = False
+                if pos_side == "DOWN":
+                    if down_bid >= 0.99 or down_ask >= 0.99:
+                        exit_price = 1.0
+                        settlement_fill = True
+                    else:
+                        exit_price = 0.01
+                else:
+                    if up_bid >= 0.99 or up_ask >= 0.99:
+                        exit_price = 1.0
+                        settlement_fill = True
+                    else:
+                        exit_price = 0.99
+                pos_side = self.pnl.position_side or "UP"
+                close_event = await self.execute(
+                    "SELL",
+                    exit_price,
+                    settlement_fill=settlement_fill,
+                )
                 ce = close_event or {}
                 result = {
                     "event": "CLOSE",
@@ -1174,8 +1198,13 @@ class HFTEngine:
                 self._prev_down_mid = None
                 return result
 
-    async def execute(self, side, price, amount_usd=None):
+    async def execute(self, side, price, amount_usd=None, settlement_fill=False):
         """Execute simulated trade with optional notional override."""
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
-        return self.pnl.log_trade(side, price, amount_usd)
+        return self.pnl.log_trade(
+            side,
+            price,
+            amount_usd,
+            settlement_fill=settlement_fill,
+        )

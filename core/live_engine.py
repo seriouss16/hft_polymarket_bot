@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 
 import requests
@@ -97,6 +98,7 @@ class LiveExecutionEngine:
         self.test_mode = test_mode
         self.min_order_size = min_order_size
         self.max_spread = max_spread
+        self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
         self.client = None
         self._http = requests.Session()
 
@@ -176,6 +178,14 @@ class LiveExecutionEngine:
     async def execute(self, signal: str, token_id: str) -> None:
         """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        if best_ask >= self.max_entry_ask:
+            logging.warning(
+                "Skip %s: best_ask %.4f >= max entry ask %.4f.",
+                signal,
+                best_ask,
+                self.max_entry_ask,
+            )
+            return
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)

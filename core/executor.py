@@ -100,7 +100,7 @@ class PnLTracker:
         avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
         return winrate >= float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49")) or avg_pnl > -1.1
 
-    def log_trade(self, side, price, amount_usd=None):
+    def log_trade(self, side, price, amount_usd=None, settlement_fill=False):
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted."""
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
@@ -149,7 +149,10 @@ class PnLTracker:
 
             book_px = float(price)
             shares_sold = float(self.inventory)
-            exec_price = book_px * (1 - self.fee_rate)
+            if settlement_fill:
+                exec_price = book_px
+            else:
+                exec_price = book_px * (1 - self.fee_rate)
             cost_basis_usd = shares_sold * self.entry_price
             proceeds_usd = shares_sold * exec_price
             profit = proceeds_usd - cost_basis_usd
