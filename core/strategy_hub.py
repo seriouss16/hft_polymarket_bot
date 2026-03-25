@@ -83,6 +83,7 @@ class StrategyHub:
         meta_enabled: bool = True,
         seconds_to_expiry: float | None = None,
         cex_bid_imbalance: float | None = None,
+        skew_ms: float = 0.0,
     ) -> dict[str, Any] | None:
         """Run one active strategy or all strategies and return merged decision."""
         if not self._parallel_enabled:
@@ -97,6 +98,7 @@ class StrategyHub:
                 meta_enabled=meta_enabled,
                 seconds_to_expiry=seconds_to_expiry,
                 cex_bid_imbalance=cex_bid_imbalance,
+                skew_ms=skew_ms,
             )
 
         results: list[StrategyResult] = []
@@ -112,6 +114,7 @@ class StrategyHub:
                 meta_enabled=meta_enabled,
                 seconds_to_expiry=seconds_to_expiry,
                 cex_bid_imbalance=cex_bid_imbalance,
+                skew_ms=skew_ms,
             )
             if isinstance(payload, dict) and payload.get("event"):
                 results.append(StrategyResult(strategy=name, payload=payload))

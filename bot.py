@@ -396,6 +396,7 @@ async def main():
                     recent_pnl=pnl.last_realized_pnl,
                     meta_enabled=trade_allowed or BYPASS_META_GATE,
                     seconds_to_expiry=selector.seconds_to_slot_end(),
+                    skew_ms=skew_ms,
                 )
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc

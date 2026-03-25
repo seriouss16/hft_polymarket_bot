@@ -163,6 +163,9 @@ class HFTEngine:
 
         # --- Задержка (Latency Guard) ---
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1200.0"))
+        self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS", "550.0"))
+        self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP", "0.92"))
+        self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN", "0.92"))
         self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
         self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
         self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
@@ -211,6 +214,7 @@ class HFTEngine:
         self._last_entry_noise_log_ts = 0.0
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
+        self._last_feed_gate_log_ts = 0.0
         self._init_entry_profiles()
 
     _PROFILE_ATTRS = (
@@ -302,6 +306,20 @@ class HFTEngine:
     def _entry_ask_allows_open(self, ask_px: float) -> bool:
         """Return False when best ask is at or above max entry price (no buys at 99¢+)."""
         return float(ask_px) < self.max_entry_ask
+
+    def _entry_outcome_price_allows(self, side: str, up_ask: float, down_ask: float) -> bool:
+        """Return False when the outcome ask is above the cheap-entry cap (poor R/R near $1)."""
+        if side == "UP":
+            cap = float(self.entry_max_ask_up_cap)
+            if cap <= 0.0 or cap >= 1.0:
+                return True
+            return float(up_ask) <= cap
+        if side == "DOWN":
+            cap = float(self.entry_max_ask_down_cap)
+            if cap <= 0.0 or cap >= 1.0:
+                return True
+            return float(down_ask) <= cap
+        return True
 
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
@@ -499,6 +517,7 @@ class HFTEngine:
         self._zscore_samples.clear()
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
+        self._last_feed_gate_log_ts = 0.0
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -569,6 +588,12 @@ class HFTEngine:
         if self.entry_max_latency_ms <= 0.0:
             return True
         return float(latency_ms) <= self.entry_max_latency_ms
+
+    def entry_skew_allows_entry(self, skew_ms: float) -> bool:
+        """Block entries when cross-feed skew is larger than the limit (0 disables the gate)."""
+        if self.entry_max_skew_ms <= 0.0:
+            return True
+        return abs(float(skew_ms)) <= self.entry_max_skew_ms
 
     def entry_edge_jump_ok(self, edge_now: float) -> bool:
         """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly)."""
@@ -928,6 +953,7 @@ class HFTEngine:
         meta_enabled=True,
         seconds_to_expiry=None,
         cex_bid_imbalance=None,
+        skew_ms=0.0,
     ):
         if not fast_price or not poly_orderbook['ask']:
             return
@@ -1004,9 +1030,11 @@ class HFTEngine:
             and self.entry_zscore_trend_ok(trend["trend"])
             and self.entry_cex_bid_imbalance_ok(trend["trend"], cex_bid_imbalance)
         )
-        chop_latency_ok = self.entry_latency_allows_entry(
-            latency_ms
-        ) and self.entry_trend_flip_settled_ok(trend["age"])
+        chop_latency_ok = (
+            self.entry_latency_allows_entry(latency_ms)
+            and self.entry_skew_allows_entry(skew_ms)
+            and self.entry_trend_flip_settled_ok(trend["age"])
+        )
         edge_jump_ok = self.entry_edge_jump_ok(edge_now)
         aggressive_age_ok = self.entry_aggressive_trend_age_ok(edge_now, trend["age"])
         if self.no_entry_guards:
@@ -1045,6 +1073,27 @@ class HFTEngine:
                     latency_ms,
                     edge_mult,
                 )
+            if (
+                signal is not None
+                and not spread_gate
+            ):
+                _now = time.time()
+                _fg_log = float(os.getenv("HFT_FEED_GATE_LOG_MIN_SEC", "30.0"))
+                if (
+                    _fg_log > 0.0
+                    and _now - self._last_feed_gate_log_ts >= _fg_log
+                ):
+                    logging.info(
+                        "Entry blocked by spread_gate: signal=%s stale=%.0fms skew=%.0fms "
+                        "lat_ok=%s skew_ok=%s flip_age_ok=%s",
+                        signal,
+                        latency_ms,
+                        skew_ms,
+                        self.entry_latency_allows_entry(latency_ms),
+                        self.entry_skew_allows_entry(skew_ms),
+                        self.entry_trend_flip_settled_ok(trend["age"]),
+                    )
+                    self._last_feed_gate_log_ts = _now
 
         if self.pnl.inventory == 0:
             abs_move_up, aligned_up = self._book_move_for_outcome(up_mid, "_prev_up_mid", want_up=True)
@@ -1103,6 +1152,7 @@ class HFTEngine:
             and self.pnl.inventory == 0
             and self.can_trade()
             and self._entry_ask_allows_open(up_ask)
+            and self._entry_outcome_price_allows("UP", up_ask, down_ask)
             and rsi_ok_up
             and book_ok_up
             and spread_gate
@@ -1122,6 +1172,7 @@ class HFTEngine:
                 "entry_depth": trend["depth"],
                 "entry_imbalance": imbalance,
                 "latency_ms": latency_ms,
+                "skew_ms": float(skew_ms),
                 "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
                 "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
                 "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
@@ -1151,6 +1202,7 @@ class HFTEngine:
             and self.pnl.inventory == 0
             and self.can_trade()
             and self._entry_ask_allows_open(down_ask)
+            and self._entry_outcome_price_allows("DOWN", up_ask, down_ask)
             and rsi_ok_down
             and book_ok_down
             and spread_gate
@@ -1170,6 +1222,7 @@ class HFTEngine:
                 "entry_depth": trend["depth"],
                 "entry_imbalance": imbalance,
                 "latency_ms": latency_ms,
+                "skew_ms": float(skew_ms),
                 "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
                 "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
                 "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),

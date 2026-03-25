@@ -123,6 +123,7 @@ class PhaseRouterStrategy(BaseStrategy):
         meta_enabled: bool = True,
         seconds_to_expiry: float | None = None,
         cex_bid_imbalance: float | None = None,
+        skew_ms: float = 0.0,
     ) -> dict[str, Any] | None:
         """Apply phase profile for this tick then run the shared engine."""
         self._apply_phase(latency_ms)
@@ -137,6 +138,7 @@ class PhaseRouterStrategy(BaseStrategy):
             meta_enabled=meta_enabled,
             seconds_to_expiry=seconds_to_expiry,
             cex_bid_imbalance=cex_bid_imbalance,
+            skew_ms=skew_ms,
         )
 
     def generate_live_signal(
