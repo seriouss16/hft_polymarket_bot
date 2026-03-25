@@ -62,9 +62,13 @@ def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
 class PnLTracker:
     """Track position state and realized/unrealized PnL on Polymarket shares."""
 
-    def __init__(self, initial_balance=1000.0):
-        self.initial_balance = initial_balance
-        self.balance = initial_balance
+    def __init__(self, initial_balance=None):
+        """Initialize balance from HFT_DEPOSIT_USD when initial_balance is omitted."""
+        if initial_balance is not None:
+            self.initial_balance = float(initial_balance)
+        else:
+            self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "1000.0"))
+        self.balance = self.initial_balance
         self.inventory = 0.0
         self.entry_price = 0.0
         self.entry_ts = 0
@@ -74,12 +78,12 @@ class PnLTracker:
         self.wins = 0
         self.total_pnl = 0.0
         self.max_drawdown = 0.0
-        self.peak_balance = initial_balance
+        self.peak_balance = self.initial_balance
 
         self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE", "0.001"))
         self.last_realized_pnl = 0.0
         self.last_close_ts = 0.0
-        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "100.0"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
 
         self.recent_pnls = deque(
             maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME", "12"))

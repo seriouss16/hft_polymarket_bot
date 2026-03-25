@@ -118,8 +118,10 @@ async def main():
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "120"))
-    # All intervals default to 0: no artificial throttling (set env >0 only to limit CPU/API load).
+    # PULSE_INTERVAL_SEC>0: at most one Fast: line per N seconds. When 0, use HFT_FAST_LOG_MIN_SEC.
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
+    FAST_LOG_MIN_SEC = float(os.getenv("HFT_FAST_LOG_MIN_SEC", "0.25"))
+    pulse_log_period = PULSE_INTERVAL if PULSE_INTERVAL > 0.0 else FAST_LOG_MIN_SEC
     MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
     CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0"))
     LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "0"))
@@ -130,7 +132,7 @@ async def main():
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
     aggregator = FastPriceAggregator()
-    pnl = PnLTracker(initial_balance=1000.0)
+    pnl = PnLTracker()
     stats = StatsCollector(pnl)
     engine = HFTEngine(pnl, is_test_mode=TEST_MODE)
     lstm = AsyncLSTMPredictor(history_len=100)
@@ -356,7 +358,7 @@ async def main():
                     meta_enabled=trade_allowed or BYPASS_META_GATE,
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                 )
-                if PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
+                if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
                     trend = engine.get_trend_state()
                     bid_size = float(poly_book.book.get("bid_size_top", 1.0))
@@ -456,7 +458,7 @@ async def main():
                     if live_signal:
                         live_tid = token_up_id if live_signal == "BUY_UP" else (token_down_id or token_up_id)
                         await live_exec.execute(live_signal, live_tid)
-            elif PULSE_INTERVAL <= 0.0 or (now - last_pulse_time) > PULSE_INTERVAL:
+            elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
 

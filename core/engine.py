@@ -40,7 +40,7 @@ class HFTEngine:
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.05"))
         self.last_trade_time = 0.0
         self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "100.0"))
-        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "50.0"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
         self.entry_poly_mid = None
@@ -137,6 +137,10 @@ class HFTEngine:
         self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
         self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
 
+        self.deposit_usd = float(os.getenv("HFT_DEPOSIT_USD", "1000.0"))
+        self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT", "0"))
+        self.fixed_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
+
         # --- Стакан (Orderbook) и Ликвидность ---
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0001"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
@@ -208,8 +212,24 @@ class HFTEngine:
         req = max(self.min_hold_sec, self.pnl_tp_min_hold_sec)
         return hold_sec >= req
 
-    def _calc_dynamic_amount(self, exec_price: float) -> float:
-        """Size notional USD conservatively: cheap tokens use smaller $, mid via risk-per-tick."""
+    def _deposit_trade_notional(self) -> float:
+        """Return target notional USD from deposit, optional percent, and 10% hard cap."""
+        dep = max(0.0, self.deposit_usd)
+        ten_pct = dep * 0.10
+        fixed = max(0.0, self.fixed_trade_usd)
+        pct = self.trade_pct_of_deposit
+        if pct <= 0.0:
+            n = fixed
+        else:
+            raw = dep * (pct / 100.0)
+            if raw < ten_pct:
+                n = fixed
+            else:
+                n = min(raw, ten_pct)
+        return max(0.0, min(n, ten_pct, dep))
+
+    def _tier_dynamic_amount(self, exec_price: float) -> float:
+        """Compute notional from price tier and risk-per-tick before deposit cap."""
         px = float(exec_price)
         if px < self.dynamic_min_exec_price:
             return self.dynamic_floor_notional_usd
@@ -230,6 +250,18 @@ class HFTEngine:
             self.dynamic_amount_max_usd,
             max(self.dynamic_amount_min_usd, amount),
         )
+
+    def _calc_dynamic_amount(self, exec_price: float) -> float:
+        """Size notional USD: tier estimate capped by deposit rules and dynamic min/max."""
+        base = self._deposit_trade_notional()
+        tier = self._tier_dynamic_amount(exec_price)
+        amount = min(base, tier)
+        amount = min(amount, self.dynamic_amount_max_usd)
+        if base < self.dynamic_amount_min_usd:
+            floor = base
+        else:
+            floor = self.dynamic_amount_min_usd
+        return max(floor, amount)
 
     def get_last_rsi(self):
         """Return RSI of the last tick (fast price series)."""
