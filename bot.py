@@ -117,6 +117,7 @@ async def main():
     LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "0"))
     ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM", "0") == "1"
     SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC", "0"))
+    MIN_SLOT_POLL_SEC = 1.0
     
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
@@ -180,7 +181,9 @@ async def main():
             now = asyncio.get_event_loop().time()
             
             # 1. Авто-переключение слота (без фиксированной паузы: чаще = быстрее реакция на новый рынок).
-            if SLOT_POLL_SEC <= 0.0 or (now - last_slot_check_time) >= SLOT_POLL_SEC:
+            slot_poll = SLOT_POLL_SEC if SLOT_POLL_SEC > 0.0 else MIN_SLOT_POLL_SEC
+            slot_poll = max(slot_poll, MIN_SLOT_POLL_SEC)
+            if (now - last_slot_check_time) >= slot_poll:
                 last_slot_check_time = now
                 ts = selector.get_current_slot_timestamp()
                 slug = selector.format_slug(ts)

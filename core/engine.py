@@ -52,9 +52,9 @@ class HFTEngine:
         self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
         self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "2.5"))
         self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "1.5"))
-        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.10"))
-        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.020"))
-        self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC", "6.0"))
+        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.07"))
+        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.05"))
+        self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC", "2.0"))
 
         # --- RSI логика ---
         self.rsi_period = 14
@@ -122,7 +122,7 @@ class HFTEngine:
 
         # --- Скорость и Акселерация ---
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
-        self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "1") == "1"
+        self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "0") == "1"
         self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN", "0.10"))
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.15"))
 
@@ -160,18 +160,18 @@ class HFTEngine:
         self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT", "2.0"))
         self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC", "2.0"))
         self.entry_rsi_slope_filter_enabled = os.getenv(
-            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "1"
+            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "0"
         ) == "1"
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "30.0"))
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "50.0"))
         self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "70.0"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "50.0"))
         self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
 
         # --- Z-Score (Статистический вход) ---
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
-        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "5"))
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
 
         # --- CEX Дисбаланс (Coinbase/Binance) ---
         self.entry_cex_imbalance_enabled = os.getenv("HFT_ENTRY_CEX_IMBALANCE_ENABLED", "1") == "1"
@@ -473,7 +473,7 @@ class HFTEngine:
         """Require z-score to move monotonically with the intended side for several ticks."""
         if not self.entry_zscore_trend_enabled:
             return True
-        k = max(3, self.entry_zscore_strict_ticks)
+        k = max(2, self.entry_zscore_strict_ticks)
         if len(self._zscore_samples) < k:
             return True
         zs = list(self._zscore_samples)[-k:]
@@ -496,7 +496,7 @@ class HFTEngine:
 
     def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
         """Return True if recent z-score ticks are strictly monotone in the trade direction."""
-        k = max(3, self.entry_zscore_strict_ticks)
+        k = max(2, self.entry_zscore_strict_ticks)
         if len(self._zscore_samples) < k:
             return False
         zs = list(self._zscore_samples)[-k:]
@@ -1047,6 +1047,8 @@ class HFTEngine:
                     "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
                     "entry_up_bid": self.entry_context.get("entry_up_bid"),
                     "entry_up_ask": self.entry_context.get("entry_up_ask"),
+                    "entry_down_bid": self.entry_context.get("entry_down_bid"),
+                    "entry_down_ask": self.entry_context.get("entry_down_ask"),
                     "exit_up_bid": up_bid,
                     "exit_up_ask": up_ask,
                     "exit_down_bid": down_bid,

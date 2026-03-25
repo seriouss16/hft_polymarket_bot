@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -151,12 +152,20 @@ class MarketSelector:
         """Return Gamma slug for this asset and slot start timestamp."""
         return f"{self.asset.lower()}-updown-5m-{timestamp}"
 
+    async def _fetch_gamma_json(self, url: str, timeout: float = 5.0):
+        """Return parsed JSON for a Gamma API URL without blocking the event loop."""
+
+        def _do_request():
+            resp = requests.get(url, timeout=timeout)
+            return resp.json()
+
+        return await asyncio.to_thread(_do_request)
+
     async def fetch_up_down_token_ids(self, slug):
         """Return (up_token_id, down_token_id, question) for a market slug."""
         url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
         try:
-            resp = requests.get(url, timeout=5)
-            data = resp.json()
+            data = await self._fetch_gamma_json(url, timeout=5.0)
             if not data:
                 return None, None, slug
             m = data[0]
@@ -198,8 +207,7 @@ class MarketSelector:
         """Return UP/DOWN bid/ask quotes from Gamma payload for a market slug."""
         url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
         try:
-            resp = requests.get(url, timeout=5)
-            data = resp.json()
+            data = await self._fetch_gamma_json(url, timeout=5.0)
             if not data:
                 return {}
             market = data[0]
