@@ -1,6 +1,7 @@
 """Signal, risk, and simulated execution for Polymarket latency strategy."""
 
 import itertools
+import json
 import logging
 import os
 import time
@@ -9,6 +10,15 @@ from collections import deque
 import numpy as np
 
 from ml.indicators import compute_rsi, dynamic_rsi_bands
+
+DEBUG_LOG_PATH = "/mnt/work/DEV/PRJ0/prjBJ_arb_polymarket/.cursor/debug-ac56e4.log"
+DEBUG_SESSION_ID = "ac56e4"
+
+
+def _append_debug_log(payload: dict) -> None:
+    """Append one NDJSON line to active debug session file."""
+    with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
 
 
 def _price_array_for_rsi(price_history, max_len: int) -> np.ndarray:
@@ -45,6 +55,7 @@ class HFTEngine:
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
         self.entry_poly_mid = None
+        self.entry_outcome_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
 
@@ -164,8 +175,10 @@ class HFTEngine:
         # --- Задержка (Latency Guard) ---
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1200.0"))
         self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS", "550.0"))
-        self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP", "0.92"))
-        self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN", "0.92"))
+        self.entry_min_ask_up_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_UP", "0.08"))
+        self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP", "0.97"))
+        self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN", "0.08"))
+        self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN", "0.97"))
         self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
         self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
         self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
@@ -340,17 +353,30 @@ class HFTEngine:
         return float(ask_px) < self.max_entry_ask
 
     def _entry_outcome_price_allows(self, side: str, up_ask: float, down_ask: float) -> bool:
-        """Return False when the outcome ask is above the cheap-entry cap (poor R/R near $1)."""
+        """Return True only when outcome ask is inside configured entry bounds."""
+        def _ask_within_bounds(ask: float, min_cap: float, max_cap: float) -> bool:
+            """Return True when ask passes optional min/max entry guards."""
+            ask_val = float(ask)
+            min_active = 0.0 < float(min_cap) < 1.0
+            max_active = 0.0 < float(max_cap) < 1.0
+            if min_active and ask_val < float(min_cap):
+                return False
+            if max_active and ask_val > float(max_cap):
+                return False
+            return True
+
         if side == "UP":
-            cap = float(self.entry_max_ask_up_cap)
-            if cap <= 0.0 or cap >= 1.0:
-                return True
-            return float(up_ask) <= cap
+            return _ask_within_bounds(
+                ask=up_ask,
+                min_cap=self.entry_min_ask_up_cap,
+                max_cap=self.entry_max_ask_up_cap,
+            )
         if side == "DOWN":
-            cap = float(self.entry_max_ask_down_cap)
-            if cap <= 0.0 or cap >= 1.0:
-                return True
-            return float(down_ask) <= cap
+            return _ask_within_bounds(
+                ask=down_ask,
+                min_cap=self.entry_min_ask_down_cap,
+                max_cap=self.entry_max_ask_down_cap,
+            )
         return True
 
     def _hold_met(self, hold_sec: float) -> bool:
@@ -1217,8 +1243,9 @@ class HFTEngine:
             and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
         ):
             logging.info(
-                "Entry blocked: BUY_UP up_ask=%.4f above HFT_ENTRY_MAX_ASK_UP=%.4f.",
+                "Entry blocked: BUY_UP up_ask=%.4f outside [HFT_ENTRY_MIN_ASK_UP=%.4f, HFT_ENTRY_MAX_ASK_UP=%.4f].",
                 up_ask,
+                self.entry_min_ask_up_cap,
                 self.entry_max_ask_up_cap,
             )
             self._last_entry_cap_deny_log_ts = _t_cap
@@ -1230,8 +1257,9 @@ class HFTEngine:
             and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
         ):
             logging.info(
-                "Entry blocked: BUY_DOWN down_ask=%.4f above HFT_ENTRY_MAX_ASK_DOWN=%.4f.",
+                "Entry blocked: BUY_DOWN down_ask=%.4f outside [HFT_ENTRY_MIN_ASK_DOWN=%.4f, HFT_ENTRY_MAX_ASK_DOWN=%.4f].",
                 down_ask,
+                self.entry_min_ask_down_cap,
                 self.entry_max_ask_down_cap,
             )
             self._last_entry_cap_deny_log_ts = _t_cap
@@ -1260,6 +1288,7 @@ class HFTEngine:
             else:
                 self.last_trade_time = time.time()
                 self.entry_poly_mid = poly_mid
+                self.entry_outcome_mid = up_mid
                 self.entry_fast_price = fast_price
                 self.entry_time = time.time()
                 self.position_trend = trend["trend"]
@@ -1319,6 +1348,7 @@ class HFTEngine:
             else:
                 self.last_trade_time = time.time()
                 self.entry_poly_mid = poly_mid
+                self.entry_outcome_mid = down_mid
                 self.entry_fast_price = fast_price
                 self.entry_time = time.time()
                 self.position_trend = trend["trend"]
@@ -1360,6 +1390,10 @@ class HFTEngine:
             poly_move = 0.0
             if self.entry_poly_mid and self.entry_poly_mid > 0:
                 poly_move = (poly_mid - self.entry_poly_mid) / self.entry_poly_mid
+            side_mid = down_mid if self.pnl.position_side == "DOWN" else up_mid
+            side_move = 0.0
+            if self.entry_outcome_mid and self.entry_outcome_mid > 0:
+                side_move = (side_mid - self.entry_outcome_mid) / self.entry_outcome_mid
 
             if seconds_to_expiry is not None and seconds_to_expiry < 45:
                 pos_side = self.pnl.position_side or "UP"
@@ -1412,6 +1446,7 @@ class HFTEngine:
                         "exit_down_ask": down_ask,
                     }
                     self.entry_poly_mid = None
+                    self.entry_outcome_mid = None
                     self.entry_fast_price = None
                     self.entry_time = 0.0
                     self.position_trend = "FLAT"
@@ -1430,11 +1465,11 @@ class HFTEngine:
                     self._last_slot_expiry_info_log_ts = _now
 
             if self.pnl.position_side == "DOWN":
-                reaction_confirmed = self._hold_met(hold_sec) and poly_move <= -self.poly_take_profit_move
-                protective_stop = self._hold_met(hold_sec) and poly_move >= self.poly_stop_move
+                reaction_confirmed = self._hold_met(hold_sec) and side_move >= self.poly_take_profit_move
+                protective_stop = self._hold_met(hold_sec) and side_move <= -self.poly_stop_move
             else:
-                reaction_confirmed = self._hold_met(hold_sec) and poly_move >= self.poly_take_profit_move
-                protective_stop = self._hold_met(hold_sec) and poly_move <= -self.poly_stop_move
+                reaction_confirmed = self._hold_met(hold_sec) and side_move <= -self.poly_take_profit_move
+                protective_stop = self._hold_met(hold_sec) and side_move >= self.poly_stop_move
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             _, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
@@ -1466,6 +1501,36 @@ class HFTEngine:
                 or rsi_range_exit
                 or pnl_sl
             )
+            # region agent log
+            opposite_trend = (
+                (pos_side == "DOWN" and trend["trend"] == "UP")
+                or (pos_side == "UP" and trend["trend"] == "DOWN")
+            )
+            if opposite_trend and not should_close:
+                _append_debug_log(
+                    {
+                        "sessionId": DEBUG_SESSION_ID,
+                        "runId": "post-fix",
+                        "hypothesisId": "H2",
+                        "location": "core/engine.py:process_tick",
+                        "message": "Opposite trend while keeping position open.",
+                        "data": {
+                            "position_side": pos_side,
+                            "trend": trend["trend"],
+                            "hold_sec": hold_sec,
+                            "side_mid": side_mid,
+                            "side_move": side_move,
+                            "poly_move": poly_move,
+                            "unrealized": unrealized,
+                            "reaction_tp_confirmed": reaction_tp_confirmed,
+                            "protective_stop": protective_stop,
+                            "rsi_range_exit": rsi_range_exit,
+                            "pnl_sl": pnl_sl,
+                        },
+                        "timestamp": int(time.time() * 1000),
+                    }
+                )
+            # endregion
             if should_close:
                 reason = "REACTION_TP"
                 if protective_stop:
@@ -1475,11 +1540,12 @@ class HFTEngine:
                 elif pnl_sl:
                     reason = "PNL_SL"
                 logging.info(
-                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
+                    "📌 Exit reason=%s hold=%.1fs poly_move=%.4f side_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
                     "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f",
                     reason,
                     hold_sec,
                     poly_move,
+                    side_move,
                     fast_price - poly_mid,
                     unrealized,
                     imbalance,
@@ -1527,6 +1593,7 @@ class HFTEngine:
                     "exit_down_ask": down_ask,
                 }
                 self.entry_poly_mid = None
+                self.entry_outcome_mid = None
                 self.entry_fast_price = None
                 self.entry_time = 0.0
                 self.position_trend = "FLAT"
