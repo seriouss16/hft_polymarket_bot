@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+import argparse
 from pathlib import Path
 
 
@@ -71,6 +72,7 @@ import tensorflow as tf
 from core.selector import MarketSelector
 from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
+from core.live_position_manager import LivePositionManager
 from core.risk_engine import RiskEngine
 from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
@@ -115,19 +117,69 @@ def _setup_logging() -> None:
     fh.setFormatter(logging.Formatter(fmt))
     fh.addFilter(_dedupe)
     root.addHandler(fh)
+    http_log_debug = os.getenv("HFT_HTTP_LOG_DEBUG", "0") == "1"
+    http_noise_level = logging.INFO if http_log_debug else logging.WARNING
+    logging.getLogger("httpx").setLevel(http_noise_level)
+    logging.getLogger("httpcore").setLevel(http_noise_level)
     logging.info("File logging initialized: %s (retention=%s)", log_path.name, keep_files)
 
 
 _setup_logging()
 
-async def main():
+
+def _parse_runtime_mode() -> tuple[bool, bool]:
+    """Return runtime mode flags as (test_mode, live_mode)."""
+    parser = argparse.ArgumentParser(description="HFT bot runner.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--test", action="store_true", help="Run in simulation mode.")
+    mode_group.add_argument("--prod", action="store_true", help="Run in production mode.")
+    args = parser.parse_args()
+    env_live_mode = os.getenv("LIVE_MODE", "0") == "1"
+    if args.prod:
+        return False, True
+    if args.test:
+        return True, False
+    return (not env_live_mode), env_live_mode
+
+
+def _resolve_live_credentials() -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Resolve wallet keypair and optional API credentials for CLOB client."""
+    private_key = os.getenv("PRIVATE_KEY") or os.getenv("CLOB_PRIVATE_KEY")
+    funder = (
+        os.getenv("FUNDER")
+        or os.getenv("POLY_FUNDER_ADDRESS")
+        or os.getenv("WALLET")
+        or os.getenv("WALLET_ADDRESS")
+        or os.getenv("CLOB_FUNDER")
+    )
+    api_key = (
+        os.getenv("POLY_API_KEY")
+        or os.getenv("POLIMARKET_API_KEY")
+        or os.getenv("POLYMARKET_API_KEY")
+        or os.getenv("CLOB_API_KEY")
+    )
+    api_secret = (
+        os.getenv("POLY_API_SECRET")
+        or os.getenv("POLIMARKET_API_SECRET")
+        or os.getenv("POLYMARKET_API_SECRET")
+        or os.getenv("CLOB_API_SECRET")
+    )
+    api_passphrase = (
+        os.getenv("POLY_API_PASSPHRASE")
+        or os.getenv("POLIMARKET_API_PASSPHRASE")
+        or os.getenv("POLYMARKET_API_PASSPHRASE")
+        or os.getenv("CLOB_API_PASSPHRASE")
+    )
+    return private_key, funder, api_key, api_secret, api_passphrase
+
+
+async def main() -> None:
     if _UVLOOP_ACTIVE:
         logging.info("asyncio: uvloop event loop policy active")
 
     # --- Конфигурация ---
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
-    TEST_MODE = True
-    LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
+    TEST_MODE, LIVE_MODE = _parse_runtime_mode()
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "120"))
@@ -159,12 +211,24 @@ async def main():
         strategy_hub.set_active(default_strategy)
     strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES", "0") == "1")
     lstm = AsyncLSTMPredictor(history_len=100)
+    private_key, funder, api_key, api_secret, api_passphrase = _resolve_live_credentials()
+    if LIVE_MODE and (not private_key or not funder):
+        raise RuntimeError(
+            "Production mode requires PRIVATE_KEY/CLOB_PRIVATE_KEY and FUNDER/WALLET/WALLET_ADDRESS/CLOB_FUNDER in hft_bot/.env."
+        )
     live_exec = LiveExecutionEngine(
-        private_key=os.getenv("PRIVATE_KEY"),
-        funder=os.getenv("FUNDER"),
+        private_key=private_key,
+        funder=funder,
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
         test_mode=not LIVE_MODE,
         min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
         max_spread=float(os.getenv("LIVE_MAX_SPREAD", "1.0")),
+    )
+    live_position = LivePositionManager(
+        engine=live_exec,
+        entry_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
     )
     live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-1e12")))
     risk = RiskEngine(
@@ -547,6 +611,8 @@ async def main():
                             "performance_key": decision.get("performance_key"),
                         }
                     )
+                    if LIVE_MODE:
+                        await live_position.close_if_open(reason=str(decision.get("reason") or "strategy_close"))
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
                     live_signal = strategy_hub.generate_live_signal(
                         fast_price,
@@ -558,7 +624,7 @@ async def main():
                     )
                     if live_signal:
                         live_tid = token_up_id if live_signal == "BUY_UP" else (token_down_id or token_up_id)
-                        await live_exec.execute(live_signal, live_tid)
+                        await live_position.open_or_flip(live_signal, live_tid)
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

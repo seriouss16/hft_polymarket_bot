@@ -54,13 +54,15 @@ def _snapshot_from_levels(
 
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import OrderArgs, OrderType
-    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY, SELL
 except Exception:  # pragma: no cover - optional runtime dependency
     ClobClient = None
+    ApiCreds = None
     OrderArgs = None
     OrderType = None
     BUY = "BUY"
+    SELL = "SELL"
 
 
 @dataclass
@@ -91,6 +93,9 @@ class LiveExecutionEngine:
         self,
         private_key: str | None,
         funder: str | None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        api_passphrase: str | None = None,
         test_mode: bool = True,
         min_order_size: float = 10.0,
         max_spread: float = 0.03,
@@ -108,17 +113,39 @@ class LiveExecutionEngine:
             return
 
         # Public market-data client is available in both SIM and LIVE.
+        signature_type = int(
+            os.getenv("HFT_CLOB_SIGNATURE_TYPE")
+            or os.getenv("POLY_SIGNATURE_TYPE")
+            or "1"
+        )
         self.client = ClobClient(
             "https://clob.polymarket.com",
             key=private_key or "",
             chain_id=137,
-            signature_type=1,
+            signature_type=signature_type,
             funder=funder or "",
         )
         if not self.test_mode:
             if not private_key or not funder:
                 raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
-            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            if api_key and api_secret and api_passphrase:
+                try:
+                    self.client.set_api_creds(
+                        ApiCreds(
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            api_passphrase=api_passphrase,
+                        )
+                    )
+                    logging.info("Using explicit Polymarket CLOB API credentials from environment.")
+                except Exception as exc:
+                    logging.warning(
+                        "Explicit CLOB API credentials failed (%s); falling back to derived API creds.",
+                        exc,
+                    )
+                    self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            else:
+                self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
@@ -160,22 +187,34 @@ class LiveExecutionEngine:
         ask_levels = _levels_from_book_rows(book.asks)
         return _snapshot_from_levels(bid_levels, ask_levels, depth)
 
-    def _place_limit(self, token_id: str, side: str, price: float, size: float) -> None:
+    def _place_limit(self, token_id: str, side: str, price: float, size: float) -> bool:
         """Send one GTC limit order or print it in simulation mode."""
         if self.test_mode:
             logging.info("[SIM LIMIT] %s size=%.2f @ %.4f token=%s", side, size, price, token_id)
-            return
+            return True
         order = OrderArgs(
             token_id=token_id,
             price=price,
             size=size,
             side=side,
         )
-        signed = self.client.create_order(order)
-        resp = self.client.post_order(signed, OrderType.GTC)
-        logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
+        try:
+            signed = self.client.create_order(order)
+            resp = self.client.post_order(signed, OrderType.GTC)
+            logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
+            return True
+        except Exception as exc:
+            logging.error(
+                "Order placement failed: side=%s size=%.4f price=%.4f token=%s error=%s",
+                side,
+                size,
+                price,
+                token_id,
+                exc,
+            )
+            return False
 
-    async def execute(self, signal: str, token_id: str) -> None:
+    async def execute(self, signal: str, token_id: str) -> bool:
         """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
         if best_ask >= self.max_entry_ask:
@@ -185,17 +224,30 @@ class LiveExecutionEngine:
                 best_ask,
                 self.max_entry_ask,
             )
-            return
+            return False
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
-            return
+            return False
 
         size = self.min_order_size
         if signal == "BUY_UP":
             price = max(0.01, min(0.99, best_ask - 0.002))
-            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+            return await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
         elif signal == "BUY_DOWN":
             price = max(0.01, min(0.99, best_ask - 0.002))
-            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+            return await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+        return False
+
+    async def close_position(self, token_id: str, size: float) -> bool:
+        """Close a previously opened outcome position by selling to the bid."""
+        if size <= 0:
+            return False
+        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        spread = best_ask - best_bid
+        if spread <= 0 or spread > self.max_spread:
+            logging.warning("Skip close: bad spread %.4f token=%s.", spread, token_id)
+            return False
+        price = max(0.01, min(0.99, best_bid + 0.001))
+        return await asyncio.to_thread(self._place_limit, token_id, SELL, price, size)
 
