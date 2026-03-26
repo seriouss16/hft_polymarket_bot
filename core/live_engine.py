@@ -104,6 +104,11 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
+        self.default_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", str(min_order_size)))
+        self.min_entry_shares = float(os.getenv("HFT_MIN_ENTRY_SHARES", "6.0"))
+        self.min_exit_shares = float(os.getenv("HFT_MIN_EXIT_SHARES", "5.0"))
+        self.share_fee_buffer = float(os.getenv("HFT_SHARE_FEE_BUFFER", "0.2"))
+        self.enforce_collateral_check = os.getenv("HFT_ENFORCE_COLLATERAL_CHECK", "1") == "1"
         self.client = None
         self._http = requests.Session()
 
@@ -214,6 +219,96 @@ class LiveExecutionEngine:
             )
             return False
 
+    @staticmethod
+    def _to_float(value: object) -> float | None:
+        """Convert API payload value to float when possible."""
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_collateral_available(self, payload: object) -> float | None:
+        """Try to extract available collateral from CLOB allowance payload."""
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            candidates = (
+                payload.get("available"),
+                payload.get("balance"),
+                payload.get("allowance"),
+                payload.get("available_balance"),
+                payload.get("availableBalance"),
+            )
+            for item in candidates:
+                val = self._to_float(item)
+                if val is not None:
+                    return val
+            nested = payload.get("response")
+            if isinstance(nested, dict):
+                return self._extract_collateral_available(nested)
+            return None
+        for attr in ("available", "balance", "allowance", "available_balance", "availableBalance"):
+            val = self._to_float(getattr(payload, attr, None))
+            if val is not None:
+                return val
+        return None
+
+    def _get_available_collateral(self) -> float | None:
+        """Return available collateral from CLOB API when method is supported."""
+        if self.client is None or not hasattr(self.client, "get_balance_allowance"):
+            return None
+        method = getattr(self.client, "get_balance_allowance")
+        payload = None
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            payload = method(params=params)
+        except Exception:
+            try:
+                payload = method()
+            except Exception:
+                return None
+        return self._extract_collateral_available(payload)
+
+    def _resolve_entry_size(self, best_ask: float) -> tuple[float, float] | None:
+        """Return (shares, notional_usd) if order satisfies budget and min-share constraints."""
+        if best_ask <= 0.0:
+            return None
+        max_shares_by_budget = self.default_trade_usd / best_ask
+        required_shares = self.min_entry_shares
+        if (required_shares + self.share_fee_buffer) < self.min_exit_shares:
+            required_shares = self.min_exit_shares + self.share_fee_buffer
+        if max_shares_by_budget + 1e-9 < required_shares:
+            logging.warning(
+                "Skip entry: budget %.4f USD cannot buy required %.3f shares at ask %.4f.",
+                self.default_trade_usd,
+                required_shares,
+                best_ask,
+            )
+            return None
+        shares = max(required_shares, self.min_order_size)
+        shares = min(shares, max_shares_by_budget)
+        if shares + 1e-9 < required_shares:
+            logging.warning(
+                "Skip entry: resolved shares %.3f below required %.3f at ask %.4f.",
+                shares,
+                required_shares,
+                best_ask,
+            )
+            return None
+        notional = shares * best_ask
+        if notional - self.default_trade_usd > 1e-9:
+            logging.warning(
+                "Skip entry: notional %.4f USD exceeds HFT_DEFAULT_TRADE_USD %.4f.",
+                notional,
+                self.default_trade_usd,
+            )
+            return None
+        return shares, notional
+
     async def execute(self, signal: str, token_id: str) -> bool:
         """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
@@ -229,8 +324,19 @@ class LiveExecutionEngine:
         if spread <= 0 or spread > self.max_spread:
             logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
             return False
-
-        size = self.min_order_size
+        resolved_size = self._resolve_entry_size(best_ask)
+        if resolved_size is None:
+            return False
+        size, notional = resolved_size
+        if self.enforce_collateral_check and not self.test_mode:
+            available = await asyncio.to_thread(self._get_available_collateral)
+            if available is not None and available + 1e-9 < notional:
+                logging.warning(
+                    "Skip entry: insufficient collateral available=%.4f required=%.4f (includes open orders).",
+                    available,
+                    notional,
+                )
+                return False
         if signal == "BUY_UP":
             price = max(0.01, min(0.99, best_ask - 0.002))
             return await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
@@ -242,6 +348,14 @@ class LiveExecutionEngine:
     async def close_position(self, token_id: str, size: float) -> bool:
         """Close a previously opened outcome position by selling to the bid."""
         if size <= 0:
+            return False
+        if size + self.share_fee_buffer + 1e-9 < self.min_exit_shares:
+            logging.warning(
+                "Skip close: size %.3f with fee buffer %.3f below min exit shares %.3f.",
+                size,
+                self.share_fee_buffer,
+                self.min_exit_shares,
+            )
             return False
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
         spread = best_ask - best_bid
