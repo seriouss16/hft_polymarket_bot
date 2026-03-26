@@ -55,7 +55,10 @@ class PhaseRouterStrategy(BaseStrategy):
         """Select profile from prior trend state and apply before signal logic."""
         tr = self._engine.get_trend_state()
         profile = select_engine_profile(tr, latency_ms)
-        self._engine.apply_profile(profile)
+        try:
+            self._engine.apply_profile(profile)
+        except Exception as exc:
+            logging.error("Failed to apply profile %s: %s", profile, exc)
         now = time.time()
         diag = diagnose_phase(tr, latency_ms)
         if not diag.get("logic_ok", True):
@@ -69,31 +72,18 @@ class PhaseRouterStrategy(BaseStrategy):
                 profile != self._last_applied
                 or now - self._last_diag_log_ts >= float(os.getenv("HFT_LOG_PHASE_DIAGNOSTICS_SEC", "45"))
             ):
-                th = diag.get("thresholds") or {}
                 obs = diag.get("observed") or {}
-                chk = diag.get("checks") or {}
                 logging.info(
                     "Phase diag: selected=%s soft_eligible=%s logic_ok=%s | "
-                    "trend=%s speed=%.2f (max_soft %.1f) edge=%.2f (max_soft %.1f) "
-                    "age=%.1f (min %.1f) stale=%.0f (max_soft %.0f) | "
-                    "checks dir=%s age=%s spd=%s edge=%s lat=%s | blockers=%s",
+                    "trend=%s speed=%.2f edge=%.2f age=%.1fs stale=%.0fms | blockers=%s",
                     diag.get("selected"),
                     diag.get("soft_eligible"),
                     diag.get("logic_ok"),
                     obs.get("trend"),
                     float(obs.get("speed", 0.0)),
-                    float(th.get("soft_max_abs_speed", 0.0)),
                     float(obs.get("edge", 0.0)),
-                    float(th.get("soft_max_abs_edge", 0.0)),
                     float(obs.get("age", 0.0)),
-                    float(th.get("soft_min_age", 0.0)),
                     float(obs.get("staleness_ms", 0.0)),
-                    float(th.get("soft_max_latency_ms", 0.0)),
-                    chk.get("directional"),
-                    chk.get("age_ok"),
-                    chk.get("speed_ok"),
-                    chk.get("edge_ok"),
-                    chk.get("latency_ok"),
                     ",".join(diag.get("blockers") or []) or "-",
                 )
                 self._last_diag_log_ts = now
@@ -124,6 +114,7 @@ class PhaseRouterStrategy(BaseStrategy):
         seconds_to_expiry: float | None = None,
         cex_bid_imbalance: float | None = None,
         skew_ms: float = 0.0,
+        **kwargs: Any,
     ) -> dict[str, Any] | None:
         """Apply phase profile for this tick then run the shared engine."""
         self._apply_phase(latency_ms)
@@ -139,6 +130,7 @@ class PhaseRouterStrategy(BaseStrategy):
             seconds_to_expiry=seconds_to_expiry,
             cex_bid_imbalance=cex_bid_imbalance,
             skew_ms=skew_ms,
+            **kwargs,
         )
 
     def generate_live_signal(

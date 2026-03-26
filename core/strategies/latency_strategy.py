@@ -51,6 +51,7 @@ class LatencyArbitrageStrategy(BaseStrategy):
         seconds_to_expiry: float | None = None,
         cex_bid_imbalance: float | None = None,
         skew_ms: float = 0.0,
+        **kwargs: Any,
     ) -> dict[str, Any] | None:
         """Forward tick to wrapped strategy engine."""
         return await self._engine.process_tick(
@@ -65,6 +66,7 @@ class LatencyArbitrageStrategy(BaseStrategy):
             seconds_to_expiry=seconds_to_expiry,
             cex_bid_imbalance=cex_bid_imbalance,
             skew_ms=skew_ms,
+            **kwargs,
         )
 
     def generate_live_signal(
