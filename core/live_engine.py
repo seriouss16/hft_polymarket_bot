@@ -104,6 +104,7 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
+        self.min_entry_ask = float(os.getenv("HFT_MIN_ENTRY_ASK", "0.08"))
         self.default_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", str(min_order_size)))
         self.min_entry_shares = float(os.getenv("HFT_MIN_ENTRY_SHARES", "6.0"))
         self.min_exit_shares = float(os.getenv("HFT_MIN_EXIT_SHARES", "5.0"))
@@ -274,55 +275,45 @@ class LiveExecutionEngine:
         return self._extract_collateral_available(payload)
 
     def _resolve_entry_size(self, best_ask: float) -> tuple[float, float] | None:
-        """Return (shares, notional_usd) if order satisfies budget and min-share constraints."""
+        """Pick entry size: at least exchange min shares, up to default trade USD budget."""
         if best_ask <= 0.0:
             return None
+
+        required_shares = max(
+            self.min_entry_shares,
+            self.min_exit_shares + self.share_fee_buffer,
+        )
+
         max_shares_by_budget = self.default_trade_usd / best_ask
-        required_shares = self.min_entry_shares
-        if (required_shares + self.share_fee_buffer) < self.min_exit_shares:
-            required_shares = self.min_exit_shares + self.share_fee_buffer
-        if max_shares_by_budget + 1e-9 < required_shares:
-            logging.warning(
-                "Skip entry: budget %.4f USD cannot buy required %.3f shares at ask %.4f.",
-                self.default_trade_usd,
-                required_shares,
-                best_ask,
-            )
-            return None
-        shares = max(required_shares, self.min_order_size)
-        shares = min(shares, max_shares_by_budget)
-        if shares + 1e-9 < required_shares:
-            logging.warning(
-                "Skip entry: resolved shares %.3f below required %.3f at ask %.4f.",
-                shares,
-                required_shares,
-                best_ask,
-            )
-            return None
+
+        shares = min(max_shares_by_budget, max(required_shares, self.min_order_size))
+
+        if shares < required_shares:
+            shares = required_shares
+
         notional = shares * best_ask
-        if notional - self.default_trade_usd > 1e-9:
+
+        if notional > self.default_trade_usd + 0.5:
             logging.warning(
-                "Skip entry: notional %.4f USD exceeds HFT_DEFAULT_TRADE_USD %.4f.",
+                "Entry size capped by budget: shares=%.3f notional=%.2f (budget=%s)",
+                shares,
                 notional,
                 self.default_trade_usd,
             )
-            return None
+
         return shares, notional
 
     async def execute(self, signal: str, token_id: str) -> bool:
-        """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
-        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
-        if best_ask >= self.max_entry_ask:
+        """Validate ask band and place limit order for BUY_UP/BUY_DOWN (no spread gate)."""
+        _, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        if best_ask >= self.max_entry_ask or best_ask < self.min_entry_ask:
             logging.warning(
-                "Skip %s: best_ask %.4f >= max entry ask %.4f.",
+                "Skip %s: best_ask %.4f outside entry ask band [%.4f, %.4f).",
                 signal,
                 best_ask,
+                self.min_entry_ask,
                 self.max_entry_ask,
             )
-            return False
-        spread = best_ask - best_bid
-        if spread <= 0 or spread > self.max_spread:
-            logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
             return False
         resolved_size = self._resolve_entry_size(best_ask)
         if resolved_size is None:
@@ -357,11 +348,7 @@ class LiveExecutionEngine:
                 self.min_exit_shares,
             )
             return False
-        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
-        spread = best_ask - best_bid
-        if spread <= 0 or spread > self.max_spread:
-            logging.warning("Skip close: bad spread %.4f token=%s.", spread, token_id)
-            return False
+        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.001))
         return await asyncio.to_thread(self._place_limit, token_id, SELL, price, size)
 
