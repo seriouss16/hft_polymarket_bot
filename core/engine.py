@@ -936,14 +936,24 @@ class HFTEngine:
             return True
         if not self.entry_zscore_trend_enabled:
             return True
-        k = max(2, self.entry_zscore_strict_ticks)
-        if len(self._zscore_samples) < k:
+        k = max(1, self.entry_zscore_strict_ticks)
+        if len(self._zscore_samples) < 2:
             return True
-        zs = list(self._zscore_samples)[-k:]
+        zs = list(self._zscore_samples)
+        if k == 1:
+            # Single-tick check: last z-score must have moved in the right direction.
+            if trend_dir == "UP":
+                return zs[-1] > zs[-2]
+            if trend_dir == "DOWN":
+                return zs[-1] < zs[-2]
+            return True
+        recent = zs[-(k + 1):]
+        if len(recent) < 2:
+            return True
         if trend_dir == "UP":
-            return all(zs[i] < zs[i + 1] for i in range(len(zs) - 1))
+            return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
         if trend_dir == "DOWN":
-            return all(zs[i] > zs[i + 1] for i in range(len(zs) - 1))
+            return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
         return True
 
     def entry_cex_bid_imbalance_ok(self, trend_dir: str, cex_bid_imbalance: float | None) -> bool:
@@ -959,14 +969,23 @@ class HFTEngine:
 
     def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
         """Return True if recent z-score ticks are strictly monotone in the trade direction."""
-        k = max(2, self.entry_zscore_strict_ticks)
-        if len(self._zscore_samples) < k:
+        k = max(1, self.entry_zscore_strict_ticks)
+        if len(self._zscore_samples) < 2:
             return False
-        zs = list(self._zscore_samples)[-k:]
+        zs = list(self._zscore_samples)
+        if k == 1:
+            if trend_dir == "UP":
+                return zs[-1] > zs[-2]
+            if trend_dir == "DOWN":
+                return zs[-1] < zs[-2]
+            return False
+        recent = zs[-(k + 1):]
+        if len(recent) < 2:
+            return False
         if trend_dir == "UP":
-            return all(zs[i] < zs[i + 1] for i in range(len(zs) - 1))
+            return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
         if trend_dir == "DOWN":
-            return all(zs[i] > zs[i + 1] for i in range(len(zs) - 1))
+            return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
         return False
 
     def _entry_momentum_alt_signal(
