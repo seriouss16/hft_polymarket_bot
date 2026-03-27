@@ -197,7 +197,7 @@ def _setup_logging() -> None:
     """Configure stdout logging and per-run file logs with retention."""
     log_dir = Path(os.getenv("HFT_LOG_DIR", str(Path(__file__).resolve().parent / "reports" / "logs")))
     log_dir.mkdir(parents=True, exist_ok=True)
-    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES", "5"))
+    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES", "20"))
     start_tag = datetime.now().strftime("%d%m%y_%H%M%S")
     log_basename = f"bot_{start_tag}.log"
     log_path = log_dir / log_basename
