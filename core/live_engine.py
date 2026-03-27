@@ -135,9 +135,16 @@ class LiveRiskManager:
     def can_trade(self) -> bool:
         """Return False when daily drawdown limit is breached."""
         if self.pnl < self.max_daily_loss:
-            logging.error("🛑 STOP: daily loss limit reached (%.2f).", self.pnl)
+            logging.error("🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).", self.pnl, self.max_daily_loss)
             return False
         return True
+
+    def log_status(self) -> None:
+        """Log current risk state for diagnostics."""
+        logging.info(
+            "[LIVE RISK] session_pnl=%.4f max_daily_loss=%.4f trades=%d can_trade=%s",
+            self.pnl, self.max_daily_loss, self.trades, self.can_trade(),
+        )
 
 
 class LiveExecutionEngine:

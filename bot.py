@@ -774,6 +774,8 @@ async def main():
                                     strategy_name=decision.get("strategy_name") or "",
                                     performance_key=decision.get("performance_key"),
                                 )
+                                live_risk.update(_live_pnl)
+                                live_risk.log_status()
                             else:
                                 _live_pnl = 0.0
                                 # SELL completely failed — force-clear the PnL position so the
@@ -882,6 +884,38 @@ async def main():
                                 float(_trade_info.get("amount_usd") or 0.0)
                                 or float(os.environ["LIVE_ORDER_SIZE"])
                             )
+                            # Cap order size to actual CLOB balance to prevent
+                            # "not enough balance" rejections when account dropped
+                            # below the configured LIVE_ORDER_SIZE after a loss.
+                            _real_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                            if _real_usdc is not None and _real_usdc < _cost_usd:
+                                logging.warning(
+                                    "⚠️ [LIVE] Real USDC balance %.4f < order size %.4f "
+                                    "— capping to available balance.",
+                                    _real_usdc, _cost_usd,
+                                )
+                                _cost_usd = _real_usdc
+                            # Verify capped budget can still buy CLOB minimum shares.
+                            # Use entry ask price from decision if available to estimate shares.
+                            _poly_min_sh = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+                            _trade_dict = decision.get("trade") or {}
+                            _entry_ask = float(
+                                _trade_dict.get("exec_px")
+                                or _trade_dict.get("book_px")
+                                or 0.0
+                            )
+                            _budget_too_low = (
+                                _entry_ask > 0.0
+                                and (_cost_usd / _entry_ask) < _poly_min_sh
+                            )
+                            if _budget_too_low:
+                                logging.warning(
+                                    "⚠️ [LIVE] Budget %.4f USD @ %.4f = %.2f shares < "
+                                    "CLOB min %.0f — skipping entry (insufficient balance).",
+                                    _cost_usd, _entry_ask,
+                                    _cost_usd / _entry_ask, _poly_min_sh,
+                                )
+                                _live_skip_until = now + _live_skip_cooldown_sec
                             if now < _live_skip_until:
                                 logging.debug(
                                     "[LIVE] OPEN suppressed during skip-cooldown (%.1fs left).",
