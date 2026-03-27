@@ -83,6 +83,18 @@ class HFTEngine:
         self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.05"))
         self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC", "2.0"))
 
+        # --- Trailing TP/SL ---
+        self.trailing_tp_enabled = os.getenv("HFT_TRAILING_TP_ENABLED", "1") == "1"
+        self.trailing_tp_activate_usd = float(os.getenv("HFT_TRAILING_TP_ACTIVATE_USD", "0.04"))
+        self.trailing_tp_pullback_pct = float(os.getenv("HFT_TRAILING_TP_PULLBACK_PCT", "0.35"))
+        self.trailing_tp_min_pullback_usd = float(os.getenv("HFT_TRAILING_TP_MIN_PULLBACK_USD", "0.03"))
+        self.trailing_sl_enabled = os.getenv("HFT_TRAILING_SL_ENABLED", "1") == "1"
+        self.trailing_sl_breakeven_at_usd = float(os.getenv("HFT_TRAILING_SL_BREAKEVEN_AT_USD", "0.06"))
+        self.trailing_sl_step_usd = float(os.getenv("HFT_TRAILING_SL_STEP_USD", "0.04"))
+        self.trailing_sl_step_lock_pct = float(os.getenv("HFT_TRAILING_SL_STEP_LOCK_PCT", "0.50"))
+        self._peak_unrealized = 0.0
+        self._trailing_sl_floor = None
+
         # --- RSI логика ---
         self.rsi_period = 14
         self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN", "128"))
@@ -466,6 +478,54 @@ class HFTEngine:
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
         return self.min_hold_sec <= 0.0 or hold_sec >= self.min_hold_sec
+
+    def _update_trailing_state(self, unrealized: float) -> None:
+        """Track peak unrealized PnL and ratchet the trailing SL floor upward."""
+        if unrealized > self._peak_unrealized:
+            self._peak_unrealized = unrealized
+        if not self.trailing_sl_enabled:
+            return
+        if self._peak_unrealized >= self.trailing_sl_breakeven_at_usd:
+            new_floor = 0.0
+            if self.trailing_sl_step_usd > 0.0:
+                steps_above = (self._peak_unrealized - self.trailing_sl_breakeven_at_usd) / self.trailing_sl_step_usd
+                new_floor = int(steps_above) * self.trailing_sl_step_usd * self.trailing_sl_step_lock_pct
+            if self._trailing_sl_floor is None or new_floor > self._trailing_sl_floor:
+                self._trailing_sl_floor = new_floor
+
+    def _trailing_tp_triggered(self, unrealized: float, hold_sec: float) -> bool:
+        """Return True when profit has pulled back from peak beyond the trailing threshold."""
+        if not self.trailing_tp_enabled:
+            return False
+        if not self._hold_met(hold_sec):
+            return False
+        if self._peak_unrealized < self.trailing_tp_activate_usd:
+            return False
+        pullback = self._peak_unrealized - unrealized
+        threshold = max(
+            self._peak_unrealized * self.trailing_tp_pullback_pct,
+            self.trailing_tp_min_pullback_usd,
+        )
+        return pullback >= threshold
+
+    def _trailing_sl_triggered(self, unrealized: float, hold_sec: float) -> bool:
+        """Return True when unrealized PnL drops below the ratcheted trailing SL floor.
+
+        Floor is always >= 0: at breakeven_at activation it equals 0 (breakeven),
+        then ratchets up by step_usd * lock_pct for each additional step_usd of peak profit.
+        """
+        if not self.trailing_sl_enabled:
+            return False
+        if not self._hold_met(hold_sec):
+            return False
+        if self._trailing_sl_floor is None:
+            return False
+        return unrealized < self._trailing_sl_floor
+
+    def _reset_trailing_state(self) -> None:
+        """Clear trailing tracking on position close or new entry."""
+        self._peak_unrealized = 0.0
+        self._trailing_sl_floor = None
 
     def _opposite_trend_exit_triggered(
         self,
@@ -1434,6 +1494,7 @@ class HFTEngine:
             else:
                 self._diag_inc("entry_open_ok")
                 self.last_trade_time = time.time()
+                self._reset_trailing_state()
                 self.entry_poly_mid = poly_mid
                 self.entry_outcome_mid = up_mid
                 self.entry_fast_price = fast_price
@@ -1511,6 +1572,7 @@ class HFTEngine:
             else:
                 self._diag_inc("entry_open_ok")
                 self.last_trade_time = time.time()
+                self._reset_trailing_state()
                 self.entry_poly_mid = poly_mid
                 self.entry_outcome_mid = down_mid
                 self.entry_fast_price = fast_price
@@ -1635,6 +1697,7 @@ class HFTEngine:
                     self._prev_up_mid = None
                     self._prev_down_mid = None
                     self.last_close_time = time.time()
+                    self._reset_trailing_state()
                     return result
                 _now = time.time()
                 _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC", "8.0"))
@@ -1652,6 +1715,9 @@ class HFTEngine:
                 reaction_confirmed = self._hold_met(hold_sec) and side_move >= self.poly_take_profit_move
                 protective_stop = self._hold_met(hold_sec) and side_move <= -self.poly_stop_move
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
+            self._update_trailing_state(unrealized)
+            trailing_tp = self._trailing_tp_triggered(unrealized, hold_sec)
+            trailing_sl = self._trailing_sl_triggered(unrealized, hold_sec)
             _, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
             pos_side = self.pnl.position_side or "UP"
@@ -1689,6 +1755,8 @@ class HFTEngine:
 
             should_close = (
                 trend_flip_exit
+                or trailing_tp
+                or trailing_sl
                 or reaction_tp_confirmed
                 or protective_stop
                 or rsi_range_exit
@@ -1726,6 +1794,12 @@ class HFTEngine:
                 if trend_flip_exit:
                     self._diag_inc("exit_reason_trend_flip")
                     reason = "TREND_FLIP_EXIT"
+                elif trailing_tp:
+                    self._diag_inc("exit_reason_trailing_tp")
+                    reason = "TRAILING_TP"
+                elif trailing_sl:
+                    self._diag_inc("exit_reason_trailing_sl")
+                    reason = "TRAILING_SL"
                 elif protective_stop:
                     self._diag_inc("exit_reason_reaction_stop")
                     reason = "REACTION_STOP"
@@ -1737,9 +1811,15 @@ class HFTEngine:
                     reason = "PNL_SL"
                 else:
                     self._diag_inc("exit_reason_reaction_tp")
+                _trail_info = ""
+                if self.trailing_tp_enabled or self.trailing_sl_enabled:
+                    _trail_info = (
+                        f" peak_pnl={self._peak_unrealized:+.4f}"
+                        f" sl_floor={self._trailing_sl_floor}"
+                    )
                 logging.info(
                     "📌 Exit reason=%s hold=%.1fs poly_move=%.4f side_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
-                    "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f",
+                    "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f%s",
                     reason,
                     hold_sec,
                     poly_move,
@@ -1751,6 +1831,7 @@ class HFTEngine:
                     lower_b,
                     upper_b,
                     self._last_rsi_slope,
+                    _trail_info,
                 )
                 exit_price = down_bid if self.pnl.position_side == "DOWN" else up_bid
                 close_event = await self.execute("SELL", exit_price)
@@ -1800,6 +1881,7 @@ class HFTEngine:
                 self._prev_up_mid = None
                 self._prev_down_mid = None
                 self.last_close_time = time.time()
+                self._reset_trailing_state()
                 return result
             self._diag_inc("exit_hold")
 
