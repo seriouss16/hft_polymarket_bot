@@ -376,25 +376,31 @@ class LiveExecutionEngine:
     def _get_order_fill(self, order_id: str) -> tuple[str, float]:
         """Return (status_str, filled_size) for an active order from CLOB.
 
+        Uses the authenticated client.get_order() call which requires L2 credentials.
+        The previous approach of GET /order/{id} always returned 404 — that endpoint
+        does not exist on the Polymarket CLOB; the correct API is GET /order/{id}
+        via the SDK which internally uses authenticated /orders?id= calls.
         Returns ("unknown", 0.0) when the client is unavailable or in test mode.
-        Queries clob.polymarket.com directly to avoid Cloudflare blocks on polymarket.com.
         """
         if self.test_mode or self.client is None:
             return "unknown", 0.0
         try:
-            resp = self._http.get(
-                f"https://clob.polymarket.com/order/{order_id}",
-                timeout=5,
-            )
-            if resp.status_code != 200:
-                logging.warning(
-                    "Order fill poll HTTP %s for order=%s.", resp.status_code, order_id
-                )
+            data = self.client.get_order(order_id)
+            if not data:
+                logging.warning("Order fill poll: empty response for order=%s.", order_id)
                 return "unknown", 0.0
-            data = resp.json()
-            status = str(data.get("status", "unknown")).lower()
-            filled = float(data.get("size_matched", 0.0) or 0.0)
-            return status, filled
+            status = str(data.get("status", "unknown")).upper()
+            # Polymarket statuses: LIVE, MATCHED, CANCELED, ORDER_STATUS_MATCHED, etc.
+            # Normalise to lowercase tokens our _poll_order understands.
+            status_lower = status.lower().replace("order_status_", "")
+            filled_raw = float(data.get("size_matched", 0.0) or 0.0)
+            # size_matched is in raw shares (integer), original_size too — both unitless.
+            # Divide by 1_000_000 only if original_size is very large (fixed-point format).
+            original_raw = float(data.get("original_size", 1.0) or 1.0)
+            if original_raw > 1000:
+                # Fixed-point 6-decimal format used by some Polymarket API responses.
+                filled_raw /= 1_000_000.0
+            return status_lower, filled_raw
         except Exception as exc:
             logging.warning("Order fill poll failed order=%s: %s", order_id, exc)
             return "unknown", 0.0
@@ -570,6 +576,12 @@ class LiveExecutionEngine:
                 self._get_order_fill, tracked.order_id
             )
 
+            # Polymarket API statuses (after normalisation to lower, prefix stripped):
+            #   "live"            — order is open, not yet matched
+            #   "matched"         — fully matched (= filled)
+            #   "canceled"        — cancelled by user or system
+            #   "partially_matched" — some shares filled, rest still open
+            # Historic aliases still accepted: "filled", "order_status_matched".
             if status_str in ("matched", "filled"):
                 tracked.status = OrderStatus.FILLED
                 tracked.filled_size = tracked.size
@@ -579,7 +591,17 @@ class LiveExecutionEngine:
                 )
                 break
 
-            if status_str == "partially_matched" and clob_filled > tracked.filled_size:
+            if status_str in ("canceled", "cancelled", "canceled_market_resolved"):
+                # Cancelled externally — may have a partial fill; let reprice/rescue handle.
+                tracked.status = OrderStatus.CANCELLED
+                tracked.filled_size = clob_filled
+                logging.info(
+                    "🚫 Order cancelled externally: id=%s filled=%.2f",
+                    tracked.order_id, clob_filled,
+                )
+                break
+
+            if status_str in ("partially_matched",) and clob_filled > tracked.filled_size:
                 tracked.filled_size = clob_filled
                 tracked.status = OrderStatus.PARTIAL
                 logging.info(
@@ -588,6 +610,8 @@ class LiveExecutionEngine:
                 )
                 # Reset stale timer on new activity.
                 tracked.placed_at = time.time()
+
+            # "live" or "unknown" — order still open, continue polling.
 
             if not tracked.is_stale:
                 continue
@@ -1078,12 +1102,24 @@ class LiveExecutionEngine:
 
         self._log_entry_stats_if_due()
 
-        # Order was cancelled, failed, or stale — nothing was filled on-chain.
-        # No balance verification needed; FAK cleanup is irrelevant.
+        # Order cancelled/failed — but a partial fill may have landed on-chain
+        # (e.g. reprice rejected due to insufficient balance while first order
+        # was already partially matched).  Check the actual CTF balance before
+        # treating this as a skip to avoid phantom positions.
         if tracked.status in (OrderStatus.CANCELLED, OrderStatus.FAILED):
+            _rescue_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            if _rescue_bal and _rescue_bal >= float(os.getenv("POLY_CLOB_MIN_SHARES", "5")):
+                logging.warning(
+                    "⚠️ [LIVE] BUY order %s status=%s but on-chain balance=%.4f sh — "
+                    "treating as partial fill to avoid phantom position.",
+                    tracked.order_id[:20], tracked.status, _rescue_bal,
+                )
+                self._confirmed_buys[token_id] = _rescue_bal
+                self._active_orders.pop(tracked.order_id, None)
+                return (_rescue_bal, tracked.price)
             logging.warning(
-                "⚠️ [LIVE] BUY order %s (status=%s) — skip.",
-                tracked.order_id[:20], tracked.status,
+                "⚠️ [LIVE] BUY order %s (status=%s, on-chain=%.4f) — skip.",
+                tracked.order_id[:20], tracked.status, _rescue_bal or 0.0,
             )
             self._active_orders.pop(tracked.order_id, None)
             return _SKIP

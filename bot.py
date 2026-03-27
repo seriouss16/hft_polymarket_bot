@@ -723,7 +723,10 @@ async def main():
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     _live_skip_until = 0.0
                     if LIVE_MODE and token_up_id:
-                        _close_side = decision.get("side")
+                        # Use the side of the OPEN position, not the exit signal side.
+                        # TREND_FLIP_EXIT changes decision["side"] to the new direction,
+                        # which would select the wrong token and cause phantom close.
+                        _close_side = pnl.position_side or decision.get("side")
                         _close_tid = (
                             token_up_id if _close_side in ("BUY_UP", None)
                             else (token_down_id or token_up_id)
