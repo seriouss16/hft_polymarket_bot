@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import requests
@@ -54,15 +55,13 @@ def _snapshot_from_levels(
 
 try:
     from py_clob_client.client import ClobClient
-    from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
-    from py_clob_client.order_builder.constants import BUY, SELL
+    from py_clob_client.clob_types import OrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY
 except Exception:  # pragma: no cover - optional runtime dependency
     ClobClient = None
-    ApiCreds = None
     OrderArgs = None
     OrderType = None
     BUY = "BUY"
-    SELL = "SELL"
 
 
 @dataclass
@@ -93,9 +92,6 @@ class LiveExecutionEngine:
         self,
         private_key: str | None,
         funder: str | None,
-        api_key: str | None = None,
-        api_secret: str | None = None,
-        api_passphrase: str | None = None,
         test_mode: bool = True,
         min_order_size: float = 10.0,
         max_spread: float = 0.03,
@@ -104,12 +100,15 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
-        self.min_entry_ask = float(os.getenv("HFT_MIN_ENTRY_ASK", "0.08"))
-        self.default_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", str(min_order_size)))
-        self.min_entry_shares = float(os.getenv("HFT_MIN_ENTRY_SHARES", "6.0"))
-        self.min_exit_shares = float(os.getenv("HFT_MIN_EXIT_SHARES", "5.0"))
-        self.share_fee_buffer = float(os.getenv("HFT_SHARE_FEE_BUFFER", "0.2"))
-        self.enforce_collateral_check = os.getenv("HFT_ENFORCE_COLLATERAL_CHECK", "1") == "1"
+        self.skip_stats_log_sec = float(os.getenv("HFT_LIVE_SKIP_STATS_LOG_SEC", "30"))
+        self._last_skip_stats_log_ts = time.time()
+        self._entry_stats: dict[str, int] = {
+            "attempts": 0,
+            "executed": 0,
+            "skip_ask_cap": 0,
+            "skip_spread": 0,
+            "skip_signal": 0,
+        }
         self.client = None
         self._http = requests.Session()
 
@@ -119,39 +118,17 @@ class LiveExecutionEngine:
             return
 
         # Public market-data client is available in both SIM and LIVE.
-        signature_type = int(
-            os.getenv("HFT_CLOB_SIGNATURE_TYPE")
-            or os.getenv("POLY_SIGNATURE_TYPE")
-            or "1"
-        )
         self.client = ClobClient(
             "https://clob.polymarket.com",
             key=private_key or "",
             chain_id=137,
-            signature_type=signature_type,
+            signature_type=1,
             funder=funder or "",
         )
         if not self.test_mode:
             if not private_key or not funder:
                 raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
-            if api_key and api_secret and api_passphrase:
-                try:
-                    self.client.set_api_creds(
-                        ApiCreds(
-                            api_key=api_key,
-                            api_secret=api_secret,
-                            api_passphrase=api_passphrase,
-                        )
-                    )
-                    logging.info("Using explicit Polymarket CLOB API credentials from environment.")
-                except Exception as exc:
-                    logging.warning(
-                        "Explicit CLOB API credentials failed (%s); falling back to derived API creds.",
-                        exc,
-                    )
-                    self.client.set_api_creds(self.client.create_or_derive_api_creds())
-            else:
-                self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
@@ -193,162 +170,71 @@ class LiveExecutionEngine:
         ask_levels = _levels_from_book_rows(book.asks)
         return _snapshot_from_levels(bid_levels, ask_levels, depth)
 
-    def _place_limit(self, token_id: str, side: str, price: float, size: float) -> bool:
+    def _place_limit(self, token_id: str, side: str, price: float, size: float) -> None:
         """Send one GTC limit order or print it in simulation mode."""
         if self.test_mode:
             logging.info("[SIM LIMIT] %s size=%.2f @ %.4f token=%s", side, size, price, token_id)
-            return True
+            return
         order = OrderArgs(
             token_id=token_id,
             price=price,
             size=size,
             side=side,
         )
-        try:
-            signed = self.client.create_order(order)
-            resp = self.client.post_order(signed, OrderType.GTC)
-            logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
-            return True
-        except Exception as exc:
-            logging.error(
-                "Order placement failed: side=%s size=%.4f price=%.4f token=%s error=%s",
-                side,
-                size,
-                price,
-                token_id,
-                exc,
-            )
-            return False
+        signed = self.client.create_order(order)
+        resp = self.client.post_order(signed, OrderType.GTC)
+        logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
 
-    @staticmethod
-    def _to_float(value: object) -> float | None:
-        """Convert API payload value to float when possible."""
-        try:
-            if value is None:
-                return None
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    def _extract_collateral_available(self, payload: object) -> float | None:
-        """Try to extract available collateral from CLOB allowance payload."""
-        if payload is None:
-            return None
-        if isinstance(payload, dict):
-            candidates = (
-                payload.get("available"),
-                payload.get("balance"),
-                payload.get("allowance"),
-                payload.get("available_balance"),
-                payload.get("availableBalance"),
-            )
-            for item in candidates:
-                val = self._to_float(item)
-                if val is not None:
-                    return val
-            nested = payload.get("response")
-            if isinstance(nested, dict):
-                return self._extract_collateral_available(nested)
-            return None
-        for attr in ("available", "balance", "allowance", "available_balance", "availableBalance"):
-            val = self._to_float(getattr(payload, attr, None))
-            if val is not None:
-                return val
-        return None
-
-    def _get_available_collateral(self) -> float | None:
-        """Return available collateral from CLOB API when method is supported."""
-        if self.client is None or not hasattr(self.client, "get_balance_allowance"):
-            return None
-        method = getattr(self.client, "get_balance_allowance")
-        payload = None
-        try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-            payload = method(params=params)
-        except Exception:
-            try:
-                payload = method()
-            except Exception:
-                return None
-        return self._extract_collateral_available(payload)
-
-    def _resolve_entry_size(self, best_ask: float) -> tuple[float, float] | None:
-        """Pick entry size: at least exchange min shares, up to default trade USD budget."""
-        if best_ask <= 0.0:
-            return None
-
-        required_shares = max(
-            self.min_entry_shares,
-            self.min_exit_shares + self.share_fee_buffer,
+    def _log_entry_stats_if_due(self) -> None:
+        """Emit aggregated live entry stats periodically for gate diagnostics."""
+        if self.skip_stats_log_sec <= 0:
+            return
+        now = time.time()
+        if now - self._last_skip_stats_log_ts < self.skip_stats_log_sec:
+            return
+        st = self._entry_stats
+        logging.info(
+            "Live entry stats: attempts=%s executed=%s skip_ask_cap=%s skip_spread=%s skip_signal=%s.",
+            st["attempts"],
+            st["executed"],
+            st["skip_ask_cap"],
+            st["skip_spread"],
+            st["skip_signal"],
         )
+        self._last_skip_stats_log_ts = now
 
-        max_shares_by_budget = self.default_trade_usd / best_ask
-
-        shares = min(max_shares_by_budget, max(required_shares, self.min_order_size))
-
-        if shares < required_shares:
-            shares = required_shares
-
-        notional = shares * best_ask
-
-        if notional > self.default_trade_usd + 0.5:
+    async def execute(self, signal: str, token_id: str) -> None:
+        """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
+        self._entry_stats["attempts"] += 1
+        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        if best_ask >= self.max_entry_ask:
+            self._entry_stats["skip_ask_cap"] += 1
             logging.warning(
-                "Entry size capped by budget: shares=%.3f notional=%.2f (budget=%s)",
-                shares,
-                notional,
-                self.default_trade_usd,
-            )
-
-        return shares, notional
-
-    async def execute(self, signal: str, token_id: str) -> bool:
-        """Validate ask band and place limit order for BUY_UP/BUY_DOWN (no spread gate)."""
-        _, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
-        if best_ask >= self.max_entry_ask or best_ask < self.min_entry_ask:
-            logging.warning(
-                "Skip %s: best_ask %.4f outside entry ask band [%.4f, %.4f).",
+                "Skip %s: best_ask %.4f >= max entry ask %.4f.",
                 signal,
                 best_ask,
-                self.min_entry_ask,
                 self.max_entry_ask,
             )
-            return False
-        resolved_size = self._resolve_entry_size(best_ask)
-        if resolved_size is None:
-            return False
-        size, notional = resolved_size
-        if self.enforce_collateral_check and not self.test_mode:
-            available = await asyncio.to_thread(self._get_available_collateral)
-            if available is not None and available + 1e-9 < notional:
-                logging.warning(
-                    "Skip entry: insufficient collateral available=%.4f required=%.4f (includes open orders).",
-                    available,
-                    notional,
-                )
-                return False
+            self._log_entry_stats_if_due()
+            return
+        spread = best_ask - best_bid
+        if spread <= 0 or spread > self.max_spread:
+            self._entry_stats["skip_spread"] += 1
+            logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
+            self._log_entry_stats_if_due()
+            return
+
+        size = self.min_order_size
         if signal == "BUY_UP":
             price = max(0.01, min(0.99, best_ask - 0.002))
-            return await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+            self._entry_stats["executed"] += 1
         elif signal == "BUY_DOWN":
             price = max(0.01, min(0.99, best_ask - 0.002))
-            return await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
-        return False
-
-    async def close_position(self, token_id: str, size: float) -> bool:
-        """Close a previously opened outcome position by selling to the bid."""
-        if size <= 0:
-            return False
-        if size + self.share_fee_buffer + 1e-9 < self.min_exit_shares:
-            logging.warning(
-                "Skip close: size %.3f with fee buffer %.3f below min exit shares %.3f.",
-                size,
-                self.share_fee_buffer,
-                self.min_exit_shares,
-            )
-            return False
-        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
-        price = max(0.01, min(0.99, best_bid + 0.001))
-        return await asyncio.to_thread(self._place_limit, token_id, SELL, price, size)
+            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
+            self._entry_stats["executed"] += 1
+        else:
+            self._entry_stats["skip_signal"] += 1
+            logging.warning("Skip signal: unsupported live signal %s.", signal)
+        self._log_entry_stats_if_due()
 

@@ -54,7 +54,11 @@ class PhaseRouterStrategy(BaseStrategy):
     def _apply_phase(self, latency_ms: float) -> None:
         """Select profile from prior trend state and apply before signal logic."""
         tr = self._engine.get_trend_state()
-        profile = select_engine_profile(tr, latency_ms)
+        forced_profile = os.getenv("HFT_PHASE_FORCE_PROFILE", "").strip().lower()
+        if forced_profile in {"latency", "soft_flow"}:
+            profile = forced_profile
+        else:
+            profile = select_engine_profile(tr, latency_ms)
         try:
             self._engine.apply_profile(profile)
         except Exception as exc:
@@ -89,15 +93,21 @@ class PhaseRouterStrategy(BaseStrategy):
                 self._last_diag_log_ts = now
         if profile != self._last_applied:
             if now - self._last_switch_log_ts >= 15.0 or self._last_applied is None:
-                logging.info(
-                    "Market phase profile: %s (trend=%s speed=%.2f edge=%.2f age=%.1fs stale=%.0fms)",
-                    profile,
-                    tr.get("trend"),
-                    float(tr.get("speed", 0.0)),
-                    float(tr.get("edge", 0.0)),
-                    float(tr.get("age", 0.0)),
-                    float(latency_ms),
-                )
+                if forced_profile in {"latency", "soft_flow"}:
+                    logging.info(
+                        "Market phase profile forced: %s (HFT_PHASE_FORCE_PROFILE).",
+                        profile,
+                    )
+                else:
+                    logging.info(
+                        "Market phase profile: %s (trend=%s speed=%.2f edge=%.2f age=%.1fs stale=%.0fms)",
+                        profile,
+                        tr.get("trend"),
+                        float(tr.get("speed", 0.0)),
+                        float(tr.get("edge", 0.0)),
+                        float(tr.get("age", 0.0)),
+                        float(latency_ms),
+                    )
                 self._last_switch_log_ts = now
             self._last_applied = profile
 

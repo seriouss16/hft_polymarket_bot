@@ -53,6 +53,15 @@ class HFTEngine:
         self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "100.0"))
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
+        self.exit_on_opposite_trend = os.getenv("HFT_EXIT_ON_OPPOSITE_TREND", "1") == "1"
+        self.opposite_trend_exit_min_hold_sec = float(
+            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC", "0.0")
+        )
+        self.opposite_trend_exit_min_abs_edge = float(
+            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_ABS_EDGE", "0.0")
+        )
+        self.post_close_reentry_sec = float(os.getenv("HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC", "0.0"))
+        self.last_close_time = 0.0
         self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
         self.entry_poly_mid = None
         self.entry_outcome_mid = None
@@ -235,6 +244,9 @@ class HFTEngine:
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
         self._last_entry_cap_deny_log_ts = 0.0
+        self.filter_diag_log_sec = float(os.getenv("HFT_FILTER_DIAG_LOG_SEC", "30.0"))
+        self._last_filter_diag_log_ts = time.time()
+        self._filter_diag_stats: dict[str, int] = {}
         self._init_entry_profiles()
 
     _PROFILE_ATTRS = (
@@ -303,6 +315,72 @@ class HFTEngine:
             "soft_flow": self._build_soft_flow_profile(latency),
         }
         self._active_profile = "latency"
+
+    def _diag_inc(self, key: str, n: int = 1) -> None:
+        """Increment in-memory diagnostic counter by key."""
+        self._filter_diag_stats[key] = int(self._filter_diag_stats.get(key, 0)) + int(n)
+
+    def _emit_filter_diag_if_due(self, now_ts: float | None = None) -> None:
+        """Log aggregated filter diagnostics with configured threshold values."""
+        if self.filter_diag_log_sec <= 0.0:
+            return
+        now_val = float(now_ts if now_ts is not None else time.time())
+        if now_val - self._last_filter_diag_log_ts < self.filter_diag_log_sec:
+            return
+        st = self._filter_diag_stats
+        logging.info(
+            "FilterDiag stats: ticks=%s entry_checks=%s entry_no_signal=%s "
+            "entry_block_regime=%s entry_block_spread_gate=%s entry_block_slot=%s "
+            "entry_block_meta=%s entry_block_can_trade=%s entry_block_ask_cap=%s "
+            "entry_block_rsi=%s entry_block_book=%s entry_open_ok=%s entry_open_no_fill=%s "
+            "exit_checks=%s exit_close=%s exit_hold=%s exit_reason_flip=%s "
+            "exit_reason_tp=%s exit_reason_stop=%s exit_reason_rsi=%s exit_reason_pnl_sl=%s",
+            st.get("ticks", 0),
+            st.get("entry_checks", 0),
+            st.get("entry_no_signal", 0),
+            st.get("entry_block_regime", 0),
+            st.get("entry_block_spread_gate", 0),
+            st.get("entry_block_slot", 0),
+            st.get("entry_block_meta", 0),
+            st.get("entry_block_can_trade", 0),
+            st.get("entry_block_ask_cap", 0),
+            st.get("entry_block_rsi", 0),
+            st.get("entry_block_book", 0),
+            st.get("entry_open_ok", 0),
+            st.get("entry_open_no_fill", 0),
+            st.get("exit_checks", 0),
+            st.get("exit_close", 0),
+            st.get("exit_hold", 0),
+            st.get("exit_reason_trend_flip", 0),
+            st.get("exit_reason_reaction_tp", 0),
+            st.get("exit_reason_reaction_stop", 0),
+            st.get("exit_reason_rsi_range", 0),
+            st.get("exit_reason_pnl_sl", 0),
+        )
+        logging.info(
+            "FilterDiag params: profile=%s spread_max=%.4f liq_spread_max=%.4f max_entry_ask=%.4f "
+            "ask_up=[%.3f,%.3f] ask_down=[%.3f,%.3f] max_latency_ms=%.0f max_skew_ms=%.0f "
+            "trend_flip_min_age=%.2f strong_jump_min_age=%s no_entry_guards=%s cooldown=%.2fs "
+            "post_close_reentry=%.2fs min_hold=%.2fs.",
+            self.get_active_profile(),
+            self.max_entry_spread,
+            self.entry_liquidity_max_spread,
+            self.max_entry_ask,
+            self.entry_min_ask_up_cap,
+            self.entry_max_ask_up_cap,
+            self.entry_min_ask_down_cap,
+            self.entry_max_ask_down_cap,
+            self.entry_max_latency_ms,
+            self.entry_max_skew_ms,
+            self.trend_flip_min_age_sec,
+            os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC", "0.0"),
+            int(self.no_entry_guards),
+            self.cooldown,
+            self.post_close_reentry_sec,
+            self.min_hold_sec,
+        )
+        self._filter_diag_stats = {}
+        self._last_filter_diag_log_ts = now_val
 
     def apply_profile(self, name: str) -> None:
         """Apply a named parameter snapshot (latency or soft_flow) to this engine."""
@@ -382,6 +460,29 @@ class HFTEngine:
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
         return self.min_hold_sec <= 0.0 or hold_sec >= self.min_hold_sec
+
+    def _opposite_trend_exit_triggered(
+        self,
+        pos_side: str,
+        trend_name: str,
+        hold_sec: float,
+        abs_edge: float,
+    ) -> bool:
+        """Return True when fast-vs-poly trend opposes the held outcome and exit is allowed."""
+        if not self.exit_on_opposite_trend:
+            return False
+        if trend_name == "FLAT":
+            return False
+        opposite = (pos_side == "DOWN" and trend_name == "UP") or (
+            pos_side == "UP" and trend_name == "DOWN"
+        )
+        if not opposite:
+            return False
+        if self.opposite_trend_exit_min_hold_sec > 0.0 and hold_sec < self.opposite_trend_exit_min_hold_sec:
+            return False
+        if self.opposite_trend_exit_min_abs_edge > 0.0 and abs_edge < self.opposite_trend_exit_min_abs_edge:
+            return False
+        return True
 
     def _pnl_tp_hold_allows(self, hold_sec: float) -> bool:
         """Return True when position was held long enough for percent-based PNL take profit."""
@@ -577,6 +678,9 @@ class HFTEngine:
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
         self._last_entry_cap_deny_log_ts = 0.0
+        self._filter_diag_stats = {}
+        self._last_filter_diag_log_ts = time.time()
+        self.last_close_time = 0.0
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -1032,11 +1136,14 @@ class HFTEngine:
         cex_bid_imbalance=None,
         skew_ms=0.0,
     ):
+        self._diag_inc("ticks")
+        self._emit_filter_diag_if_due()
         if not fast_price or not poly_orderbook['ask']:
             return
         _ = lstm_forecast
 
         if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
+            self._diag_inc("entry_block_regime")
             _now = time.time()
             _regime_log_sec = float(os.getenv("HFT_REGIME_SKIP_LOG_MIN_SEC", "15.0"))
             if _regime_log_sec <= 0.0 or _now - self._last_regime_skip_log_ts >= _regime_log_sec:
@@ -1128,7 +1235,14 @@ class HFTEngine:
             )
         signal = None
         slot_entry_ok = self._entry_slot_window_allows(seconds_to_expiry)
-        if self.pnl.inventory == 0 and (time.time() - self.last_trade_time >= self.cooldown):
+        _now_entries = time.time()
+        _post_close_ok = (
+            self.last_close_time <= 0.0
+            or self.post_close_reentry_sec <= 0.0
+            or _now_entries - self.last_close_time >= self.post_close_reentry_sec
+        )
+        if self.pnl.inventory == 0 and (_now_entries - self.last_trade_time >= self.cooldown) and _post_close_ok:
+            self._diag_inc("entry_checks")
             signal = self._entry_candidate_from_state(
                 edge_now,
                 trend["age"],
@@ -1151,10 +1265,33 @@ class HFTEngine:
                     latency_ms,
                     edge_mult,
                 )
+            if signal is None:
+                self._diag_inc("entry_no_signal")
             if (
                 signal is not None
                 and not spread_gate
             ):
+                self._diag_inc("entry_block_spread_gate")
+                if not spread_gate_legacy:
+                    self._diag_inc("entry_block_spread_legacy")
+                if not liquidity_ok:
+                    self._diag_inc("entry_block_liquidity")
+                if not speed_ok:
+                    self._diag_inc("entry_block_speed")
+                if not z_ok:
+                    self._diag_inc("entry_block_zscore")
+                if not cex_ok:
+                    self._diag_inc("entry_block_cex_imbalance")
+                if not self.entry_latency_allows_entry(latency_ms):
+                    self._diag_inc("entry_block_latency")
+                if not self.entry_skew_allows_entry(skew_ms):
+                    self._diag_inc("entry_block_skew")
+                if not self.entry_trend_flip_settled_ok(trend["age"]):
+                    self._diag_inc("entry_block_trend_flip_age")
+                if not edge_jump_ok:
+                    self._diag_inc("entry_block_edge_jump")
+                if not aggressive_age_ok:
+                    self._diag_inc("entry_block_aggressive_age")
                 _now = time.time()
                 _fg_log = float(os.getenv("HFT_FEED_GATE_LOG_MIN_SEC", "30.0"))
                 if (
@@ -1242,6 +1379,7 @@ class HFTEngine:
             and _cap_log_sec > 0.0
             and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
         ):
+            self._diag_inc("entry_block_ask_cap")
             logging.info(
                 "Entry blocked: BUY_UP up_ask=%.4f outside [HFT_ENTRY_MIN_ASK_UP=%.4f, HFT_ENTRY_MAX_ASK_UP=%.4f].",
                 up_ask,
@@ -1256,6 +1394,7 @@ class HFTEngine:
             and _cap_log_sec > 0.0
             and _t_cap - self._last_entry_cap_deny_log_ts >= _cap_log_sec
         ):
+            self._diag_inc("entry_block_ask_cap")
             logging.info(
                 "Entry blocked: BUY_DOWN down_ask=%.4f outside [HFT_ENTRY_MIN_ASK_DOWN=%.4f, HFT_ENTRY_MAX_ASK_DOWN=%.4f].",
                 down_ask,
@@ -1279,6 +1418,7 @@ class HFTEngine:
             _notional_up = self._calc_dynamic_amount(up_ask)
             open_event = await self.execute("BUY_UP", up_ask, _notional_up)
             if not open_event:
+                self._diag_inc("entry_open_no_fill")
                 logging.warning(
                     "SIM BUY_UP skipped: no fill (balance=%.2f notional=%.2f ask=%.4f).",
                     float(self.pnl.balance),
@@ -1286,6 +1426,7 @@ class HFTEngine:
                     float(up_ask),
                 )
             else:
+                self._diag_inc("entry_open_ok")
                 self.last_trade_time = time.time()
                 self.entry_poly_mid = poly_mid
                 self.entry_outcome_mid = up_mid
@@ -1323,6 +1464,21 @@ class HFTEngine:
                     self.get_active_profile(),
                 )
                 return {"event": "OPEN", "side": "UP", "trade": open_event}
+        elif signal == "BUY_UP" and self.pnl.inventory == 0:
+            if not self.can_trade():
+                self._diag_inc("entry_block_can_trade")
+            if not self._entry_ask_allows_open(up_ask):
+                self._diag_inc("entry_block_ask_cap")
+            if not rsi_ok_up:
+                self._diag_inc("entry_block_rsi")
+            if not book_ok_up:
+                self._diag_inc("entry_block_book")
+            if not spread_gate:
+                self._diag_inc("entry_block_spread_gate")
+            if not slot_entry_ok:
+                self._diag_inc("entry_block_slot")
+            if not meta_enabled:
+                self._diag_inc("entry_block_meta")
 
         if (
             signal == "BUY_DOWN"
@@ -1339,6 +1495,7 @@ class HFTEngine:
             _notional_dn = self._calc_dynamic_amount(down_ask)
             open_event = await self.execute("BUY_DOWN", down_ask, _notional_dn)
             if not open_event:
+                self._diag_inc("entry_open_no_fill")
                 logging.warning(
                     "SIM BUY_DOWN skipped: no fill (balance=%.2f notional=%.2f ask=%.4f).",
                     float(self.pnl.balance),
@@ -1346,6 +1503,7 @@ class HFTEngine:
                     float(down_ask),
                 )
             else:
+                self._diag_inc("entry_open_ok")
                 self.last_trade_time = time.time()
                 self.entry_poly_mid = poly_mid
                 self.entry_outcome_mid = down_mid
@@ -1383,8 +1541,24 @@ class HFTEngine:
                     self.get_active_profile(),
                 )
                 return {"event": "OPEN", "side": "DOWN", "trade": open_event}
+        elif signal == "BUY_DOWN" and self.pnl.inventory == 0:
+            if not self.can_trade():
+                self._diag_inc("entry_block_can_trade")
+            if not self._entry_ask_allows_open(down_ask):
+                self._diag_inc("entry_block_ask_cap")
+            if not rsi_ok_down:
+                self._diag_inc("entry_block_rsi")
+            if not book_ok_down:
+                self._diag_inc("entry_block_book")
+            if not spread_gate:
+                self._diag_inc("entry_block_spread_gate")
+            if not slot_entry_ok:
+                self._diag_inc("entry_block_slot")
+            if not meta_enabled:
+                self._diag_inc("entry_block_meta")
 
         if self.pnl.inventory > 0:
+            self._diag_inc("exit_checks")
             now = time.time()
             hold_sec = now - self.entry_time if self.entry_time else 0.0
             poly_move = 0.0
@@ -1454,6 +1628,7 @@ class HFTEngine:
                     self._book_stall_ticks = 0
                     self._prev_up_mid = None
                     self._prev_down_mid = None
+                    self.last_close_time = time.time()
                     return result
                 _now = time.time()
                 _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC", "8.0"))
@@ -1495,17 +1670,25 @@ class HFTEngine:
                 hold_sec,
             )
 
+            opposite_trend = (
+                (pos_side == "DOWN" and trend["trend"] == "UP")
+                or (pos_side == "UP" and trend["trend"] == "DOWN")
+            )
+            trend_flip_exit = self._opposite_trend_exit_triggered(
+                pos_side,
+                str(trend["trend"]),
+                hold_sec,
+                abs(float(edge_now)),
+            )
+
             should_close = (
-                reaction_tp_confirmed
+                trend_flip_exit
+                or reaction_tp_confirmed
                 or protective_stop
                 or rsi_range_exit
                 or pnl_sl
             )
             # region agent log
-            opposite_trend = (
-                (pos_side == "DOWN" and trend["trend"] == "UP")
-                or (pos_side == "UP" and trend["trend"] == "DOWN")
-            )
             if opposite_trend and not should_close:
                 _append_debug_log(
                     {
@@ -1532,13 +1715,22 @@ class HFTEngine:
                 )
             # endregion
             if should_close:
+                self._diag_inc("exit_close")
                 reason = "REACTION_TP"
-                if protective_stop:
+                if trend_flip_exit:
+                    self._diag_inc("exit_reason_trend_flip")
+                    reason = "TREND_FLIP_EXIT"
+                elif protective_stop:
+                    self._diag_inc("exit_reason_reaction_stop")
                     reason = "REACTION_STOP"
                 elif rsi_range_exit:
+                    self._diag_inc("exit_reason_rsi_range")
                     reason = "RSI_RANGE_EXIT"
                 elif pnl_sl:
+                    self._diag_inc("exit_reason_pnl_sl")
                     reason = "PNL_SL"
+                else:
+                    self._diag_inc("exit_reason_reaction_tp")
                 logging.info(
                     "📌 Exit reason=%s hold=%.1fs poly_move=%.4f side_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
                     "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f",
@@ -1601,7 +1793,9 @@ class HFTEngine:
                 self._book_stall_ticks = 0
                 self._prev_up_mid = None
                 self._prev_down_mid = None
+                self.last_close_time = time.time()
                 return result
+            self._diag_inc("exit_hold")
 
     def _build_performance_key(self) -> str | None:
         """Build attribution key from entry context and engine label."""
