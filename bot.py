@@ -236,8 +236,8 @@ async def main():
 
     # --- Конфигурация ---
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
-    TEST_MODE = True
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
+    TEST_MODE = not LIVE_MODE
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "120"))
@@ -272,7 +272,7 @@ async def main():
     lstm = AsyncLSTMPredictor(history_len=100)
     live_exec = LiveExecutionEngine(
         private_key=os.getenv("PRIVATE_KEY"),
-        funder=os.getenv("FUNDER"),
+        funder=os.getenv("FUNDER") or os.getenv("POLY_FUNDER_ADDRESS"),
         test_mode=not LIVE_MODE,
         min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
         max_spread=float(os.getenv("LIVE_MAX_SPREAD", "1.0")),

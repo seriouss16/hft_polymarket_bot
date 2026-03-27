@@ -117,12 +117,13 @@ class LiveExecutionEngine:
                 raise RuntimeError("py_clob_client is not installed.")
             return
 
+        sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
         # Public market-data client is available in both SIM and LIVE.
         self.client = ClobClient(
             "https://clob.polymarket.com",
             key=private_key or "",
             chain_id=137,
-            signature_type=1,
+            signature_type=sig_type,
             funder=funder or "",
         )
         if not self.test_mode:
@@ -203,6 +204,36 @@ class LiveExecutionEngine:
         )
         self._last_skip_stats_log_ts = now
 
+    def _place_sell(self, token_id: str, price: float, size: float) -> None:
+        """Send GTC SELL limit or print it in simulation mode."""
+        try:
+            from py_clob_client.clob_types import OrderArgs, OrderType
+            from py_clob_client.order_builder.constants import SELL as SELL_SIDE
+        except Exception:
+            SELL_SIDE = "SELL"
+            OrderArgs = None
+            OrderType = None
+
+        if self.test_mode:
+            logging.info("[SIM LIMIT] SELL size=%.2f @ %.4f token=%s", size, price, token_id)
+            return
+        if OrderArgs is None or self.client is None:
+            logging.warning("Cannot place SELL: py_clob_client unavailable.")
+            return
+        order = OrderArgs(token_id=token_id, price=price, size=size, side=SELL_SIDE)
+        signed = self.client.create_order(order)
+        resp = self.client.post_order(signed, OrderType.GTC)
+        logging.info("[LIVE] SELL size=%.2f @ %.4f token=%s -> %s", size, price, token_id, resp)
+
+    async def close_position(self, token_id: str, size: float) -> None:
+        """Place a SELL limit order to close an open long position."""
+        if size <= 0:
+            return
+        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
+        price = max(0.01, min(0.99, best_bid + 0.002))
+        await asyncio.to_thread(self._place_sell, token_id, price, size)
+        logging.info("[LIVE] Close position: SELL %.2f sh @ %.4f token=%s", size, price, token_id)
+
     async def execute(self, signal: str, token_id: str) -> None:
         """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
         self._entry_stats["attempts"] += 1
@@ -225,11 +256,7 @@ class LiveExecutionEngine:
             return
 
         size = self.min_order_size
-        if signal == "BUY_UP":
-            price = max(0.01, min(0.99, best_ask - 0.002))
-            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
-            self._entry_stats["executed"] += 1
-        elif signal == "BUY_DOWN":
+        if signal in ("BUY_UP", "BUY_DOWN"):
             price = max(0.01, min(0.99, best_ask - 0.002))
             await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
             self._entry_stats["executed"] += 1
