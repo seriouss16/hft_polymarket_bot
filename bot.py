@@ -346,6 +346,9 @@ async def main():
     # Validate session deposit against real account balance in live mode.
     _session_deposit = float(os.environ["HFT_DEPOSIT_USD"])
     if LIVE_MODE:
+        # Refresh USDC and CTF conditional token allowances so SELL orders are accepted.
+        # Without CTF allowance the CLOB rejects every SELL with "not enough balance".
+        await asyncio.to_thread(live_exec.ensure_allowances)
         _live_account_balance_limit = float(os.getenv("LIVE_ACCOUNT_BALANCE", "0") or "0")
         _account_balance = live_exec.fetch_usdc_balance()
         _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit

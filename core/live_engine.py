@@ -208,6 +208,35 @@ class LiveExecutionEngine:
                 derived.api_key,
             )
 
+    def ensure_allowances(self) -> None:
+        """Set maximum USDC and CTF conditional token allowances for CLOB trading.
+
+        Must be called once at startup in live mode.  Without CTF (CONDITIONAL)
+        allowance the CLOB rejects every SELL order with "not enough balance /
+        allowance" even when shares are held in the wallet.
+
+        Safe to call repeatedly — subsequent calls simply refresh the on-chain
+        approval to max uint256 which is idempotent.
+        """
+        if self.test_mode or self.client is None:
+            return
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
+            for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
+                params = BalanceAllowanceParams(
+                    asset_type=asset,
+                    signature_type=sig_type,
+                )
+                resp = self.client.update_balance_allowance(params=params)
+                logging.info(
+                    "[LIVE] Allowance refreshed: asset=%s resp=%s", asset, resp,
+                )
+        except Exception as exc:
+            logging.error(
+                "[LIVE] ensure_allowances failed: %s — SELL orders may be rejected.", exc,
+            )
+
     def fetch_usdc_balance(self) -> float | None:
         """Return available USDC balance on the Polymarket CLOB account.
 
