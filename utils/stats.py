@@ -1,15 +1,87 @@
+"""Session PnL reporting and journal aggregation for HFT bot."""
+
 import csv
 import logging
 import time
 from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+
+@dataclass
+class _JournalStats:
+    """Derived statistics computed from the trade journal CSV."""
+
+    rows: int = 0
+    pnl_sum: float = 0.0
+    win_count: int = 0
+    loss_count: int = 0
+    win_pnl_sum: float = 0.0
+    loss_pnl_sum: float = 0.0
+    win_pnl_values: list = field(default_factory=list)
+    loss_pnl_values: list = field(default_factory=list)
+    exit_reasons: Counter = field(default_factory=Counter)
+
+    @property
+    def avg_pnl(self) -> float:
+        """Return mean PnL per trade."""
+        return self.pnl_sum / self.rows if self.rows else 0.0
+
+    @property
+    def avg_win(self) -> float:
+        """Return mean PnL for winning trades."""
+        return self.win_pnl_sum / self.win_count if self.win_count else 0.0
+
+    @property
+    def avg_loss(self) -> float:
+        """Return mean PnL for losing trades."""
+        return self.loss_pnl_sum / self.loss_count if self.loss_count else 0.0
+
+    @property
+    def weighted_avg_pnl(self) -> float:
+        """Return size-weighted average PnL across all trades."""
+        return self._weighted_avg(self.win_pnl_values + self.loss_pnl_values)
+
+    @property
+    def weighted_avg_win(self) -> float:
+        """Return size-weighted average PnL for winning trades."""
+        return self._weighted_avg(self.win_pnl_values)
+
+    @property
+    def weighted_avg_loss(self) -> float:
+        """Return size-weighted average PnL for losing trades."""
+        return self._weighted_avg(self.loss_pnl_values)
+
+    @staticmethod
+    def _weighted_avg(values: list) -> float:
+        """Return weighted mean where each value is weighted by its absolute magnitude."""
+        if not values:
+            return 0.0
+        weights = [abs(v) for v in values]
+        total_w = sum(weights)
+        if total_w <= 0.0:
+            return 0.0
+        return sum(v * w for v, w in zip(values, weights)) / total_w
+
+    @property
+    def profit_factor(self) -> float:
+        """Return ratio of gross profit to gross loss magnitude (>1 is profitable)."""
+        if self.loss_pnl_sum == 0.0:
+            return float("inf") if self.win_pnl_sum > 0.0 else 0.0
+        return self.win_pnl_sum / abs(self.loss_pnl_sum)
+
+    @property
+    def win_rate_pct(self) -> float:
+        """Return win rate as a percentage."""
+        return self.win_count / self.rows * 100.0 if self.rows else 0.0
 
 
 class StatsCollector:
     """Aggregate PnL metrics and print session / shutdown reports."""
 
     def __init__(self, pnl_tracker):
+        """Initialize with a PnLTracker instance."""
         self.pnl = pnl_tracker
         self.started_ts = time.time()
 
@@ -22,10 +94,12 @@ class StatsCollector:
         started_at = datetime.fromtimestamp(self.started_ts).isoformat(timespec="seconds")
         report_at = datetime.fromtimestamp(now_ts).isoformat(timespec="seconds")
         uptime_min = (now_ts - self.started_ts) / 60.0
+        losses = self.pnl.trades_count - self.pnl.wins
+        avg_pnl = self.pnl.total_pnl / self.pnl.trades_count if self.pnl.trades_count else 0.0
 
         report = [
             "\n" + "=" * 45,
-            f"📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ (HFT SIM)",
+            "📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ (HFT SIM)",
             "=" * 45,
             f"🕒 Старт сессии:      {started_at}",
             f"🧾 Время отчета:      {report_at}",
@@ -33,9 +107,11 @@ class StatsCollector:
             f"💰 Текущий баланс:    {self.pnl.balance:>10.2f} USD",
             f"📈 Чистая прибыль:    {self.pnl.total_pnl:>10.2f} USD ({roi:+.2f}%)",
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
-            f"🎯 Процент побед:     {win_rate:>10.1f}%",
+            f"✅ Побед / ❌ Убытков: {self.pnl.wins:>4} / {losses:<4}",
+            f"🎯 Win rate:          {win_rate:>10.1f}%",
+            f"📊 Средняя на сделку: {avg_pnl:>+10.4f} USD",
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
-            f"📦 В позиции:         {'ДА' if self.pnl.inventory > 0 else 'НЕТ'}",
+            f"📦 В позиции:         {'YES' if self.pnl.inventory > 0 else 'NO'}",
             f"⏸️ Regime cooldown:   {cooldown_until:>10.0f} (unix ts)",
         ]
         sp = getattr(self.pnl, "strategy_performance", None)
@@ -44,8 +120,10 @@ class StatsCollector:
             for key in sorted(sp.slices.keys()):
                 sl = sp.slices[key]
                 wr = (sl.wins / sl.trades * 100.0) if sl.trades > 0 else 0.0
+                sl_avg = sl.pnl_sum / sl.trades if sl.trades else 0.0
                 report.append(
-                    f"   {key:<30} n={sl.trades:>3}  WR={wr:>5.1f}%  PnL={sl.pnl_sum:>+9.2f} USD"
+                    f"   {key:<30} n={sl.trades:>3}  WR={wr:>5.1f}%  "
+                    f"PnL={sl.pnl_sum:>+9.2f} USD  avg={sl_avg:>+7.4f}"
                 )
             report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
         report.append("=" * 45 + "\n")
@@ -62,30 +140,50 @@ class StatsCollector:
             "yes" if self.pnl.inventory > 0 else "no",
         )
 
-    def _journal_aggregates(self, journal_path: Path | None):
-        """Return (rows_n, pnl_csv_sum, exit_reason_counts) from journal CSV if present."""
+    def _journal_aggregates(self, journal_path: Path | None) -> _JournalStats:
+        """Return detailed statistics parsed from journal CSV."""
+        from utils.trade_journal import _FIELDNAMES as _TJ_FIELDS  # noqa: PLC0415
+
+        js = _JournalStats()
         if journal_path is None or not journal_path.is_file() or journal_path.stat().st_size == 0:
-            return 0, 0.0, Counter()
-        pnl_sum = 0.0
-        n = 0
-        reasons = Counter()
+            return js
         try:
             with journal_path.open("r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    n += 1
+                first_line = f.readline().strip()
+                has_header = first_line.startswith("ts,")
+                if not has_header:
+                    logging.warning(
+                        "Trade journal %s has no header — using positional fieldnames.",
+                        journal_path.name,
+                    )
+                f.seek(0)
+                reader = csv.DictReader(
+                    f,
+                    fieldnames=None if has_header else _TJ_FIELDS,
+                )
+                for js.rows, row in enumerate(reader, start=1):
                     try:
-                        pnl_sum += float(row.get("pnl") or 0.0)
+                        pnl = float(row.get("pnl") or 0.0)
                     except (TypeError, ValueError):
                         logging.warning(
-                            "Bad pnl value in journal row %d: %r", n, row.get("pnl"),
+                            "Bad pnl value in journal row %d: %r", js.rows, row.get("pnl"),
                         )
+                        pnl = 0.0
+                    js.pnl_sum += pnl
+                    if pnl > 0.0:
+                        js.win_count += 1
+                        js.win_pnl_sum += pnl
+                        js.win_pnl_values.append(pnl)
+                    else:
+                        js.loss_count += 1
+                        js.loss_pnl_sum += pnl
+                        js.loss_pnl_values.append(pnl)
                     r = str(row.get("exit_reason") or "").strip() or "(empty)"
-                    reasons[r] += 1
+                    js.exit_reasons[r] += 1
         except OSError as exc:
             logging.warning("Cannot read trade journal %s: %s", journal_path, exc)
-            return 0, 0.0, Counter()
-        return n, pnl_sum, reasons
+            return _JournalStats()
+        return js
 
     def show_final_report(self, journal_path=None, shutdown_reason: str = "shutdown"):
         """Print full session summary with a tabular report and optional journal breakdown."""
@@ -99,9 +197,9 @@ class StatsCollector:
         uptime_min = (now_ts - self.started_ts) / 60.0
 
         jp = Path(journal_path) if journal_path else None
-        j_rows, j_pnl, j_reasons = self._journal_aggregates(jp)
+        js = self._journal_aggregates(jp)
 
-        w_label = 28
+        w_label = 32
         w_val = 22
 
         def row(label: str, val: str) -> str:
@@ -118,28 +216,59 @@ class StatsCollector:
             row("Старт сессии", started_at),
             row("Время отчета", report_at),
             row("Аптайм, min", f"{uptime_min:.1f}"),
+            sep,
             row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
             row("Текущий баланс USD", f"{self.pnl.balance:.2f}"),
             row("Чистая прибыль USD", f"{self.pnl.total_pnl:+.2f}"),
             row("ROI %", f"{roi:+.2f}"),
-            row("Закрытых сделок (sim)", str(self.pnl.trades_count)),
-            row("Побед / поражений", f"{self.pnl.wins} / {losses}"),
-            row("Win rate %", f"{win_rate:.1f}"),
             row("Макс. просадка %", f"{self.pnl.max_drawdown*100:.1f}"),
+            sep,
+            row("Закрытых сделок (sim)", str(self.pnl.trades_count)),
+            row("Побед / Убытков", f"{self.pnl.wins} / {losses}"),
+            row("Win rate %", f"{win_rate:.1f}"),
             row("Открытая позиция", "да" if self.pnl.inventory > 0 else "нет"),
             sep,
         ]
 
-        if jp is not None:
-            lines.append(row("Журнал (файл)", str(jp)))
-            lines.append(row("Строк в журнале (CSV)", str(j_rows)))
-            lines.append(row("Сумма pnl по журналу", f"{j_pnl:+.4f}"))
+        if js.rows > 0:
+            lines += [
+                row("--- Journal stats ---", ""),
+                sep,
+                row("Строк в журнале", str(js.rows)),
+                row("✅ Побед / ❌ Убытков", f"{js.win_count} / {js.loss_count}"),
+                row("Win rate % (journal)", f"{js.win_rate_pct:.1f}"),
+                row("Profit factor", f"{js.profit_factor:.2f}" if js.profit_factor != float('inf') else "∞"),
+                sep,
+                row("Сумма PnL (журнал)", f"{js.pnl_sum:+.4f} USD"),
+                row("Сумма профитов", f"{js.win_pnl_sum:+.4f} USD"),
+                row("Сумма убытков", f"{js.loss_pnl_sum:+.4f} USD"),
+                sep,
+                row("Средняя на сделку", f"{js.avg_pnl:+.4f} USD"),
+                row("Средняя прибыльная", f"{js.avg_win:+.4f} USD"),
+                row("Средняя убыточная", f"{js.avg_loss:+.4f} USD"),
+                sep,
+                row("Средневзвешенная (все)", f"{js.weighted_avg_pnl:+.4f} USD"),
+                row("Средневзвешенная (профит)", f"{js.weighted_avg_win:+.4f} USD"),
+                row("Средневзвешенная (убыток)", f"{js.weighted_avg_loss:+.4f} USD"),
+                sep,
+            ]
+
+            if jp is not None:
+                lines.append(row("Журнал (файл)", jp.name))
+
+            lines += [
+                row("exit_reason", "count"),
+                sep,
+            ]
+            for reason, cnt in sorted(js.exit_reasons.items(), key=lambda x: (-x[1], x[0])):
+                lines.append(row(reason[:w_label], str(cnt)))
             lines.append(sep)
-            lines.append(row("exit_reason (журнал)", "count"))
-            lines.append(sep)
-            for reason, cnt in sorted(j_reasons.items(), key=lambda x: (-x[1], x[0])):
-                lines.append(row(reason[: w_label], str(cnt)))
-            lines.append(sep)
+        elif jp is not None:
+            lines += [
+                row("Журнал (файл)", jp.name),
+                row("Строк в журнале", "0"),
+                sep,
+            ]
 
         block = "\n".join(lines)
         print(block)

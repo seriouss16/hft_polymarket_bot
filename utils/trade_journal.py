@@ -46,13 +46,23 @@ _FIELDNAMES = [
 ]
 
 
+def _has_header(path: Path) -> bool:
+    """Return True when the first non-empty line of the CSV looks like a header row."""
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            first = f.readline().strip()
+        return first.startswith("ts,") or first == ",".join(_FIELDNAMES[:3])
+    except OSError:
+        return False
+
+
 class TradeJournal:
     """Append closed-trade features and outcomes to CSV."""
 
     def __init__(self, path: str = "reports/trade_journal.csv") -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
+        if not self.path.exists() or not _has_header(self.path):
             with self.path.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
                 writer.writeheader()
