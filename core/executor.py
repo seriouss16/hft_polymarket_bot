@@ -64,12 +64,13 @@ def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
 class PnLTracker:
     """Track position state and realized/unrealized PnL on Polymarket shares."""
 
-    def __init__(self, initial_balance=None):
+    def __init__(self, initial_balance=None, live_mode: bool = False):
         """Initialize balance from HFT_DEPOSIT_USD when initial_balance is omitted."""
         if initial_balance is not None:
             self.initial_balance = float(initial_balance)
         else:
             self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
+        self.live_mode = live_mode
         self.balance = self.initial_balance
         self.inventory = 0.0
         self.entry_price = 0.0
@@ -97,6 +98,23 @@ class PnLTracker:
     def reset_strategy_performance(self) -> None:
         """Clear per-strategy PnL buckets when starting a new market (optional)."""
         self.strategy_performance.reset()
+
+    def rollback_last_open(self, amount_usd: float) -> None:
+        """Undo the last BUY that was sim-recorded but rejected by the live CLOB.
+
+        Restores balance and clears inventory so the engine does not attempt to
+        close a position that was never opened on-chain.  Only call immediately
+        after an OPEN decision when live execution returned False (SKIP).
+        """
+        self.balance += amount_usd
+        self.inventory = 0.0
+        self.entry_price = 0.0
+        self.entry_ts = 0
+        self.position_side = None
+        logging.info(
+            "[LIVE] Sim OPEN rolled back — live BUY skipped. Balance restored to %.4f USD.",
+            self.balance,
+        )
 
     def is_good_regime(self) -> bool:
         """Return True when new entries are allowed based on recent realized PnL."""
@@ -161,8 +179,10 @@ class PnLTracker:
             self.entry_ts = time.time()
             _sn = str(strategy_name).strip() if strategy_name else ""
             _tag = f"{side} {_sn}".strip() if _sn else side
+            _mode = "LIVE" if self.live_mode else "SIM"
             logging.info(
-                "🟢 [SIM %s] book=%.4f exec=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
+                "🟢 [%s %s] book=%.4f exec=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
+                _mode,
                 _tag,
                 book_px,
                 exec_price,
@@ -239,7 +259,8 @@ class PnLTracker:
 
             win_rate = (self.wins / self.trades_count) * 100
             _sn = str(strategy_name).strip() if strategy_name else ""
-            _sell_hdr = f"[SIM SELL {_sn}]" if _sn else "[SIM SELL]"
+            _mode = "LIVE" if self.live_mode else "SIM"
+            _sell_hdr = f"[{_mode} SELL {_sn}]" if _sn else f"[{_mode} SELL]"
             logging.info(
                 "🔴 %s book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%",
                 _sell_hdr,

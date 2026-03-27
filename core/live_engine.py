@@ -272,13 +272,23 @@ class LiveExecutionEngine:
         """Return (status_str, filled_size) for an active order from CLOB.
 
         Returns ("unknown", 0.0) when the client is unavailable or in test mode.
+        Queries clob.polymarket.com directly to avoid Cloudflare blocks on polymarket.com.
         """
         if self.test_mode or self.client is None:
             return "unknown", 0.0
         try:
-            resp = self.client.get_order(order_id)
-            status = str(getattr(resp, "status", "unknown")).lower()
-            filled = float(getattr(resp, "size_matched", 0.0) or 0.0)
+            resp = self._http.get(
+                f"https://clob.polymarket.com/order/{order_id}",
+                timeout=5,
+            )
+            if resp.status_code != 200:
+                logging.warning(
+                    "Order fill poll HTTP %s for order=%s.", resp.status_code, order_id
+                )
+                return "unknown", 0.0
+            data = resp.json()
+            status = str(data.get("status", "unknown")).lower()
+            filled = float(data.get("size_matched", 0.0) or 0.0)
             return status, filled
         except Exception as exc:
             logging.warning("Order fill poll failed order=%s: %s", order_id, exc)
@@ -297,31 +307,49 @@ class LiveExecutionEngine:
             logging.warning("Cancel failed order=%s: %s", order_id, exc)
             return False
 
-    def _place_limit_raw(self, token_id: str, side: str, price: float, size: float) -> str | None:
-        """Submit a GTC limit order; return order_id or None on failure."""
+    def _place_limit_raw(
+        self, token_id: str, side: str, price: float, size: float
+    ) -> tuple[str | None, bool]:
+        """Submit a GTC limit order; return (order_id, immediate_fill) or (None, False).
+
+        immediate_fill is True when the CLOB responds with status='matched' meaning
+        the order was fully filled synchronously (no need to poll).
+        The order_id key in Polymarket CLOB dict responses is 'orderID' (capital D).
+        """
         if self.test_mode:
             fake_id = f"sim-{side}-{int(time.time() * 1000)}"
             logging.info(
                 "[SIM LIMIT] %s size=%.2f @ %.4f token=%s id=%s",
                 side, size, price, token_id, fake_id,
             )
-            return fake_id
+            return fake_id, False
         if OrderArgs is None or self.client is None:
             logging.error("Cannot place order: py_clob_client unavailable.")
-            return None
+            return None, False
         try:
             order = OrderArgs(token_id=token_id, price=price, size=size, side=side)
             signed = self.client.create_order(order)
             resp = self.client.post_order(signed, OrderType.GTC)
-            order_id = str(getattr(resp, "order_id", resp))
+            if isinstance(resp, dict):
+                order_id = str(resp.get("orderID") or resp.get("order_id") or "")
+                immediate = str(resp.get("status", "")).lower() in ("matched", "filled")
+            else:
+                order_id = str(getattr(resp, "order_id", "") or "")
+                immediate = str(getattr(resp, "status", "")).lower() in ("matched", "filled")
+            if not order_id:
+                logging.error(
+                    "Order placement: no order_id in response %s @ %.4f resp=%s",
+                    side, price, resp,
+                )
+                return None, False
             logging.info(
-                "[LIVE] %s size=%.2f @ %.4f token=%s -> id=%s",
-                side, size, price, token_id, order_id,
+                "[LIVE] %s size=%.2f @ %.4f token=%s -> id=%s immediate_fill=%s",
+                side, size, price, token_id[:20], order_id[:20], immediate,
             )
-            return order_id
+            return order_id, immediate
         except Exception as exc:
             logging.error("Order placement failed %s @ %.4f: %s", side, price, exc)
-            return None
+            return None, False
 
     async def _poll_order(self, tracked: TrackedOrder) -> None:
         """Monitor fill status and reprice or emergency-exit stale orders.
@@ -391,15 +419,18 @@ class LiveExecutionEngine:
                 tracked.order_id, tracked.price, new_price,
                 tracked.reprice_count, _ORDER_MAX_REPRICE,
             )
-            new_id = await asyncio.to_thread(
+            new_id, new_immediate = await asyncio.to_thread(
                 self._place_limit_raw, tracked.token_id, tracked.side, new_price, remaining
             )
             if new_id:
                 tracked.order_id = new_id
                 tracked.price = new_price
                 tracked.placed_at = time.time()
-                tracked.status = OrderStatus.PENDING
+                tracked.status = OrderStatus.FILLED if new_immediate else OrderStatus.PENDING
                 self._active_orders[new_id] = tracked
+                if new_immediate:
+                    tracked.filled_size = remaining
+                    break
             else:
                 tracked.status = OrderStatus.FAILED
                 logging.error("Reprice placement failed — position may be unmanaged.")
@@ -431,7 +462,7 @@ class LiveExecutionEngine:
             "🚨 EMERGENCY EXIT: %s %.2f @ %.4f token=%s",
             tracked.side, remaining, price, tracked.token_id,
         )
-        order_id = await asyncio.to_thread(
+        order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
         )
         if order_id:
@@ -441,9 +472,12 @@ class LiveExecutionEngine:
                 side=tracked.side,
                 price=price,
                 size=remaining,
+                status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
+                filled_size=remaining if immediate else 0.0,
             )
             self._active_orders[order_id] = emergency
-            asyncio.ensure_future(self._poll_order(emergency))
+            if not immediate:
+                asyncio.ensure_future(self._poll_order(emergency))
         else:
             logging.error(
                 "🛑 Emergency exit placement FAILED token=%s — manual intervention required.",
@@ -476,7 +510,9 @@ class LiveExecutionEngine:
             side, size, price, token_id,
         )
         self._entry_stats["emergency_exits"] += 1
-        order_id = await asyncio.to_thread(self._place_limit_raw, token_id, side, price, size)
+        order_id, immediate = await asyncio.to_thread(
+            self._place_limit_raw, token_id, side, price, size
+        )
         if order_id:
             tracked = TrackedOrder(
                 order_id=order_id,
@@ -484,13 +520,35 @@ class LiveExecutionEngine:
                 side=side,
                 price=price,
                 size=size,
+                status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
+                filled_size=size if immediate else 0.0,
             )
             self._active_orders[order_id] = tracked
-            asyncio.ensure_future(self._poll_order(tracked))
+            if not immediate:
+                asyncio.ensure_future(self._poll_order(tracked))
         else:
             logging.error(
                 "🛑 Emergency close FAILED token=%s — manual intervention required.", token_id
             )
+
+    def filled_buy_shares(self, token_id: str) -> float:
+        """Return total filled BUY shares currently tracked for token_id.
+
+        Used by bot.py to pass the correct real share count into close_position
+        instead of the simulated shares_sold from the engine.
+        Returns the sum of filled_size across all active BUY orders for the token,
+        plus size for orders that were immediately matched (filled_size may be 0).
+        Falls back to sim quantity when no live orders are found (safety path).
+        """
+        total = 0.0
+        for order in self._active_orders.values():
+            if order.token_id != token_id or order.side != BUY:
+                continue
+            if order.status == OrderStatus.FILLED:
+                total += order.filled_size if order.filled_size > 0 else order.size
+            elif order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
+                total += order.filled_size
+        return total
 
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics."""
@@ -510,12 +568,16 @@ class LiveExecutionEngine:
         self._last_skip_stats_log_ts = now
 
     async def close_position(self, token_id: str, size: float) -> None:
-        """Place a SELL limit order to close an open long position with lifecycle tracking."""
+        """Place a SELL limit order to close an open long position with lifecycle tracking.
+
+        Size must reflect actual filled shares from a prior BUY order.
+        Selling more shares than owned results in a CLOB error (balance: 0).
+        """
         if size <= 0:
             return
         best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.002))
-        order_id = await asyncio.to_thread(
+        order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, SELL_SIDE, price, size
         )
         if not order_id:
@@ -528,10 +590,16 @@ class LiveExecutionEngine:
             side=SELL_SIDE,
             price=price,
             size=size,
+            status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
+            filled_size=size if immediate else 0.0,
         )
         self._active_orders[order_id] = tracked
-        asyncio.ensure_future(self._poll_order(tracked))
-        logging.info("[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s", size, price, order_id)
+        if not immediate:
+            asyncio.ensure_future(self._poll_order(tracked))
+        logging.info(
+            "[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s immediate=%s",
+            size, price, order_id[:20], immediate,
+        )
 
     async def execute(
         self,
@@ -539,8 +607,12 @@ class LiveExecutionEngine:
         token_id: str,
         order_size: float | None = None,
         budget_usd: float | None = None,
-    ) -> None:
+    ) -> bool:
         """Validate spread and place limit BUY order with full lifecycle tracking.
+
+        Returns True when the order was submitted, False on any skip/failure.
+        The caller should rollback the sim position on False so that sim state
+        stays in sync with what actually happened on-chain.
 
         Size resolution priority:
           1. ``order_size`` when given — treated as USD notional and converted to
@@ -563,20 +635,20 @@ class LiveExecutionEngine:
                 signal, best_ask, self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
-            return
+            return False
 
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             self._entry_stats["skip_spread"] += 1
             logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
             self._log_entry_stats_if_due()
-            return
+            return False
 
         if signal not in ("BUY_UP", "BUY_DOWN"):
             self._entry_stats["skip_signal"] += 1
             logging.warning("Skip signal: unsupported live signal %s.", signal)
             self._log_entry_stats_if_due()
-            return
+            return False
 
         # Polymarket CLOB requires at least this many shares per order.
         poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
@@ -587,7 +659,6 @@ class LiveExecutionEngine:
         shares = usd_notional / exec_price
 
         if shares < poly_min_shares:
-            # Try to fill up to the minimum using all available budget.
             min_cost = poly_min_shares * exec_price
             logging.warning(
                 "⚠️ Skip %s: budget %.2f USD → %.2f shares < CLOB minimum %.0f shares "
@@ -596,7 +667,7 @@ class LiveExecutionEngine:
             )
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
-            return
+            return False
 
         # Round down to 2 decimal places — CLOB rejects fractional shares beyond that.
         shares = float(int(shares * 100) / 100)
@@ -605,13 +676,13 @@ class LiveExecutionEngine:
 
         # Limit order just inside best ask to maximise fill probability.
         price = max(0.01, min(0.99, exec_price - 0.002))
-        order_id = await asyncio.to_thread(
+        order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, BUY, price, shares
         )
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
             self._log_entry_stats_if_due()
-            return
+            return False
 
         tracked = TrackedOrder(
             order_id=order_id,
@@ -619,12 +690,16 @@ class LiveExecutionEngine:
             side=BUY,
             price=price,
             size=shares,
+            status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
+            filled_size=shares if immediate else 0.0,
         )
         self._active_orders[order_id] = tracked
-        asyncio.ensure_future(self._poll_order(tracked))
+        if not immediate:
+            asyncio.ensure_future(self._poll_order(tracked))
         self._entry_stats["executed"] += 1
         logging.info(
-            "[LIVE] Entry tracked: %s %.2f shares @ %.4f (%.2f USD) token=%s id=%s",
-            signal, shares, price, shares * price, token_id[:20], order_id,
+            "[LIVE] Entry tracked: %s %.2f shares @ %.4f (%.2f USD) token=%s id=%s immediate=%s",
+            signal, shares, price, shares * price, token_id[:20], order_id[:20], immediate,
         )
         self._log_entry_stats_if_due()
+        return True
