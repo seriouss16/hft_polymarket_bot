@@ -191,26 +191,14 @@ class LiveExecutionEngine:
         if not self.test_mode:
             if not private_key or not funder:
                 raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
-            api_key = os.getenv("POLIMARKET_API_KEY") or os.getenv("POLY_API_KEY")
-            api_secret = os.getenv("POLIMARKET_API_SECRET") or os.getenv("POLY_API_SECRET")
-            api_passphrase = os.getenv("POLIMARKET_API_PASSPHRASE") or os.getenv("POLY_API_PASSPHRASE")
-            if api_key and api_secret and api_passphrase:
-                try:
-                    from py_clob_client.clob_types import ApiCreds
-                    self.client.set_api_creds(ApiCreds(
-                        api_key=api_key,
-                        api_secret=api_secret,
-                        api_passphrase=api_passphrase,
-                    ))
-                    logging.info("[LIVE] ClobClient authenticated via explicit API credentials.")
-                except Exception as exc:
-                    logging.warning(
-                        "[LIVE] Failed to set explicit API creds (%s); falling back to derive.", exc
-                    )
-                    self.client.set_api_creds(self.client.create_or_derive_api_creds())
-            else:
-                logging.info("[LIVE] No explicit API keys found; deriving credentials from private key.")
-                self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            # Always derive credentials from private key — they are canonical and always valid.
+            # Explicit API keys in env may be stale (rotated/re-generated on Polymarket).
+            derived = self.client.create_or_derive_api_creds()
+            self.client.set_api_creds(derived)
+            logging.info(
+                "[LIVE] ClobClient credentials derived from private key (key=%.8s...).",
+                derived.api_key,
+            )
 
     def fetch_usdc_balance(self) -> float | None:
         """Return available USDC balance on the Polymarket CLOB account.
@@ -221,17 +209,21 @@ class LiveExecutionEngine:
         if self.test_mode or self.client is None:
             return None
         try:
-            method = getattr(self.client, "get_balance_allowance", None)
-            if method is None:
-                logging.warning("ClobClient has no get_balance_allowance; skipping balance check.")
-                return None
-            resp = method()
-            raw = getattr(resp, "balance", None) or getattr(resp, "allowance", None)
-            if raw is None and isinstance(resp, dict):
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=sig_type,
+            )
+            resp = self.client.get_balance_allowance(params=params)
+            if isinstance(resp, dict):
                 raw = resp.get("balance") or resp.get("allowance")
+            else:
+                raw = getattr(resp, "balance", None) or getattr(resp, "allowance", None)
             if raw is None:
                 return None
-            return float(raw)
+            # USDC on Polymarket CLOB is denominated in 1e-6 units (micro-USDC).
+            return float(raw) / 1_000_000.0
         except Exception as exc:
             logging.warning("fetch_usdc_balance failed: %s", exc)
             return None

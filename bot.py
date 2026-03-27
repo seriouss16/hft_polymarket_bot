@@ -757,8 +757,15 @@ async def main():
                     # Use the OPEN decision already produced by process_tick so live
                     # execution mirrors the sim exactly (including soft_flow entries).
                     if isinstance(decision, dict) and decision.get("event") == "OPEN":
-                        _open_side = decision.get("side", "")
-                        if _open_side in ("BUY_UP", "BUY_DOWN"):
+                        # Engine returns side as "UP"/"DOWN"; map to signal names.
+                        _raw_side = decision.get("side", "")
+                        if _raw_side == "UP":
+                            _open_signal = "BUY_UP"
+                        elif _raw_side == "DOWN":
+                            _open_signal = "BUY_DOWN"
+                        else:
+                            _open_signal = _raw_side
+                        if _open_signal in ("BUY_UP", "BUY_DOWN"):
                             # Pass USD notional as budget_usd; live_exec converts to
                             # shares at current ask and enforces CLOB minimum.
                             _budget = float(
@@ -766,11 +773,11 @@ async def main():
                                 or float(os.environ["LIVE_ORDER_SIZE"])
                             )
                             _live_tid = (
-                                token_up_id if _open_side == "BUY_UP"
+                                token_up_id if _open_signal == "BUY_UP"
                                 else (token_down_id or token_up_id)
                             )
                             await live_exec.execute(
-                                _open_side, _live_tid, budget_usd=_budget
+                                _open_signal, _live_tid, budget_usd=_budget
                             )
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
