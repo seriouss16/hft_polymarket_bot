@@ -19,6 +19,7 @@
 11. [Running the Bot](#running-the-bot)
 12. [Switching to Live Mode](#switching-to-live-mode)
 13. [Log Interpretation](#log-interpretation)
+14. [Tests](#tests)
 
 ---
 
@@ -34,8 +35,8 @@ The core idea is **latency arbitrage**: Polymarket's oracle price (PolyRTDS) lag
 | Deposit | $100 |
 | Trade size | $10 per position |
 | Target win rate | ≥ 60 % |
-| Max daily loss (live) | $15 |
-| Max drawdown | 15 % |
+| Max daily loss (live) | configured via `LIVE_MAX_DAILY_LOSS` |
+| Max drawdown | configured via `MAX_DRAWDOWN_PCT` |
 
 ---
 
@@ -84,7 +85,7 @@ The core idea is **latency arbitrage**: Polymarket's oracle price (PolyRTDS) lag
 │    │                 │                                              │
 │    ▼                 ▼                                              │
 │  PnLTracker    LiveExecutionEngine  ◄── LIVE_MODE=1 only            │
-│  (sim P&L,     (order lifecycle,                                    │
+│  (live P&L,    (order lifecycle,                                    │
 │  drawdown,      reprice, emergency                                  │
 │  regime)        exit, fill tracking)                                │
 └─────────────────────────────────────────────────────────────────────┘
@@ -96,8 +97,8 @@ The core idea is **latency arbitrage**: Polymarket's oracle price (PolyRTDS) lag
 |---|---|
 | `bot.py` | Entry point; asyncio event loop, wires all components |
 | `core/engine.py` | Signal evaluation, entry/exit conditions, trailing TP/SL |
-| `core/executor.py` | Simulated P&L tracker, regime filter, inventory |
-| `core/live_engine.py` | Live CLOB execution, order tracking, reprice, emergency exit |
+| `core/executor.py` | Live/sim P&L tracker, regime filter, inventory |
+| `core/live_engine.py` | Live CLOB execution, order tracking, reprice, emergency exit, balance verification |
 | `core/risk_engine.py` | Drawdown guard, position sizing cap, loss cooldown |
 | `core/selector.py` | Discovers active 5-min BTC Up/Down slots from Gamma API |
 | `core/strategy_hub.py` | Registers strategies, routes tick data, A/B windows |
@@ -279,48 +280,120 @@ _peak_unrealized tracks new high each tick
 
 ## Order Lifecycle (Live Mode)
 
-When `LIVE_MODE=1`, every simulated entry/exit decision also places a real GTC limit order on the Polymarket CLOB. The `LiveExecutionEngine` manages the full lifecycle:
+In live mode, simulation is fully suppressed. `PnLTracker` records only confirmed CLOB fills via `live_open()` / `live_close()`. The `LiveExecutionEngine` manages all order state.
+
+### BUY flow (`execute()`)
 
 ```
-execute(signal, token_id)          close_position(token_id, size)
-        │                                    │
-        ▼                                    ▼
-_place_limit_raw()              _place_limit_raw(SELL)
-        │                                    │
-        ▼                                    ▼
-TrackedOrder(PENDING)           TrackedOrder(PENDING)
-        │                                    │
-        └──────────────┬─────────────────────┘
-                       │
-                       ▼
-              _poll_order() [background task]
-                       │
-               poll every 0.4 s
-                       │
-              ┌────────┼──────────────┐
-              │        │              │
-           FILLED   PARTIAL        STALE (> 3.0 s)
-              │        │              │
-             done   continue    reprice ≤ 2 times
-                    polling          │
-                               cancel + new order
-                               at current best price
-                                     │
-                              reprice exhausted?
-                                     │  YES
-                                     ▼
-                           _emergency_exit_order()
-                           cross the spread (+0.005)
+execute(signal, token_id, budget_usd)
+        │
+        ├── ask price check: min_entry_ask ≤ best_ask ≤ max_entry_ask
+        ├── spread check: best_ask - best_bid ≤ max_spread
+        ├── signal check: must be BUY_UP or BUY_DOWN
+        ├── budget check: budget_usd / best_ask ≥ POLY_CLOB_MIN_SHARES
+        │
+        ▼
+_place_limit_raw(BUY, price=best_ask - 0.002, shares)
+        │
+        ├── immediate_fill=True (status=matched in post_order response)
+        │       └── skip poll, go straight to balance verification
+        │
+        └── immediate_fill=False
+                └── await _poll_order(tracked)
+        │
+        ▼
+  Order CANCELLED / FAILED?
+        │  YES → skip, no balance check needed
+        │
+        ▼
+  filled > 0 (FILLED or PARTIAL)?
+        │  NO  → skip
+        │
+        ▼
+  Wait for on-chain CTF balance to settle
+  (retry loop: 0.3 → 0.5 → 0.8 → 1.0 → 1.5 s, max ~4 s)
+        │
+        ├── balance > 0 confirmed
+        │       ├── balance ≥ POLY_CLOB_MIN_SHARES
+        │       │       └── 🟢 return (actual_balance, avg_price)
+        │       └── balance < POLY_CLOB_MIN_SHARES (protocol fee ate too many shares)
+        │               └── 🔴 FAK-sell residual → skip (no open position)
+        │
+        └── balance still 0 after all retries (API lag)
+                └── trust CLOB-reported fill, proceed with filled shares
+```
+
+**Note on protocol fee:** Polymarket deducts a small fee in CTF shares at fill time.
+The actual spendable balance is always slightly below the CLOB-reported `filled_size`.
+The balance verification loop accounts for the settlement delay (observed up to ~600 ms for immediate fills).
+
+### SELL flow (`close_position()`)
+
+```
+close_position(token_id, size)
+        │
+        ▼
+  Query on-chain CTF balance
+        ├── balance > 0 and balance < size → correct size down (fee adjustment)
+        ├── balance = 0 (API lag)          → keep original size, proceed
+        └── balance ≥ size                 → use original size
+        │
+        ├── size < POLY_CLOB_MIN_SHARES (5)
+        │       └── 🔴 FAK market SELL (no minimum size restriction)
+        │
+        └── size ≥ POLY_CLOB_MIN_SHARES
+                └── GTC limit just above best_bid (+0.002)
+                        │
+                        ├── placement OK → _poll_order(SELL)
+                        │       └── partial remainder < min → FAK for remainder
+                        │
+                        └── placement FAILED → FAK fallback → emergency_exit
+```
+
+### `_poll_order` loop
+
+```
+poll every LIVE_ORDER_FILL_POLL_SEC (0.4 s)
+        │
+        ├── status = matched / filled   → FILLED, done
+        │
+        ├── status = partially_matched  → update filled_size, reset stale timer
+        │
+        └── STALE (age > LIVE_ORDER_STALE_SEC = 3.0 s)
+                │
+                ├── BUY + filled < POLY_CLOB_MIN_SHARES
+                │       └── cancel BUY + FAK-sell partial residual → report as skip
+                │
+                ├── SELL + remaining < POLY_CLOB_MIN_SHARES
+                │       └── FAK-sell remainder directly
+                │
+                ├── reprice_count < LIVE_ORDER_MAX_REPRICE (2)
+                │       └── cancel + new order at current best price
+                │           (preserves accumulated filled_size)
+                │
+                └── reprice exhausted → _emergency_exit_order()
 ```
 
 ### Emergency exit triggers
 
 | Trigger | Action |
 |---|---|
-| Order stale after max reprice | Cancel + aggressive limit crossing the book |
-| Engine CLOSE decision (LIVE_MODE) | `close_position()` → tracked SELL order |
+| Order stale after max reprice | `_emergency_exit_order()`: FAK for SELL, aggressive limit for BUY |
+| Engine CLOSE decision (live) | `close_position()` → tracked SELL order |
 | Shutdown with open position | `emergency_exit()` → cancel all pending + aggressive SELL |
 | Crash / exception in main loop | Same via `finally` block |
+| All SELL attempts fail | Force-clear `PnLTracker` state to prevent phantom position loop |
+
+### Allowances
+
+At startup `ensure_allowances()` sets the USDC (COLLATERAL) spending approval.
+After every confirmed BUY fill `ensure_conditional_allowance(token_id)` sets the CTF token
+(CONDITIONAL) approval for that specific token so the subsequent SELL is accepted by the CLOB.
+
+### Heartbeat
+
+A background task calls `client.post_heartbeat()` every 5 s to keep the CLOB session alive
+and prevent automatic order cancellation.
 
 ### Order status states
 
@@ -330,8 +403,8 @@ TrackedOrder(PENDING)           TrackedOrder(PENDING)
 | `FILLED` | Fully filled — done |
 | `PARTIAL` | Partially filled — continues polling |
 | `STALE` | Exceeded `LIVE_ORDER_STALE_SEC` without fill |
-| `CANCELLED` | Manually cancelled (by reprice or emergency) |
-| `FAILED` | Placement or reprice failed — needs attention |
+| `CANCELLED` | Cancelled (by reprice or emergency); no balance check needed |
+| `FAILED` | Placement or reprice failed |
 
 ---
 
@@ -342,18 +415,18 @@ Three independent layers:
 ### 1. LiveRiskManager (daily loss)
 
 ```python
-if live_pnl < LIVE_MAX_DAILY_LOSS:   # -$15
+if live_pnl < LIVE_MAX_DAILY_LOSS:
     block all new entries
 ```
 
 ### 2. RiskEngine (session drawdown)
 
 ```python
-if drawdown_from_peak > MAX_DRAWDOWN_PCT:   # 15%
+if drawdown_from_peak > MAX_DRAWDOWN_PCT:
     block all entries
 if loss trade closed:
-    cooldown LOSS_COOLDOWN_SEC             # 30 s
-max_notional = equity × MAX_POSITION_PCT  # 10%
+    cooldown LOSS_COOLDOWN_SEC
+max_notional = equity × MAX_POSITION_PCT
 ```
 
 ### 3. Regime filter (rolling win rate)
@@ -363,6 +436,11 @@ if recent_winrate < HFT_BAD_REGIME_WINRATE (0.35):
     block entries for HFT_REGIME_COOLDOWN_SEC (60 s)
 ```
 
+### 4. Live skip cooldown
+
+After a failed live BUY (order not placed or rejected), entries are blocked for
+`HFT_LIVE_SKIP_COOLDOWN_SEC` (30 s) to prevent retry spam.
+
 ---
 
 ## Configuration Reference
@@ -371,8 +449,9 @@ if recent_winrate < HFT_BAD_REGIME_WINRATE (0.35):
 
 | Key | Default | Description |
 |---|---|---|
-| `HFT_DEPOSIT_USD` | 100 | Starting equity |
-| `HFT_DEFAULT_TRADE_USD` | 10 | Notional per trade |
+| `HFT_DEPOSIT_USD` | 100 | Starting equity (must match `LIVE_ACCOUNT_BALANCE` in live mode) |
+| `HFT_DEFAULT_TRADE_USD` | 10 | Base notional per trade |
+| `HFT_TRADE_PCT_OF_DEPOSIT` | 0 | If > 0: trade size scales with current balance |
 | `HFT_MAX_POSITION_USD` | 100 | Max open notional |
 
 ### Signal thresholds
@@ -417,21 +496,27 @@ if recent_winrate < HFT_BAD_REGIME_WINRATE (0.35):
 | `HFT_PHASE_SOFT_MAX_ABS_EDGE` | 18.0 | Edge above this → switch to latency profile |
 | `HFT_SOFT_BUY_EDGE` | 10.0 | Min edge for soft_flow entries |
 
-### Live order lifecycle
+### Live execution and order lifecycle
 
 | Key | Default | Description |
 |---|---|---|
 | `LIVE_ORDER_FILL_POLL_SEC` | 0.4 | Seconds between fill status polls |
 | `LIVE_ORDER_STALE_SEC` | 3.0 | Seconds before unfilled order is considered stale |
 | `LIVE_ORDER_MAX_REPRICE` | 2 | Max reprice attempts before emergency exit |
-| `LIVE_ORDER_SIZE` | 10 | Shares per live order |
+| `LIVE_ORDER_SIZE` | 10 | Fallback order size in USD (used when budget not set) |
 | `LIVE_MAX_SPREAD` | 0.05 | Max CLOB spread to allow execution |
+| `HFT_MIN_ENTRY_ASK` | 0.08 | Minimum ask price to enter (rejects anomalous 0.01 prices) |
+| `HFT_MAX_ENTRY_ASK` | 0.99 | Maximum ask price to enter |
+| `POLY_CLOB_MIN_SHARES` | 5 | Polymarket minimum GTC order size in shares |
+| `POLY_SIGNATURE_TYPE` | 2 | Wallet signature type (2 = EOA with proxy) |
+| `HFT_LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |
 
 ### Risk limits
 
 | Key | Default | Description |
 |---|---|---|
-| `LIVE_MAX_DAILY_LOSS` | -15.0 | Stop trading when daily PnL < this |
+| `LIVE_MAX_DAILY_LOSS` | -1.0 | Stop trading when daily PnL < this (set to ~50% of deposit) |
+| `LIVE_ACCOUNT_BALANCE` | _(required)_ | Actual Polymarket USDC balance; must match `HFT_DEPOSIT_USD` |
 | `MAX_DRAWDOWN_PCT` | 0.15 | Stop trading when session drawdown > 15% |
 | `MAX_POSITION_PCT` | 0.10 | Max notional as fraction of equity |
 | `LOSS_COOLDOWN_SEC` | 30 | Cooldown after a losing trade |
@@ -454,13 +539,10 @@ if recent_winrate < HFT_BAD_REGIME_WINRATE (0.35):
 ### Prerequisites
 
 ```bash
-# Install dependencies
 uv sync
-# or
-pip install -r requirements.txt
 ```
 
-Required packages: `websockets`, `requests`, `numpy`, `uvloop`, `py_clob_client` (for live mode).
+Required packages: `websockets`, `requests`, `numpy`, `uvloop`, `py_clob_client`.
 
 ### Simulation mode (safe default)
 
@@ -475,20 +557,9 @@ Trade records append to `reports/trade_journal.csv`.
 ### Force a single strategy profile
 
 ```bash
-# Latency only
 HFT_PHASE_FORCE_PROFILE=latency uv run bot.py
-
-# Soft-flow only
 HFT_PHASE_FORCE_PROFILE=soft_flow uv run bot.py
 ```
-
-### Enable LSTM price predictor
-
-```bash
-HFT_ENABLE_LSTM=1 uv run bot.py
-```
-
-Requires `tensorflow` or `onnxruntime` with a trained model file.
 
 ---
 
@@ -496,48 +567,52 @@ Requires `tensorflow` or `onnxruntime` with a trained model file.
 
 ### 1. Credentials
 
-Create `hft_bot/.env` (never commit this file):
+Create `hft_bot/.env` (never commit — it is `.gitignore`d):
 
 ```env
 PRIVATE_KEY=0x<your_polygon_private_key>
 POLY_FUNDER_ADDRESS=0x<your_funder_wallet>
-POLIMARKET_API_KEY=<api_key>
-POLIMARKET_API_SECRET=<api_secret>
-POLIMARKET_API_PASSPHRASE=<passphrase>
 POLY_SIGNATURE_TYPE=2
-```
 
-`.env` overrides `runtime.env` — any key set in `.env` takes precedence.
-
-### 2. Enable live mode
-
-```bash
-# Either in .env:
 LIVE_MODE=1
-
-# Or as environment variable:
-LIVE_MODE=1 uv run bot.py
+HFT_DEPOSIT_USD=<your_balance>
+LIVE_ACCOUNT_BALANCE=<your_balance>
+HFT_DEFAULT_TRADE_USD=<trade_size>
+LIVE_ORDER_SIZE=<trade_size>
+HFT_MAX_POSITION_USD=<max_position>
+LIVE_MAX_DAILY_LOSS=-<max_loss>
 ```
 
-### 3. Checklist before first live run
+`.env` overrides `config/runtime.env` — any key set in `.env` takes precedence.
 
-- [ ] `PRIVATE_KEY` and `POLY_FUNDER_ADDRESS` set and confirmed correct network (Polygon mainnet, chain_id=137)
+> **Do not** set `POLIMARKET_API_KEY/SECRET/PASSPHRASE` manually. The bot always
+> derives credentials from `PRIVATE_KEY` via `create_or_derive_api_creds()` to avoid
+> stale-key errors after Polymarket key rotations.
+
+### 2. Checklist before first live run
+
+- [ ] `PRIVATE_KEY` and `POLY_FUNDER_ADDRESS` set and confirmed on Polygon mainnet (chain_id=137)
 - [ ] `POLY_SIGNATURE_TYPE=2` matches wallet type
-- [ ] `LIVE_MAX_DAILY_LOSS` set to an amount you can afford to lose in a session
-- [ ] `MAX_DRAWDOWN_PCT` ≤ 0.20 (20%)
-- [ ] `LIVE_ORDER_SIZE` matches available USDC balance on Polymarket
+- [ ] `HFT_DEPOSIT_USD` equals `LIVE_ACCOUNT_BALANCE` equals your actual Polymarket USDC balance
+- [ ] `LIVE_MAX_DAILY_LOSS` set to an amount you can afford to lose in a session (e.g. 50% of deposit)
+- [ ] `LIVE_ORDER_SIZE` and `HFT_DEFAULT_TRADE_USD` set consistently
+- [ ] `HFT_MAX_POSITION_USD` ≥ `LIVE_ORDER_SIZE` (otherwise bot will never trade)
+- [ ] `py_clob_client` installed: included in `uv sync`
 - [ ] Run at least one simulation session and review `reports/trade_journal.csv`
-- [ ] `py_clob_client` installed: `pip install py_clob_client`
 
-### 4. Live vs simulation differences
+### 3. Live vs simulation differences
 
 | Aspect | Simulation | Live |
 |---|---|---|
 | Order placement | Log only (`[SIM LIMIT]`) | Real GTC limit on Polymarket CLOB |
 | Fill tracking | Not tracked | Polled every `LIVE_ORDER_FILL_POLL_SEC` |
+| PnL recording | `log_trade()` on every tick | `live_open()` / `live_close()` only after CLOB confirmation |
+| Balance verification | N/A | `fetch_conditional_balance()` with retry after each BUY fill |
+| CONDITIONAL allowance | N/A | `ensure_conditional_allowance(token_id)` after each BUY fill |
 | Position close | Simulated P&L | Real SELL order via `close_position()` |
 | Shutdown | Report only | Emergency exit if open position |
 | Crash | Report only | Emergency exit then report |
+| Phantom position | N/A | Force-cleared if all SELL attempts fail |
 
 ---
 
@@ -572,24 +647,44 @@ DD: 0.00% | Gate: ON | Forecast: 66960.69
 | `DD` | Current session drawdown % |
 | `Gate` | `ON` = entry permitted; `OFF` = risk block active |
 
-### Entry and exit events
+### Live order events
+
+```
+🟢 [LIVE] BUY placed: BUY_DOWN 19.04 sh @ 0.2080 (3.96 USD) token=... id=... immediate=True
+🟢 [LIVE] On-chain balance confirmed: 18.9900 sh (attempt 2, delay 0.5s) token=...
+⚠️ [LIVE] BUY adjusted for protocol fee: reported=19.0400 actual=18.9900 (fee=0.0500 sh) token=...
+🟢 [LIVE] BUY confirmed: 18.9900 shares @ 0.2080 token=...
+🔴 [LIVE] SELL placed: 18.9900 @ 0.2180 id=... immediate=False token=...
+🔴 [LIVE] SELL confirmed: filled=18.9900 / 18.9900 @ 0.2180 token=...
+⚠️ [LIVE] SELL size corrected: 6.0600 → 5.9837 (on-chain balance after fee) token=...
+🔴 [LIVE] FAK SELL done: 5.9837 @ 0.4500 token=...
+🚨 EMERGENCY CLOSE: SELL 6.06 @ 0.7350 token=...
+🛑 Emergency close FAILED token=... — manual intervention required.
+🛑 [LIVE] SELL failed entirely — force-clearing PnL state. Manual check required.
+```
+
+### Simulation events
 
 ```
 🟢 [SIM BUY_UP latency] book=0.5100 exec=0.5105 | 10.00$ → 19.59 sh
 🔴 [SIM SELL latency]   book=0.5000 exec=0.4995 | sold 19.59 sh | PnL -0.22$ | WR 71.4%
-📌 Exit reason=TRAILING_TP hold=4.2s pnl=+0.18 peak_pnl=+0.21
-⚠️  BAD REGIME detected: WR=30.0% avgPnL=-0.15$ -> cooldown 60s
-🚨 EMERGENCY CLOSE: SELL 19.59 @ 0.4990 token=...
 ```
 
-### Phase router diagnostics (every 45 s)
+### Exit and regime diagnostics
+
+```
+📌 Exit reason=TRAILING_TP hold=4.2s pnl=+0.18 peak_pnl=+0.21
+⚠️  BAD REGIME detected: WR=30.0% avgPnL=-0.15$ -> cooldown 60s
+```
+
+### Phase router diagnostics
 
 ```
 Phase diag: selected=soft_flow soft_eligible=True logic_ok=True |
 trend=UP speed=0.00 edge=12.60 age=2.1s stale=210ms | blockers=-
 ```
 
-`blockers` lists why latency or soft_flow was not selected (e.g. `volatile_speed`, `stale_above_soft_max`, `flat_trend`).
+`blockers` lists why a profile was not selected (e.g. `volatile_speed`, `stale_above_soft_max`, `flat_trend`).
 
 ### Filter diagnostics (every 20 s)
 
@@ -600,4 +695,32 @@ entry_block_rsi=3 entry_block_book=4 entry_open_ok=4
 exit_reason_flip=4 exit_reason_tp=0 exit_reason_rsi=0
 ```
 
-A high `entry_block_spread_gate` ratio means the market is too stale or choppy. A high `entry_block_regime` means the win rate has been below threshold recently.
+A high `entry_block_spread_gate` ratio means the market is too stale or choppy.
+A high `entry_block_regime` means the win rate has been below threshold recently.
+
+---
+
+## Tests
+
+Tests live in `hft_bot/tests/` and cover all critical live-mode logic.
+
+### Run
+
+```bash
+cd hft_bot
+uv run pytest tests/ -q
+```
+
+### Coverage
+
+```bash
+uv run pytest tests/ --cov=core --cov-report=term-missing
+```
+
+### Test files
+
+| File | What is tested |
+|---|---|
+| `tests/test_executor.py` | `PnLTracker`: SIM BUY/SELL accounting, live mode suppression, `live_open()`, `live_close()`, `rollback_last_open()` |
+| `tests/test_executor_helpers.py` | `_up_outcome_quotes_ok`, `mark_price_for_side`, `mark_bid_for_side`, `get_unrealized_pnl`, `is_good_regime` |
+| `tests/test_live_engine.py` | `TrackedOrder` properties, `LiveExecutionEngine` test-mode, `_poll_order` (full/partial/sub-min/reprice), `close_position` routing, `execute()` skip and success paths |
