@@ -605,6 +605,15 @@ async def main():
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
+                    if LIVE_MODE and token_up_id:
+                        _close_side = decision.get("side")
+                        _close_shares = float(decision.get("shares_sold") or 0.0)
+                        _close_tid = (
+                            token_up_id if _close_side in ("BUY_UP", None)
+                            else (token_down_id or token_up_id)
+                        )
+                        if _close_shares > 0:
+                            await live_exec.close_position(_close_tid, _close_shares)
                     _rs = strategy_hub.get_rsi_v5_state()
                     _perf_key = decision.get("performance_key")
                     if _perf_key:
@@ -702,6 +711,21 @@ async def main():
         except Exception:
             pass
     finally:
+        if LIVE_MODE and token_up_id and pnl.inventory > 0:
+            logging.warning(
+                "🚨 Shutdown with open live position (%.4f shares) — emergency exit.",
+                pnl.inventory,
+            )
+            try:
+                _exit_side_name = pnl.position_side or "BUY_UP"
+                _exit_tid = (
+                    token_up_id if _exit_side_name in ("BUY_UP", None)
+                    else (token_down_id or token_up_id)
+                )
+                await live_exec.emergency_exit(_exit_tid, pnl.inventory)
+                await asyncio.sleep(2.0)
+            except Exception as _exc:
+                logging.error("Emergency exit on shutdown failed: %s", _exc)
         for _t in provider_tasks:
             if not _t.done():
                 _t.cancel()

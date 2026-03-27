@@ -1,17 +1,63 @@
 """Live execution and risk controls for Polymarket CLOB."""
 
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 import requests
 
 CLOB_BOOK_HTTP = "https://clob.polymarket.com/book"
+
+_ORDER_FILL_POLL_SEC = float(os.getenv("LIVE_ORDER_FILL_POLL_SEC", "0.4"))
+_ORDER_STALE_SEC = float(os.getenv("LIVE_ORDER_STALE_SEC", "3.0"))
+_ORDER_MAX_REPRICE = int(os.getenv("LIVE_ORDER_MAX_REPRICE", "2"))
+_ORDER_EMERGENCY_TICKS = int(os.getenv("LIVE_ORDER_EMERGENCY_TICKS", "3"))
+
+
+class OrderStatus(str, Enum):
+    """Lifecycle states for a tracked live order."""
+
+    PENDING = "pending"
+    FILLED = "filled"
+    PARTIAL = "partial"
+    STALE = "stale"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+@dataclass
+class TrackedOrder:
+    """Single tracked CLOB order with lifecycle metadata."""
+
+    order_id: str
+    token_id: str
+    side: str
+    price: float
+    size: float
+    placed_at: float = field(default_factory=time.time)
+    status: OrderStatus = OrderStatus.PENDING
+    filled_size: float = 0.0
+    reprice_count: int = 0
+
+    @property
+    def age_sec(self) -> float:
+        """Return seconds since the order was placed."""
+        return time.time() - self.placed_at
+
+    @property
+    def remaining(self) -> float:
+        """Return unfilled size."""
+        return max(0.0, self.size - self.filled_size)
+
+    @property
+    def is_stale(self) -> bool:
+        """Return True when order has not filled within the stale window."""
+        return self.age_sec >= _ORDER_STALE_SEC and self.status == OrderStatus.PENDING
 
 
 def _levels_from_book_rows(rows: list | None) -> list[tuple[float, float]]:
@@ -53,15 +99,17 @@ def _snapshot_from_levels(
         "pressure": pressure,
     }
 
+
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import OrderArgs, OrderType
-    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client.order_builder.constants import BUY, SELL as SELL_SIDE
 except Exception:  # pragma: no cover - optional runtime dependency
     ClobClient = None
     OrderArgs = None
     OrderType = None
     BUY = "BUY"
+    SELL_SIDE = "SELL"
 
 
 @dataclass
@@ -86,7 +134,18 @@ class LiveRiskManager:
 
 
 class LiveExecutionEngine:
-    """Place safe limit orders against Polymarket CLOB."""
+    """Place safe limit orders against Polymarket CLOB with full order lifecycle management.
+
+    Order lifecycle:
+      1. execute() / close_position() places a GTC limit and tracks it as PENDING.
+      2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC seconds.
+      3. If unfilled after LIVE_ORDER_STALE_SEC the order is repriced up to
+         LIVE_ORDER_MAX_REPRICE times toward best market price.
+      4. If still unfilled after all reprice attempts, emergency_exit() is called
+         which cancels the stale order and places an aggressive market-crossing limit.
+      5. emergency_exit() can also be triggered externally when the engine decides
+         the position must close regardless of conditions.
+    """
 
     def __init__(
         self,
@@ -96,6 +155,7 @@ class LiveExecutionEngine:
         min_order_size: float = 10.0,
         max_spread: float = 0.03,
     ) -> None:
+        """Initialise execution engine and optionally connect to Polymarket CLOB."""
         self.test_mode = test_mode
         self.min_order_size = min_order_size
         self.max_spread = max_spread
@@ -108,7 +168,10 @@ class LiveExecutionEngine:
             "skip_ask_cap": 0,
             "skip_spread": 0,
             "skip_signal": 0,
+            "emergency_exits": 0,
+            "reprice_total": 0,
         }
+        self._active_orders: dict[str, TrackedOrder] = {}
         self.client = None
         self._http = requests.Session()
 
@@ -118,7 +181,6 @@ class LiveExecutionEngine:
             return
 
         sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
-        # Public market-data client is available in both SIM and LIVE.
         self.client = ClobClient(
             "https://clob.polymarket.com",
             key=private_key or "",
@@ -171,20 +233,229 @@ class LiveExecutionEngine:
         ask_levels = _levels_from_book_rows(book.asks)
         return _snapshot_from_levels(bid_levels, ask_levels, depth)
 
-    def _place_limit(self, token_id: str, side: str, price: float, size: float) -> None:
-        """Send one GTC limit order or print it in simulation mode."""
+    def _get_order_fill(self, order_id: str) -> tuple[str, float]:
+        """Return (status_str, filled_size) for an active order from CLOB.
+
+        Returns ("unknown", 0.0) when the client is unavailable or in test mode.
+        """
+        if self.test_mode or self.client is None:
+            return "unknown", 0.0
+        try:
+            resp = self.client.get_order(order_id)
+            status = str(getattr(resp, "status", "unknown")).lower()
+            filled = float(getattr(resp, "size_matched", 0.0) or 0.0)
+            return status, filled
+        except Exception as exc:
+            logging.warning("Order fill poll failed order=%s: %s", order_id, exc)
+            return "unknown", 0.0
+
+    def _cancel_order(self, order_id: str) -> bool:
+        """Cancel an open order; return True on success."""
+        if self.test_mode or self.client is None:
+            logging.info("[SIM] Cancel order %s.", order_id)
+            return True
+        try:
+            self.client.cancel(order_id)
+            logging.info("[LIVE] Cancelled order %s.", order_id)
+            return True
+        except Exception as exc:
+            logging.warning("Cancel failed order=%s: %s", order_id, exc)
+            return False
+
+    def _place_limit_raw(self, token_id: str, side: str, price: float, size: float) -> str | None:
+        """Submit a GTC limit order; return order_id or None on failure."""
         if self.test_mode:
-            logging.info("[SIM LIMIT] %s size=%.2f @ %.4f token=%s", side, size, price, token_id)
+            fake_id = f"sim-{side}-{int(time.time() * 1000)}"
+            logging.info(
+                "[SIM LIMIT] %s size=%.2f @ %.4f token=%s id=%s",
+                side, size, price, token_id, fake_id,
+            )
+            return fake_id
+        if OrderArgs is None or self.client is None:
+            logging.error("Cannot place order: py_clob_client unavailable.")
+            return None
+        try:
+            order = OrderArgs(token_id=token_id, price=price, size=size, side=side)
+            signed = self.client.create_order(order)
+            resp = self.client.post_order(signed, OrderType.GTC)
+            order_id = str(getattr(resp, "order_id", resp))
+            logging.info(
+                "[LIVE] %s size=%.2f @ %.4f token=%s -> id=%s",
+                side, size, price, token_id, order_id,
+            )
+            return order_id
+        except Exception as exc:
+            logging.error("Order placement failed %s @ %.4f: %s", side, price, exc)
+            return None
+
+    async def _poll_order(self, tracked: TrackedOrder) -> None:
+        """Monitor fill status and reprice or emergency-exit stale orders.
+
+        Poll loop runs until the order reaches a terminal state
+        (filled, cancelled, or failed).
+        """
+        while tracked.status == OrderStatus.PENDING:
+            await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+
+            status_str, filled = await asyncio.to_thread(
+                self._get_order_fill, tracked.order_id
+            )
+
+            if status_str in ("matched", "filled"):
+                tracked.status = OrderStatus.FILLED
+                tracked.filled_size = tracked.size
+                logging.info(
+                    "✅ Order filled: id=%s %s %.2f @ %.4f",
+                    tracked.order_id, tracked.side, tracked.size, tracked.price,
+                )
+                break
+
+            if status_str == "partially_matched":
+                tracked.status = OrderStatus.PARTIAL
+                tracked.filled_size = filled
+                logging.info(
+                    "⚡ Order partial: id=%s filled=%.2f / %.2f",
+                    tracked.order_id, filled, tracked.size,
+                )
+
+            if not tracked.is_stale:
+                continue
+
+            if tracked.reprice_count >= _ORDER_MAX_REPRICE:
+                logging.warning(
+                    "⚠️ Order stale after %d reprice attempts id=%s — emergency exit.",
+                    _ORDER_MAX_REPRICE, tracked.order_id,
+                )
+                self._cancel_order(tracked.order_id)
+                tracked.status = OrderStatus.STALE
+                await self._emergency_exit_order(tracked)
+                break
+
+            best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
+            self._cancel_order(tracked.order_id)
+
+            if tracked.side == BUY:
+                new_price = max(0.01, min(0.99, best_ask + 0.001))
+            else:
+                new_price = max(0.01, min(0.99, best_bid - 0.001))
+
+            if abs(new_price - tracked.price) < 0.001:
+                logging.info(
+                    "Price unchanged after reprice (%.4f) — skipping reprice %d.",
+                    new_price, tracked.reprice_count + 1,
+                )
+                tracked.reprice_count += 1
+                tracked.placed_at = time.time()
+                continue
+
+            self._entry_stats["reprice_total"] += 1
+            tracked.reprice_count += 1
+            remaining = tracked.remaining if tracked.status == OrderStatus.PARTIAL else tracked.size
+            logging.info(
+                "🔄 Repricing order %s: %.4f → %.4f (attempt %d/%d)",
+                tracked.order_id, tracked.price, new_price,
+                tracked.reprice_count, _ORDER_MAX_REPRICE,
+            )
+            new_id = await asyncio.to_thread(
+                self._place_limit_raw, tracked.token_id, tracked.side, new_price, remaining
+            )
+            if new_id:
+                tracked.order_id = new_id
+                tracked.price = new_price
+                tracked.placed_at = time.time()
+                tracked.status = OrderStatus.PENDING
+                self._active_orders[new_id] = tracked
+            else:
+                tracked.status = OrderStatus.FAILED
+                logging.error("Reprice placement failed — position may be unmanaged.")
+                break
+
+        self._active_orders.pop(tracked.order_id, None)
+
+    async def _emergency_exit_order(self, tracked: TrackedOrder) -> None:
+        """Cross the spread aggressively to guarantee fill of remaining size.
+
+        Used when normal repricing exhausted or when force-close is requested.
+        Places a limit at best market price + aggressive offset to cross the book.
+        """
+        self._entry_stats["emergency_exits"] += 1
+        remaining = tracked.remaining if tracked.status in (
+            OrderStatus.PARTIAL, OrderStatus.STALE
+        ) else tracked.size
+        if remaining <= 0:
             return
-        order = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=side,
+
+        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
+
+        if tracked.side == BUY:
+            price = max(0.01, min(0.99, best_ask + 0.005))
+        else:
+            price = max(0.01, min(0.99, best_bid - 0.005))
+
+        logging.warning(
+            "🚨 EMERGENCY EXIT: %s %.2f @ %.4f token=%s",
+            tracked.side, remaining, price, tracked.token_id,
         )
-        signed = self.client.create_order(order)
-        resp = self.client.post_order(signed, OrderType.GTC)
-        logging.info("[LIVE] %s size=%.2f @ %.4f token=%s -> %s", side, size, price, token_id, resp)
+        order_id = await asyncio.to_thread(
+            self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
+        )
+        if order_id:
+            emergency = TrackedOrder(
+                order_id=order_id,
+                token_id=tracked.token_id,
+                side=tracked.side,
+                price=price,
+                size=remaining,
+            )
+            self._active_orders[order_id] = emergency
+            asyncio.ensure_future(self._poll_order(emergency))
+        else:
+            logging.error(
+                "🛑 Emergency exit placement FAILED token=%s — manual intervention required.",
+                tracked.token_id,
+            )
+
+    async def emergency_exit(self, token_id: str, size: float, side: str = SELL_SIDE) -> None:
+        """Externally triggered emergency close: cancel all open orders then cross the book.
+
+        Called by the engine when the position must be closed immediately
+        (e.g. market regime deteriorated, trailing SL hit, slot expiry, shutdown).
+        """
+        pending = [o for o in list(self._active_orders.values()) if o.token_id == token_id]
+        for order in pending:
+            self._cancel_order(order.order_id)
+            order.status = OrderStatus.CANCELLED
+            self._active_orders.pop(order.order_id, None)
+
+        if size <= 0:
+            return
+
+        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        if side == SELL_SIDE:
+            price = max(0.01, min(0.99, best_bid - 0.005))
+        else:
+            price = max(0.01, min(0.99, best_ask + 0.005))
+
+        logging.warning(
+            "🚨 EMERGENCY CLOSE: %s %.2f @ %.4f token=%s",
+            side, size, price, token_id,
+        )
+        self._entry_stats["emergency_exits"] += 1
+        order_id = await asyncio.to_thread(self._place_limit_raw, token_id, side, price, size)
+        if order_id:
+            tracked = TrackedOrder(
+                order_id=order_id,
+                token_id=token_id,
+                side=side,
+                price=price,
+                size=size,
+            )
+            self._active_orders[order_id] = tracked
+            asyncio.ensure_future(self._poll_order(tracked))
+        else:
+            logging.error(
+                "🛑 Emergency close FAILED token=%s — manual intervention required.", token_id
+            )
 
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics."""
@@ -195,59 +466,52 @@ class LiveExecutionEngine:
             return
         st = self._entry_stats
         logging.info(
-            "Live entry stats: attempts=%s executed=%s skip_ask_cap=%s skip_spread=%s skip_signal=%s.",
-            st["attempts"],
-            st["executed"],
-            st["skip_ask_cap"],
-            st["skip_spread"],
-            st["skip_signal"],
+            "Live entry stats: attempts=%s executed=%s skip_ask_cap=%s "
+            "skip_spread=%s skip_signal=%s reprice=%s emergency=%s active_orders=%s.",
+            st["attempts"], st["executed"], st["skip_ask_cap"],
+            st["skip_spread"], st["skip_signal"], st["reprice_total"],
+            st["emergency_exits"], len(self._active_orders),
         )
         self._last_skip_stats_log_ts = now
 
-    def _place_sell(self, token_id: str, price: float, size: float) -> None:
-        """Send GTC SELL limit or print it in simulation mode."""
-        try:
-            from py_clob_client.clob_types import OrderArgs, OrderType
-            from py_clob_client.order_builder.constants import SELL as SELL_SIDE
-        except Exception:
-            SELL_SIDE = "SELL"
-            OrderArgs = None
-            OrderType = None
-
-        if self.test_mode:
-            logging.info("[SIM LIMIT] SELL size=%.2f @ %.4f token=%s", size, price, token_id)
-            return
-        if OrderArgs is None or self.client is None:
-            logging.warning("Cannot place SELL: py_clob_client unavailable.")
-            return
-        order = OrderArgs(token_id=token_id, price=price, size=size, side=SELL_SIDE)
-        signed = self.client.create_order(order)
-        resp = self.client.post_order(signed, OrderType.GTC)
-        logging.info("[LIVE] SELL size=%.2f @ %.4f token=%s -> %s", size, price, token_id, resp)
-
     async def close_position(self, token_id: str, size: float) -> None:
-        """Place a SELL limit order to close an open long position."""
+        """Place a SELL limit order to close an open long position with lifecycle tracking."""
         if size <= 0:
             return
         best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.002))
-        await asyncio.to_thread(self._place_sell, token_id, price, size)
-        logging.info("[LIVE] Close position: SELL %.2f sh @ %.4f token=%s", size, price, token_id)
+        order_id = await asyncio.to_thread(
+            self._place_limit_raw, token_id, SELL_SIDE, price, size
+        )
+        if not order_id:
+            logging.warning("close_position: placement failed, trying emergency exit.")
+            await self.emergency_exit(token_id, size, side=SELL_SIDE)
+            return
+        tracked = TrackedOrder(
+            order_id=order_id,
+            token_id=token_id,
+            side=SELL_SIDE,
+            price=price,
+            size=size,
+        )
+        self._active_orders[order_id] = tracked
+        asyncio.ensure_future(self._poll_order(tracked))
+        logging.info("[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s", size, price, order_id)
 
     async def execute(self, signal: str, token_id: str) -> None:
-        """Validate spread and place limit order for BUY_UP/BUY_DOWN."""
+        """Validate spread and place limit BUY order with full lifecycle tracking."""
         self._entry_stats["attempts"] += 1
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+
         if best_ask >= self.max_entry_ask:
             self._entry_stats["skip_ask_cap"] += 1
             logging.warning(
                 "Skip %s: best_ask %.4f >= max entry ask %.4f.",
-                signal,
-                best_ask,
-                self.max_entry_ask,
+                signal, best_ask, self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
             return
+
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             self._entry_stats["skip_spread"] += 1
@@ -255,13 +519,29 @@ class LiveExecutionEngine:
             self._log_entry_stats_if_due()
             return
 
-        size = self.min_order_size
-        if signal in ("BUY_UP", "BUY_DOWN"):
-            price = max(0.01, min(0.99, best_ask - 0.002))
-            await asyncio.to_thread(self._place_limit, token_id, BUY, price, size)
-            self._entry_stats["executed"] += 1
-        else:
+        if signal not in ("BUY_UP", "BUY_DOWN"):
             self._entry_stats["skip_signal"] += 1
             logging.warning("Skip signal: unsupported live signal %s.", signal)
-        self._log_entry_stats_if_due()
+            self._log_entry_stats_if_due()
+            return
 
+        price = max(0.01, min(0.99, best_ask - 0.002))
+        order_id = await asyncio.to_thread(
+            self._place_limit_raw, token_id, BUY, price, self.min_order_size
+        )
+        if not order_id:
+            logging.error("execute: BUY placement failed for signal %s.", signal)
+            self._log_entry_stats_if_due()
+            return
+
+        tracked = TrackedOrder(
+            order_id=order_id,
+            token_id=token_id,
+            side=BUY,
+            price=price,
+            size=self.min_order_size,
+        )
+        self._active_orders[order_id] = tracked
+        asyncio.ensure_future(self._poll_order(tracked))
+        self._entry_stats["executed"] += 1
+        self._log_entry_stats_if_due()
