@@ -469,25 +469,39 @@ async def main():
                 up_id, down_id, question = await selector.fetch_up_down_token_ids(slug)
 
                 if up_id and (up_id != token_up_id or down_id != token_down_id):
-                    logging.info(f"🎯 Смена рынка: {question}")
-                    token_up_id = up_id
-                    token_down_id = down_id
-                    strategy_hub.reset_for_new_market()
-                    if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET", "0") == "1":
-                        pnl.reset_strategy_performance()
-                    if poly_connect_task is not None and not poly_connect_task.done():
-                        poly_connect_task.cancel()
-                        try:
-                            await poly_connect_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as exc:
-                            logging.debug(
-                                "Poly RTDS task ended after market switch cancel: %s",
-                                exc,
-                            )
-                    poly_book = PolyOrderBook(symbol="bitcoin")
-                    poly_connect_task = asyncio.create_task(poly_book.connect())
+                    if pnl.inventory > 0:
+                        # Never swap token IDs while a position is open — the CLOSE
+                        # logic uses token_up_id/token_down_id to route the SELL order.
+                        # A stale API response or slug re-parse returning tokens in
+                        # a different order would send the SELL to the wrong contract.
+                        logging.warning(
+                            "⚠️ Token ID change detected while position open "
+                            "(inventory=%.4f side=%s) — deferring until position closed. "
+                            "Old up=%s down=%s | New up=%s down=%s",
+                            pnl.inventory, pnl.position_side,
+                            (token_up_id or "")[:16], (token_down_id or "")[:16],
+                            up_id[:16], (down_id or "")[:16],
+                        )
+                    else:
+                        logging.info(f"🎯 Смена рынка: {question}")
+                        token_up_id = up_id
+                        token_down_id = down_id
+                        strategy_hub.reset_for_new_market()
+                        if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET", "0") == "1":
+                            pnl.reset_strategy_performance()
+                        if poly_connect_task is not None and not poly_connect_task.done():
+                            poly_connect_task.cancel()
+                            try:
+                                await poly_connect_task
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as exc:
+                                logging.debug(
+                                    "Poly RTDS task ended after market switch cancel: %s",
+                                    exc,
+                                )
+                        poly_book = PolyOrderBook(symbol="bitcoin")
+                        poly_connect_task = asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
             _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG", "0") == "1"
@@ -730,6 +744,13 @@ async def main():
                         _close_tid = (
                             token_up_id if _close_side in ("BUY_UP", None)
                             else (token_down_id or token_up_id)
+                        )
+                        logging.info(
+                            "[LIVE] CLOSE routing: side=%s token=%s (up=%s down=%s)",
+                            _close_side,
+                            (_close_tid or "")[:20],
+                            (token_up_id or "")[:20],
+                            (token_down_id or "")[:20],
                         )
                         _live_filled = live_exec.filled_buy_shares(_close_tid)
                         if _live_filled == 0 and live_exec.has_pending_buy(_close_tid):
