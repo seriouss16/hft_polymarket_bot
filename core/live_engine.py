@@ -180,6 +180,10 @@ class LiveExecutionEngine:
             "reprice_total": 0,
         }
         self._active_orders: dict[str, TrackedOrder] = {}
+        # Last confirmed BUY fills, keyed by token_id.  Persists after the order
+        # leaves _active_orders so that close_position can still find the shares.
+        # Cleared explicitly by clear_filled_buy() after a SELL completes.
+        self._confirmed_buys: dict[str, float] = {}
         self.client = None
         self._http = requests.Session()
 
@@ -783,11 +787,10 @@ class LiveExecutionEngine:
     def filled_buy_shares(self, token_id: str) -> float:
         """Return total filled BUY shares currently tracked for token_id.
 
-        Used by bot.py to pass the correct real share count into close_position
-        instead of the simulated shares_sold from the engine.
-        Returns the sum of filled_size across all active BUY orders for the token,
-        plus size for orders that were immediately matched (filled_size may be 0).
-        Falls back to sim quantity when no live orders are found (safety path).
+        Checks both active orders (while poll is running) and the confirmed-buys
+        cache (after the order leaves _active_orders).  This prevents the phantom-
+        position bug where CLOSE arrives after _active_orders cleanup but before
+        clear_filled_buy() is called.
         """
         total = 0.0
         for order in self._active_orders.values():
@@ -797,7 +800,13 @@ class LiveExecutionEngine:
                 total += order.filled_size if order.filled_size > 0 else order.size
             elif order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
                 total += order.filled_size
+        if total == 0.0 and token_id in self._confirmed_buys:
+            total = self._confirmed_buys[token_id]
         return total
+
+    def clear_filled_buy(self, token_id: str) -> None:
+        """Remove the confirmed-buy entry for token_id after a SELL completes."""
+        self._confirmed_buys.pop(token_id, None)
 
     def has_pending_buy(self, token_id: str) -> bool:
         """Return True when there is at least one non-terminal BUY order for token_id.
@@ -994,7 +1003,10 @@ class LiveExecutionEngine:
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             self._entry_stats["skip_spread"] += 1
-            logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
+            logging.warning(
+                "⚠️ Bad spread %.4f (bid=%.4f ask=%.4f max=%.4f), skip signal %s.",
+                spread, best_bid, best_ask, self.max_spread, signal,
+            )
             self._log_entry_stats_if_due()
             return _SKIP
 
@@ -1026,8 +1038,10 @@ class LiveExecutionEngine:
         if shares < poly_min_shares:
             shares = poly_min_shares
 
-        # Limit order just inside best ask to maximise fill probability.
-        price = max(0.01, min(0.99, exec_price - 0.002))
+        # Place BUY at ask (or slightly above) for immediate fill.
+        # Negative offset means we pay ask exactly; positive would cross the spread.
+        _buy_offset = float(os.getenv("LIVE_BUY_PRICE_OFFSET", "0.0"))
+        price = max(0.01, min(0.99, exec_price + _buy_offset))
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, BUY, price, shares
         )
@@ -1143,4 +1157,6 @@ class LiveExecutionEngine:
             "🟢 [LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
             filled, avg_price, token_id[:20],
         )
+        # Persist fill so close_position can find shares even after _active_orders cleanup.
+        self._confirmed_buys[token_id] = filled
         return (filled, avg_price)

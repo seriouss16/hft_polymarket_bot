@@ -744,6 +744,7 @@ async def main():
                                 _close_tid, _live_filled
                             )
                             if _sell_filled > 0 and _sell_px > 0:
+                                live_exec.clear_filled_buy(_close_tid)
                                 _live_pnl = pnl.live_close(
                                     _sell_filled, _sell_px,
                                     strategy_name=decision.get("strategy_name") or "",
@@ -759,6 +760,7 @@ async def main():
                                         "force-clearing PnL state. Manual check required.",
                                         pnl.inventory,
                                     )
+                                    live_exec.clear_filled_buy(_close_tid)
                                     pnl.inventory = 0.0
                                     pnl.entry_price = 0.0
                                     pnl.entry_ts = 0
@@ -772,6 +774,7 @@ async def main():
                             )
                             # Phantom position: PnL state shows inventory but CLOB has none.
                             # Force-clear so the engine stops generating EXIT signals.
+                            live_exec.clear_filled_buy(_close_tid)
                             if pnl.inventory > 0:
                                 logging.warning(
                                     "[LIVE] Force-clearing phantom PnL position (%.4f sh).",
