@@ -193,6 +193,30 @@ class LiveExecutionEngine:
                 raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
             self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
+    def fetch_usdc_balance(self) -> float | None:
+        """Return available USDC balance on the Polymarket CLOB account.
+
+        Returns None when the client is unavailable or the call fails.
+        In test_mode returns None (no real account to check).
+        """
+        if self.test_mode or self.client is None:
+            return None
+        try:
+            method = getattr(self.client, "get_balance_allowance", None)
+            if method is None:
+                logging.warning("ClobClient has no get_balance_allowance; skipping balance check.")
+                return None
+            resp = method()
+            raw = getattr(resp, "balance", None) or getattr(resp, "allowance", None)
+            if raw is None and isinstance(resp, dict):
+                raw = resp.get("balance") or resp.get("allowance")
+            if raw is None:
+                return None
+            return float(raw)
+        except Exception as exc:
+            logging.warning("fetch_usdc_balance failed: %s", exc)
+            return None
+
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
         snap = self.get_orderbook_snapshot(token_id, depth=1)

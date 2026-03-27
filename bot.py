@@ -341,6 +341,34 @@ async def main():
         loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
     journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
+
+    # Validate session deposit against real account balance in live mode.
+    _session_deposit = float(os.environ["HFT_DEPOSIT_USD"])
+    if LIVE_MODE:
+        _live_account_balance_limit = float(os.getenv("LIVE_ACCOUNT_BALANCE", "0") or "0")
+        _account_balance = live_exec.fetch_usdc_balance()
+        _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit
+        if _effective_account > 0.0 and _session_deposit > _effective_account:
+            raise SystemExit(
+                f"\n{'='*60}\n"
+                f"🛑  STARTUP ABORTED — session deposit exceeds account balance:\n"
+                f"  HFT_DEPOSIT_USD = {_session_deposit:.2f} USD  (session budget)\n"
+                f"  Account balance = {_effective_account:.2f} USD  (Polymarket USDC)\n"
+                f"  Set HFT_DEPOSIT_USD <= {_effective_account:.2f} to proceed.\n"
+                f"{'='*60}\n"
+            )
+        if _effective_account > 0.0:
+            logging.info(
+                "💰 Account balance check: session=%.2f USD  account=%.2f USD  margin=%.2f USD",
+                _session_deposit, _effective_account, _effective_account - _session_deposit,
+            )
+        else:
+            logging.warning(
+                "⚠️  Could not verify Polymarket account balance. "
+                "Proceeding with session deposit=%.2f USD. "
+                "Set LIVE_ACCOUNT_BALANCE in config for offline validation.",
+                _session_deposit,
+            )
     
     if ENABLE_LSTM:
         import tensorflow as tf

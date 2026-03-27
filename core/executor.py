@@ -125,7 +125,18 @@ class PnLTracker:
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
         if side in ("BUY", "BUY_UP", "BUY_DOWN"):
+            if self.balance <= 0.0:
+                logging.error(
+                    "🛑 HALT: session balance is zero or negative (%.4f USD). "
+                    "All entries blocked until manual restart.",
+                    self.balance,
+                )
+                return None
             if self.balance < amount_usd:
+                logging.warning(
+                    "Balance %.2f USD is below trade notional %.2f USD — skipping entry.",
+                    self.balance, amount_usd,
+                )
                 return None
 
             book_px = float(price)
@@ -187,6 +198,13 @@ class PnLTracker:
             profit = proceeds_usd - cost_basis_usd
 
             self.balance += proceeds_usd
+            if self.balance < 0.0:
+                logging.error(
+                    "🛑 ANOMALY: session balance went negative after SELL "
+                    "(%.4f USD). proceeds=%.4f cost=%.4f. Clamping to 0.",
+                    self.balance, proceeds_usd, cost_basis_usd,
+                )
+                self.balance = 0.0
             self.total_pnl += profit
             self.last_realized_pnl = profit
             self.last_close_ts = time.time()
