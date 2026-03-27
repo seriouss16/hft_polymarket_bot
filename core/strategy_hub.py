@@ -159,3 +159,26 @@ class StrategyHub:
             if signal:
                 return signal
         return None
+
+    def generate_live_signal_for_strategy(
+        self,
+        strategy_name: str,
+        fast_price: float,
+        poly_mid: float,
+        zscore: float,
+        price_history: list[float] | None = None,
+        recent_pnl: float = 0.0,
+        latency_ms: float = 0.0,
+    ) -> str | None:
+        """Return live signal from a specific named strategy, or None if not found."""
+        strategy = self._strategies.get(strategy_name)
+        if strategy is None:
+            return None
+        return strategy.generate_live_signal(
+            fast_price,
+            poly_mid,
+            zscore,
+            price_history=price_history,
+            recent_pnl=recent_pnl,
+            latency_ms=latency_ms,
+        )

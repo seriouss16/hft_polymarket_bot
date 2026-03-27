@@ -139,6 +139,61 @@ def _format_config_value(key: str, value: str | None) -> str:
     return value
 
 
+_LIVE_REQUIRED_KEYS: tuple[str, ...] = (
+    "LIVE_MAX_DAILY_LOSS",
+    "MAX_DRAWDOWN_PCT",
+    "MAX_POSITION_PCT",
+    "LOSS_COOLDOWN_SEC",
+    "LIVE_MAX_SPREAD",
+    "LIVE_ORDER_SIZE",
+    "LIVE_ORDER_FILL_POLL_SEC",
+    "LIVE_ORDER_STALE_SEC",
+    "LIVE_ORDER_MAX_REPRICE",
+    "PRIVATE_KEY",
+    "POLY_FUNDER_ADDRESS",
+    "POLY_SIGNATURE_TYPE",
+)
+
+_SIM_REQUIRED_KEYS: tuple[str, ...] = (
+    "HFT_DEPOSIT_USD",
+    "HFT_BUY_EDGE",
+    "HFT_SELL_EDGE_ABS",
+    "HFT_MIN_HOLD_SEC",
+    "HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC",
+    "HFT_REGIME_FILTER_ENABLED",
+    "HFT_TRAILING_TP_ENABLED",
+    "HFT_TRAILING_SL_ENABLED",
+    "STATS_INTERVAL_SEC",
+)
+
+
+def _validate_required_config(live_mode: bool) -> None:
+    """Abort startup if required parameters are missing from the environment.
+
+    Checks sim-critical keys always, then additionally checks live-critical keys
+    when live_mode is True. Raises SystemExit listing every missing key so the
+    operator can fix them all at once.
+    """
+    missing: list[str] = []
+    for key in _SIM_REQUIRED_KEYS:
+        if not os.environ.get(key, "").strip():
+            missing.append(f"  {key}  (required for sim and live)")
+    if live_mode:
+        for key in _LIVE_REQUIRED_KEYS:
+            if not os.environ.get(key, "").strip():
+                missing.append(f"  {key}  (required for LIVE_MODE=1)")
+    if missing:
+        lines = "\n".join(missing)
+        raise SystemExit(
+            f"\n{'='*60}\n"
+            f"🛑  STARTUP ABORTED — missing required config keys:\n"
+            f"{lines}\n"
+            f"\nAdd the missing keys to hft_bot/config/runtime.env\n"
+            f"or to hft_bot/.env (overrides runtime.env).\n"
+            f"{'='*60}\n"
+        )
+
+
 def _runtime_configuration_keys(root: Path) -> list[str]:
     """Build ordered unique keys from layered env files plus related process env."""
     seen: set[str] = set()
@@ -235,12 +290,14 @@ async def main():
         logging.info("asyncio: uvloop event loop policy active")
 
     # --- Конфигурация ---
-    BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
+    _validate_required_config(LIVE_MODE)
+
+    BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     TEST_MODE = not LIVE_MODE
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
-    STATS_INTERVAL = float(os.getenv("STATS_INTERVAL_SEC", "120"))
+    STATS_INTERVAL = float(os.environ["STATS_INTERVAL_SEC"])
     # PULSE_INTERVAL_SEC>0: at most one Fast: line per N seconds. When 0, use HFT_FAST_LOG_MIN_SEC.
     PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
     FAST_LOG_MIN_SEC = float(os.getenv("HFT_FAST_LOG_MIN_SEC", "0.25"))
@@ -251,7 +308,7 @@ async def main():
     ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM", "0") == "1"
     SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC", "0"))
     MIN_SLOT_POLL_SEC = 1.0
-    
+
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
     aggregator = FastPriceAggregator()
@@ -274,14 +331,14 @@ async def main():
         private_key=os.getenv("PRIVATE_KEY"),
         funder=os.getenv("FUNDER") or os.getenv("POLY_FUNDER_ADDRESS"),
         test_mode=not LIVE_MODE,
-        min_order_size=float(os.getenv("LIVE_ORDER_SIZE", "10")),
-        max_spread=float(os.getenv("LIVE_MAX_SPREAD", "1.0")),
+        min_order_size=float(os.environ["LIVE_ORDER_SIZE"]),
+        max_spread=float(os.environ["LIVE_MAX_SPREAD"]),
     )
-    live_risk = LiveRiskManager(max_daily_loss=float(os.getenv("LIVE_MAX_DAILY_LOSS", "-1e12")))
+    live_risk = LiveRiskManager(max_daily_loss=float(os.environ["LIVE_MAX_DAILY_LOSS"]))
     risk = RiskEngine(
-        max_drawdown_pct=float(os.getenv("MAX_DRAWDOWN_PCT", "0.99")),
-        max_position_pct=float(os.getenv("MAX_POSITION_PCT", "1.0")),
-        loss_cooldown_sec=float(os.getenv("LOSS_COOLDOWN_SEC", "0")),
+        max_drawdown_pct=float(os.environ["MAX_DRAWDOWN_PCT"]),
+        max_position_pct=float(os.environ["MAX_POSITION_PCT"]),
+        loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
     journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
     
@@ -669,27 +726,21 @@ async def main():
                         }
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
-                    live_signal = strategy_hub.generate_live_signal_for_strategy(
-                        live_signal_strategy,
-                        fast_price,
-                        poly_btc,
-                        zscore,
-                        price_history=primary_data if primary_data else [],
-                        recent_pnl=pnl.last_realized_pnl,
-                        latency_ms=latency_ms,
-                    )
-                    if live_signal is None:
-                        live_signal = strategy_hub.generate_live_signal(
-                            fast_price,
-                            poly_btc,
-                            zscore,
-                            price_history=primary_data if primary_data else [],
-                            recent_pnl=pnl.last_realized_pnl,
-                            latency_ms=latency_ms,
-                        )
-                    if live_signal:
-                        live_tid = token_up_id if live_signal == "BUY_UP" else (token_down_id or token_up_id)
-                        await live_exec.execute(live_signal, live_tid)
+                    # Use the OPEN decision already produced by process_tick so live
+                    # execution mirrors the sim exactly (including soft_flow entries).
+                    if isinstance(decision, dict) and decision.get("event") == "OPEN":
+                        _open_side = decision.get("side", "")
+                        if _open_side in ("BUY_UP", "BUY_DOWN"):
+                            _live_size = float(
+                                decision.get("cost_usd")
+                                or decision.get("shares_bought")
+                                or float(os.environ["LIVE_ORDER_SIZE"])
+                            )
+                            _live_tid = (
+                                token_up_id if _open_side == "BUY_UP"
+                                else (token_down_id or token_up_id)
+                            )
+                            await live_exec.execute(_open_side, _live_tid, order_size=_live_size)
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

@@ -498,8 +498,13 @@ class LiveExecutionEngine:
         asyncio.ensure_future(self._poll_order(tracked))
         logging.info("[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s", size, price, order_id)
 
-    async def execute(self, signal: str, token_id: str) -> None:
-        """Validate spread and place limit BUY order with full lifecycle tracking."""
+    async def execute(self, signal: str, token_id: str, order_size: float | None = None) -> None:
+        """Validate spread and place limit BUY order with full lifecycle tracking.
+
+        ``order_size`` overrides ``min_order_size`` when provided so the live
+        order matches the simulated notional from the engine decision.
+        Supports both BUY_UP and BUY_DOWN signals.
+        """
         self._entry_stats["attempts"] += 1
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
 
@@ -525,9 +530,11 @@ class LiveExecutionEngine:
             self._log_entry_stats_if_due()
             return
 
+        size = order_size if (order_size and order_size > 0) else self.min_order_size
+        # Limit order just inside best ask to maximise fill probability.
         price = max(0.01, min(0.99, best_ask - 0.002))
         order_id = await asyncio.to_thread(
-            self._place_limit_raw, token_id, BUY, price, self.min_order_size
+            self._place_limit_raw, token_id, BUY, price, size
         )
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
@@ -539,9 +546,13 @@ class LiveExecutionEngine:
             token_id=token_id,
             side=BUY,
             price=price,
-            size=self.min_order_size,
+            size=size,
         )
         self._active_orders[order_id] = tracked
         asyncio.ensure_future(self._poll_order(tracked))
         self._entry_stats["executed"] += 1
+        logging.info(
+            "[LIVE] Entry tracked: %s size=%.2f @ %.4f token=%s id=%s",
+            signal, size, price, token_id[:20], order_id,
+        )
         self._log_entry_stats_if_due()
