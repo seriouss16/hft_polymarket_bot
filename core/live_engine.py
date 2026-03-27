@@ -262,6 +262,45 @@ class LiveExecutionEngine:
                 token_id[:20], exc,
             )
 
+    def fetch_conditional_balance(self, token_id: str) -> float | None:
+        """Return on-chain conditional token balance for the given token_id.
+
+        Polymarket deducts a protocol fee in CTF shares at the time of fill, so
+        the actual spendable shares can be slightly less than the CLOB fill report.
+        Querying ``get_balance_allowance`` with ``AssetType.CONDITIONAL`` + token_id
+        returns the true wallet balance in micro-shares (divide by 1_000_000).
+
+        Returns None when the call fails or in test_mode.
+        """
+        if self.test_mode or self.client is None:
+            return None
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=sig_type,
+            )
+            resp = self.client.get_balance_allowance(params=params)
+            raw = (
+                resp.get("balance") if isinstance(resp, dict)
+                else getattr(resp, "balance", None)
+            )
+            if raw is None:
+                return None
+            bal = float(raw) / 1_000_000.0
+            logging.debug(
+                "[LIVE] Conditional balance: token=%s raw=%s → %.6f shares",
+                token_id[:20], raw, bal,
+            )
+            return bal
+        except Exception as exc:
+            logging.warning(
+                "[LIVE] fetch_conditional_balance failed token=%s: %s", token_id[:20], exc,
+            )
+            return None
+
     def fetch_usdc_balance(self) -> float | None:
         """Return available USDC balance on the Polymarket CLOB account.
 
@@ -825,6 +864,25 @@ class LiveExecutionEngine:
 
         poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
 
+        # Verify actual on-chain CTF balance before placing any SELL.  Polymarket
+        # deducts a protocol fee in shares at fill time, so the wallet balance may
+        # be less than the CLOB-reported filled_size.  Selling more than held always
+        # fails with "not enough balance / allowance".
+        actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+        if actual_bal is not None and actual_bal < size:
+            logging.warning(
+                "[LIVE] close_position: correcting size %.4f → %.4f "
+                "(actual on-chain balance after fee deduction) token=%s",
+                size, actual_bal, token_id[:20],
+            )
+            size = actual_bal
+        if size <= 0:
+            logging.error(
+                "[LIVE] close_position: on-chain balance is 0 for token=%s — nothing to sell.",
+                token_id[:20],
+            )
+            return (0.0, 0.0)
+
         if size < poly_min:
             logging.warning(
                 "[LIVE] close_position: size %.2f < min %.0f — FAK market sell.",
@@ -987,13 +1045,47 @@ class LiveExecutionEngine:
         avg_price = tracked.price
 
         self._log_entry_stats_if_due()
-        if filled > 0:
-            logging.info(
-                "[LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
-                filled, avg_price, token_id[:20],
+        if filled <= 0:
+            logging.warning(
+                "[LIVE] BUY not filled (status=%s) — treating as skip.", tracked.status,
             )
-            return (filled, avg_price)
-        logging.warning(
-            "[LIVE] BUY not filled (status=%s) — treating as skip.", tracked.status,
+            return _SKIP
+
+        # Verify actual on-chain balance — Polymarket deducts a protocol fee in
+        # CTF shares at fill time, so the real spendable balance may be slightly
+        # below the CLOB-reported filled_size.  Use the wallet balance as the
+        # authoritative figure; fall back to filled if the query fails.
+        poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+        actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+        if actual_bal is not None:
+            if abs(actual_bal - filled) > 0.005:
+                logging.warning(
+                    "[LIVE] BUY fill adjusted by fee: reported=%.4f actual=%.4f "
+                    "(diff=%.4f) token=%s",
+                    filled, actual_bal, filled - actual_bal, token_id[:20],
+                )
+            filled = actual_bal
+
+        if filled < poly_min_shares:
+            # Cannot sell via GTC — immediately exit via FAK market order.
+            logging.warning(
+                "[LIVE] Actual balance %.4f shares < min %.0f after fee deduction "
+                "— FAK-selling immediately, skipping trade.",
+                filled, poly_min_shares,
+            )
+            if filled > 0:
+                fak_filled = await self._fak_sell(token_id, filled)
+                logging.info(
+                    "[LIVE] FAK exit after sub-min buy: sold=%.4f token=%s",
+                    fak_filled, token_id[:20],
+                )
+            # Clean up tracked order and report as skip so bot does not open a
+            # phantom position it cannot close.
+            self._active_orders.pop(tracked.order_id, None)
+            return _SKIP
+
+        logging.info(
+            "[LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
+            filled, avg_price, token_id[:20],
         )
-        return _SKIP
+        return (filled, avg_price)
