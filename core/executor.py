@@ -71,6 +71,9 @@ class PnLTracker:
         else:
             self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
         self.live_mode = live_mode
+        # When True, log_trade(BUY) is a no-op — position is written only via
+        # live_open() after CLOB confirms the fill.
+        self._suppress_buy = live_mode
         self.balance = self.initial_balance
         self.inventory = 0.0
         self.entry_price = 0.0
@@ -122,6 +125,91 @@ class PnLTracker:
             self.balance,
         )
 
+    def live_open(
+        self,
+        side: str,
+        filled_shares: float,
+        avg_price: float,
+        amount_usd: float,
+        strategy_name: str = "",
+    ) -> None:
+        """Record a confirmed live BUY fill directly into PnL state.
+
+        Called only after CLOB confirms the fill — bypasses all sim-mode balance
+        checks and uses real CLOB fill data instead of simulated exec_price.
+        Does nothing when filled_shares is zero (order was not filled).
+        """
+        if filled_shares <= 0.0:
+            return
+        new_side = "DOWN" if side == "BUY_DOWN" else "UP"
+        if self.inventory > 0:
+            if self.position_side and self.position_side != new_side:
+                logging.warning(
+                    "Mixed-side live_open blocked: held %s, attempted %s.",
+                    self.position_side, new_side,
+                )
+                return
+            total_cost = self.entry_price * self.inventory + avg_price * filled_shares
+            self.inventory += filled_shares
+            self.entry_price = total_cost / self.inventory
+        else:
+            self.inventory = filled_shares
+            self.entry_price = avg_price
+            self.position_side = new_side
+        self.balance -= amount_usd
+        self.entry_ts = time.time()
+        _tag = f"{side} {strategy_name}".strip() if strategy_name else side
+        logging.info(
+            "🟢 [LIVE %s] filled=%.4f sh @ avg %.4f | cost %.2f$ (pos %.4f @ avg %.4f)",
+            _tag, filled_shares, avg_price, amount_usd, self.inventory, self.entry_price,
+        )
+
+    def live_close(
+        self,
+        filled_shares: float,
+        avg_price: float,
+        strategy_name: str = "",
+        performance_key: str | None = None,
+    ) -> float:
+        """Record a confirmed live SELL fill and return realized PnL USD.
+
+        Called only after CLOB confirms the sell fill.  Updates all PnL counters
+        using real fill data.  Returns 0.0 when there is no open position.
+        """
+        if self.inventory <= 0.0 or filled_shares <= 0.0:
+            return 0.0
+        proceeds = filled_shares * avg_price
+        cost_basis = self.entry_price * filled_shares
+        pnl = proceeds - cost_basis
+        self.balance += proceeds
+        self.inventory = max(0.0, self.inventory - filled_shares)
+        if self.inventory <= 0.0:
+            self.inventory = 0.0
+            self.entry_price = 0.0
+            self.entry_ts = 0
+            self.position_side = None
+        self.total_pnl += pnl
+        self.last_realized_pnl = pnl
+        self.last_close_ts = time.time()
+        self.trades_count += 1
+        if pnl > 0:
+            self.wins += 1
+        self.recent_pnls.append(pnl)
+        if self.balance > self.peak_balance:
+            self.peak_balance = self.balance
+        dd = (self.peak_balance - self.balance) / self.peak_balance if self.peak_balance > 0 else 0.0
+        if dd > self.max_drawdown:
+            self.max_drawdown = dd
+        if performance_key:
+            self.strategy_performance.record(str(performance_key), pnl)
+        wr = self.wins / self.trades_count * 100 if self.trades_count else 0.0
+        _tag = f"{strategy_name}".strip() if strategy_name else ""
+        logging.info(
+            "🔴 [LIVE SELL%s] filled=%.4f sh @ avg %.4f | proceeds %.2f$ | PnL %+.2f$ | WR %.1f%%",
+            f" {_tag}" if _tag else "", filled_shares, avg_price, proceeds, pnl, wr,
+        )
+        return pnl
+
     def is_good_regime(self) -> bool:
         """Return True when new entries are allowed based on recent realized PnL."""
         if time.time() < getattr(self, "regime_cooldown_until", 0.0):
@@ -145,9 +233,17 @@ class PnLTracker:
 
         For SELL, performance_key (e.g. latency:latency or soft:soft_flow) attributes realized PnL to a bucket.
         Optional strategy_name labels SIM logs for attribution.
+        In live mode BUY calls are suppressed — position is written via live_open() after CLOB confirms fill.
+        In live mode SELL calls are suppressed — position is closed via live_close() after CLOB confirms fill.
         """
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
+        if side in ("BUY", "BUY_UP", "BUY_DOWN") and getattr(self, "_suppress_buy", False):
+            logging.debug("[LIVE] log_trade(BUY) suppressed — will record via live_open() after fill.")
+            return {"suppressed": True, "side": side}
+        if side == "SELL" and getattr(self, "_suppress_buy", False):
+            logging.debug("[LIVE] log_trade(SELL) suppressed — will record via live_close() after fill.")
+            return {"suppressed": True, "side": side}
         if side in ("BUY", "BUY_UP", "BUY_DOWN"):
             if self.balance <= 0.0:
                 logging.error(

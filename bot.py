@@ -699,7 +699,6 @@ async def main():
                     )
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
-                    risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
                     _live_skip_until = 0.0
                     if LIVE_MODE and token_up_id:
                         _close_side = decision.get("side")
@@ -707,23 +706,39 @@ async def main():
                             token_up_id if _close_side in ("BUY_UP", None)
                             else (token_down_id or token_up_id)
                         )
-                        # Sell only shares confirmed filled by the live BUY order.
-                        # Never fall back to sim quantity — selling unowned shares
-                        # causes CLOB "balance: 0" errors.
                         _live_filled = live_exec.filled_buy_shares(_close_tid)
-                        _sim_shares = float(decision.get("shares_sold") or 0.0)
+                        if _live_filled == 0 and live_exec.has_pending_buy(_close_tid):
+                            logging.info(
+                                "[LIVE] BUY still PENDING at close signal — waiting for fill "
+                                "(token=%s).", _close_tid[:20],
+                            )
+                            _live_filled = await live_exec.wait_for_buy_fill(_close_tid, timeout_sec=5.0)
                         if _live_filled > 0:
                             logging.info(
-                                "[LIVE] Close: live_filled=%.2f sim_shares=%.2f → selling=%.2f token=%s",
-                                _live_filled, _sim_shares, _live_filled, _close_tid[:20],
+                                "[LIVE] Close: selling %.4f live-filled shares token=%s",
+                                _live_filled, _close_tid[:20],
                             )
-                            await live_exec.close_position(_close_tid, _live_filled)
+                            _sell_filled, _sell_px = await live_exec.close_position(
+                                _close_tid, _live_filled
+                            )
+                            if _sell_filled > 0 and _sell_px > 0:
+                                _live_pnl = pnl.live_close(
+                                    _sell_filled, _sell_px,
+                                    strategy_name=decision.get("strategy_name") or "",
+                                    performance_key=decision.get("performance_key"),
+                                )
+                            else:
+                                _live_pnl = 0.0
+                            risk.on_trade_closed(_live_pnl, time.time())
                         else:
                             logging.info(
                                 "[LIVE] Close skipped: no live-filled shares for token=%s "
-                                "(sim_shares=%.2f — phantom position).",
-                                _close_tid[:20], _sim_shares,
+                                "(phantom position — engine state desync).",
+                                _close_tid[:20],
                             )
+                            risk.on_trade_closed(0.0, time.time())
+                    else:
+                        risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
                     _rs = strategy_hub.get_rsi_v5_state()
                     _perf_key = decision.get("performance_key")
                     if _perf_key:
@@ -779,10 +794,9 @@ async def main():
                         }
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
-                    # Use the OPEN decision already produced by process_tick so live
-                    # execution mirrors the sim exactly (including soft_flow entries).
+                    # Engine signals OPEN intent — place real CLOB BUY and record
+                    # position only after confirmed fill.  No sim BUY is written.
                     if isinstance(decision, dict) and decision.get("event") == "OPEN":
-                        # Engine returns side as "UP"/"DOWN"; map to signal names.
                         _raw_side = decision.get("side", "")
                         if _raw_side == "UP":
                             _open_signal = "BUY_UP"
@@ -797,39 +811,34 @@ async def main():
                                 or float(os.environ["LIVE_ORDER_SIZE"])
                             )
                             if now < _live_skip_until:
-                                # Engine entries are already blocked by meta_enabled=False
-                                # above, so this branch should not be reached.  Guard kept
-                                # defensively in case an OPEN slips through (e.g. BYPASS_META_GATE).
-                                if pnl.inventory > 0:
-                                    pnl.rollback_last_open(_cost_usd)
                                 logging.debug(
                                     "[LIVE] OPEN suppressed during skip-cooldown (%.1fs left).",
                                     _live_skip_until - now,
                                 )
                             else:
-                                # Pass USD notional as budget_usd; live_exec converts to
-                                # shares at current ask and enforces CLOB minimum.
-                                _budget = _cost_usd
                                 _live_tid = (
                                     token_up_id if _open_signal == "BUY_UP"
                                     else (token_down_id or token_up_id)
                                 )
-                                _live_ok = await live_exec.execute(
-                                    _open_signal, _live_tid, budget_usd=_budget
+                                # Blocks until CLOB confirms fill or timeout.
+                                _filled_sh, _filled_px = await live_exec.execute(
+                                    _open_signal, _live_tid, budget_usd=_cost_usd
                                 )
-                                if not _live_ok:
-                                    # Live BUY skipped (e.g. below CLOB minimum) — roll back
-                                    # the sim position and impose a cooldown to prevent phantom
-                                    # position accumulation across many rapid ticks.
-                                    pnl.rollback_last_open(_budget)
+                                if _filled_sh > 0:
+                                    # Record confirmed CLOB fill into PnL tracker.
+                                    _live_skip_until = 0.0
+                                    pnl.live_open(
+                                        _open_signal, _filled_sh, _filled_px,
+                                        _filled_sh * _filled_px,
+                                        strategy_name=decision.get("strategy_name") or "",
+                                    )
+                                else:
+                                    # BUY not filled — impose cooldown to avoid retry spam.
                                     _live_skip_until = now + _live_skip_cooldown_sec
                                     logging.info(
                                         "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
                                         _live_skip_cooldown_sec, _live_skip_until,
                                     )
-                                else:
-                                    # Successful live entry — clear any residual cooldown.
-                                    _live_skip_until = 0.0
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

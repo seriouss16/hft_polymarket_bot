@@ -56,8 +56,15 @@ class TrackedOrder:
 
     @property
     def is_stale(self) -> bool:
-        """Return True when order has not filled within the stale window."""
-        return self.age_sec >= _ORDER_STALE_SEC and self.status == OrderStatus.PENDING
+        """Return True when order has not progressed within the stale window.
+
+        Applies to both PENDING and PARTIAL states since a partial fill can also
+        stall indefinitely when the book moves away.
+        """
+        return (
+            self.age_sec >= _ORDER_STALE_SEC
+            and self.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
+        )
 
 
 def _levels_from_book_rows(rows: list | None) -> list[tuple[float, float]]:
@@ -353,15 +360,23 @@ class LiveExecutionEngine:
             return None, False
 
     async def _poll_order(self, tracked: TrackedOrder) -> None:
-        """Monitor fill status and reprice or emergency-exit stale orders.
+        """Monitor fill status; reprice stale orders; handle partial fills correctly.
 
-        Poll loop runs until the order reaches a terminal state
-        (filled, cancelled, or failed).
+        Loop terminates when the order reaches a terminal state.  Partial fills
+        accumulate across reprice cycles — ``tracked.filled_size`` always reflects
+        the running total confirmed by the CLOB.
+
+        For SELL orders whose remaining unfilled quantity falls below the Polymarket
+        CLOB minimum (POLY_CLOB_MIN_SHARES), the remaining shares are sold via an
+        aggressive market-crossing limit instead of a regular reprice, since the
+        CLOB will reject sub-minimum limit orders.
         """
-        while tracked.status == OrderStatus.PENDING:
+        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+
+        while tracked.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
             await asyncio.sleep(_ORDER_FILL_POLL_SEC)
 
-            status_str, filled = await asyncio.to_thread(
+            status_str, clob_filled = await asyncio.to_thread(
                 self._get_order_fill, tracked.order_id
             )
 
@@ -374,21 +389,29 @@ class LiveExecutionEngine:
                 )
                 break
 
-            if status_str == "partially_matched":
+            if status_str == "partially_matched" and clob_filled > tracked.filled_size:
+                tracked.filled_size = clob_filled
                 tracked.status = OrderStatus.PARTIAL
-                tracked.filled_size = filled
                 logging.info(
-                    "⚡ Order partial: id=%s filled=%.2f / %.2f",
-                    tracked.order_id, filled, tracked.size,
+                    "⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f",
+                    tracked.order_id, clob_filled, tracked.size, tracked.remaining,
                 )
+                tracked.placed_at = time.time()
 
             if not tracked.is_stale:
                 continue
 
+            remaining = tracked.remaining
+            if remaining <= 0:
+                tracked.status = OrderStatus.FILLED
+                break
+
             if tracked.reprice_count >= _ORDER_MAX_REPRICE:
                 logging.warning(
-                    "⚠️ Order stale after %d reprice attempts id=%s — emergency exit.",
+                    "⚠️ Order stale after %d reprice attempts id=%s — emergency exit "
+                    "(filled=%.2f remaining=%.2f).",
                     _ORDER_MAX_REPRICE, tracked.order_id,
+                    tracked.filled_size, remaining,
                 )
                 self._cancel_order(tracked.order_id)
                 tracked.status = OrderStatus.STALE
@@ -403,38 +426,73 @@ class LiveExecutionEngine:
             else:
                 new_price = max(0.01, min(0.99, best_bid - 0.001))
 
-            if abs(new_price - tracked.price) < 0.001:
-                logging.info(
-                    "Price unchanged after reprice (%.4f) — skipping reprice %d.",
-                    new_price, tracked.reprice_count + 1,
+            # For SELL: if remaining < CLOB minimum, place a market-crossing exit
+            # instead of a regular limit (CLOB rejects sub-minimum limit orders).
+            if tracked.side == SELL_SIDE and remaining < poly_min:
+                market_price = max(0.01, min(0.99, best_bid - 0.01))
+                logging.warning(
+                    "⚠️ SELL remaining %.2f < min %.0f shares — market-crossing @ %.4f.",
+                    remaining, poly_min, market_price,
                 )
+                oid, imm = await asyncio.to_thread(
+                    self._place_limit_raw, tracked.token_id, SELL_SIDE, market_price, remaining
+                )
+                if oid:
+                    sub = TrackedOrder(
+                        order_id=oid,
+                        token_id=tracked.token_id,
+                        side=SELL_SIDE,
+                        price=market_price,
+                        size=remaining,
+                        status=OrderStatus.FILLED if imm else OrderStatus.PENDING,
+                        filled_size=remaining if imm else 0.0,
+                    )
+                    self._active_orders[oid] = sub
+                    if not imm:
+                        await self._poll_order(sub)
+                    tracked.filled_size += sub.filled_size
+                else:
+                    logging.error(
+                        "🛑 Market-crossing SELL failed %.2f shares token=%s.",
+                        remaining, tracked.token_id,
+                    )
+                tracked.status = OrderStatus.FILLED
+                break
+
+            if abs(new_price - tracked.price) < 0.001:
                 tracked.reprice_count += 1
                 tracked.placed_at = time.time()
                 continue
 
             self._entry_stats["reprice_total"] += 1
             tracked.reprice_count += 1
-            remaining = tracked.remaining if tracked.status == OrderStatus.PARTIAL else tracked.size
             logging.info(
-                "🔄 Repricing order %s: %.4f → %.4f (attempt %d/%d)",
+                "🔄 Repricing order %s: %.4f → %.4f (attempt %d/%d) "
+                "filled=%.2f remaining=%.2f",
                 tracked.order_id, tracked.price, new_price,
                 tracked.reprice_count, _ORDER_MAX_REPRICE,
+                tracked.filled_size, remaining,
             )
             new_id, new_immediate = await asyncio.to_thread(
                 self._place_limit_raw, tracked.token_id, tracked.side, new_price, remaining
             )
             if new_id:
+                self._active_orders.pop(tracked.order_id, None)
                 tracked.order_id = new_id
                 tracked.price = new_price
                 tracked.placed_at = time.time()
+                # Preserve accumulated filled_size; only remaining goes into new order.
                 tracked.status = OrderStatus.FILLED if new_immediate else OrderStatus.PENDING
                 self._active_orders[new_id] = tracked
                 if new_immediate:
-                    tracked.filled_size = remaining
+                    tracked.filled_size += remaining
                     break
             else:
                 tracked.status = OrderStatus.FAILED
-                logging.error("Reprice placement failed — position may be unmanaged.")
+                logging.error(
+                    "Reprice placement failed — filled=%.2f remaining=%.2f unmanaged.",
+                    tracked.filled_size, remaining,
+                )
                 break
 
         self._active_orders.pop(tracked.order_id, None)
@@ -442,10 +500,13 @@ class LiveExecutionEngine:
     async def _emergency_exit_order(self, tracked: TrackedOrder) -> None:
         """Cross the spread aggressively to guarantee fill of remaining size.
 
-        Used when normal repricing exhausted or when force-close is requested.
-        Places a limit at best market price + aggressive offset to cross the book.
+        Used when normal repricing is exhausted.  Splits the exit into two legs
+        when remaining size is below POLY_CLOB_MIN_SHARES: first tries a
+        market-crossing limit; if that also fails, logs for manual intervention.
+        Updates ``tracked.filled_size`` with any additional fills.
         """
         self._entry_stats["emergency_exits"] += 1
+        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
         remaining = tracked.remaining if tracked.status in (
             OrderStatus.PARTIAL, OrderStatus.STALE
         ) else tracked.size
@@ -457,12 +518,22 @@ class LiveExecutionEngine:
         if tracked.side == BUY:
             price = max(0.01, min(0.99, best_ask + 0.005))
         else:
-            price = max(0.01, min(0.99, best_bid - 0.005))
+            # Aggressive SELL: cross well below bid.
+            price = max(0.01, min(0.99, best_bid - 0.01))
 
         logging.warning(
-            "🚨 EMERGENCY EXIT: %s %.2f @ %.4f token=%s",
-            tracked.side, remaining, price, tracked.token_id,
+            "🚨 EMERGENCY EXIT: %s %.2f @ %.4f token=%s (min=%.0f)",
+            tracked.side, remaining, price, tracked.token_id, poly_min,
         )
+
+        if tracked.side == SELL_SIDE and remaining < poly_min:
+            # Sub-minimum SELL — log warning; CLOB will reject even aggressive limit
+            # if size < minimum.  Attempt anyway; operator may need to intervene.
+            logging.warning(
+                "⚠️ Emergency SELL remaining %.2f < CLOB min %.0f — CLOB may reject.",
+                remaining, poly_min,
+            )
+
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
         )
@@ -478,11 +549,13 @@ class LiveExecutionEngine:
             )
             self._active_orders[order_id] = emergency
             if not immediate:
-                asyncio.ensure_future(self._poll_order(emergency))
+                await self._poll_order(emergency)
+            tracked.filled_size += emergency.filled_size
         else:
             logging.error(
-                "🛑 Emergency exit placement FAILED token=%s — manual intervention required.",
-                tracked.token_id,
+                "🛑 Emergency exit placement FAILED token=%s remaining=%.2f"
+                " — manual intervention required.",
+                tracked.token_id, remaining,
             )
 
     async def emergency_exit(self, token_id: str, size: float, side: str = SELL_SIDE) -> None:
@@ -551,6 +624,38 @@ class LiveExecutionEngine:
                 total += order.filled_size
         return total
 
+    def has_pending_buy(self, token_id: str) -> bool:
+        """Return True when there is at least one non-terminal BUY order for token_id.
+
+        Used to detect the race condition where SIM triggers CLOSE before the live
+        BUY order has been confirmed filled by the CLOB poll loop.
+        """
+        return any(
+            o.token_id == token_id
+            and o.side == BUY
+            and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
+            for o in self._active_orders.values()
+        )
+
+    async def wait_for_buy_fill(self, token_id: str, timeout_sec: float = 5.0) -> float:
+        """Wait until all pending BUY orders for token_id reach a terminal state.
+
+        Returns the total filled shares once all BUY orders settle.  If the orders
+        do not fill within timeout_sec the method returns whatever filled_size has
+        been confirmed so far (may be 0 if nothing filled).
+        """
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if not self.has_pending_buy(token_id):
+                break
+            await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+        filled = self.filled_buy_shares(token_id)
+        logging.info(
+            "[LIVE] wait_for_buy_fill done: token=%s filled=%.4f shares",
+            token_id[:20], filled,
+        )
+        return filled
+
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics."""
         if self.skip_stats_log_sec <= 0:
@@ -568,23 +673,43 @@ class LiveExecutionEngine:
         )
         self._last_skip_stats_log_ts = now
 
-    async def close_position(self, token_id: str, size: float) -> None:
-        """Place a SELL limit order to close an open long position with lifecycle tracking.
+    async def close_position(self, token_id: str, size: float) -> tuple[float, float]:
+        """Sell all ``size`` shares and return (total_filled_shares, avg_price).
 
-        Size must reflect actual filled shares from a prior BUY order.
-        Selling more shares than owned results in a CLOB error (balance: 0).
+        Handles three scenarios:
+        - size >= POLY_CLOB_MIN_SHARES: regular limit SELL, polls until full fill.
+          Partial fills are retried via reprice in _poll_order; any remaining below
+          min_shares is sold via a market-crossing limit there.
+        - size < POLY_CLOB_MIN_SHARES: direct market-crossing limit (CLOB will reject
+          a sub-minimum regular limit).
+        - Placement failure: falls back to emergency_exit which crosses the book.
+
+        Blocks until a terminal state and returns (0.0, 0.0) on total failure.
         """
         if size <= 0:
-            return
+            return (0.0, 0.0)
+
+        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
         best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
-        price = max(0.01, min(0.99, best_bid + 0.002))
+
+        if size < poly_min:
+            # Sub-minimum: cross the spread aggressively — regular limit is rejected.
+            price = max(0.01, min(0.99, best_bid - 0.01))
+            logging.warning(
+                "[LIVE] close_position: size %.2f < min %.0f — market-crossing @ %.4f.",
+                size, poly_min, price,
+            )
+        else:
+            price = max(0.01, min(0.99, best_bid + 0.002))
+
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, SELL_SIDE, price, size
         )
         if not order_id:
             logging.warning("close_position: placement failed, trying emergency exit.")
             await self.emergency_exit(token_id, size, side=SELL_SIDE)
-            return
+            return (0.0, 0.0)
+
         tracked = TrackedOrder(
             order_id=order_id,
             token_id=token_id,
@@ -595,12 +720,22 @@ class LiveExecutionEngine:
             filled_size=size if immediate else 0.0,
         )
         self._active_orders[order_id] = tracked
-        if not immediate:
-            asyncio.ensure_future(self._poll_order(tracked))
         logging.info(
-            "[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s immediate=%s",
+            "[LIVE] Close position: SELL %.2f @ %.4f id=%s immediate=%s",
             size, price, order_id[:20], immediate,
         )
+        if not immediate:
+            await self._poll_order(tracked)
+
+        total_filled = tracked.filled_size if tracked.filled_size > 0 else (
+            tracked.size if tracked.status == OrderStatus.FILLED else 0.0
+        )
+        avg_price = tracked.price
+        logging.info(
+            "[LIVE] close_position done: filled=%.4f / %.4f @ %.4f token=%s",
+            total_filled, size, avg_price, token_id[:20],
+        )
+        return (total_filled, avg_price)
 
     async def execute(
         self,
@@ -608,24 +743,23 @@ class LiveExecutionEngine:
         token_id: str,
         order_size: float | None = None,
         budget_usd: float | None = None,
-    ) -> bool:
-        """Validate spread and place limit BUY order with full lifecycle tracking.
+    ) -> tuple[float, float]:
+        """Place a limit BUY, wait for CLOB confirmation, return (filled_shares, avg_price).
 
-        Returns True when the order was submitted, False on any skip/failure.
-        The caller should rollback the sim position on False so that sim state
-        stays in sync with what actually happened on-chain.
+        Blocks until the order reaches a terminal state (filled, stale after reprice,
+        or failed).  Returns (0.0, 0.0) on any skip or failure so callers can treat a
+        non-positive filled_shares as a no-op without rollback gymnastics.
 
         Size resolution priority:
-          1. ``order_size`` when given — treated as USD notional and converted to
-             shares using the current best_ask price.
-          2. ``budget_usd`` — USD budget to convert to shares at best_ask.
-          3. ``min_order_size`` (from LIVE_ORDER_SIZE config) as USD notional.
+          1. ``order_size`` — treated as USD notional, converted to shares at best_ask.
+          2. ``budget_usd`` — same as order_size.
+          3. ``min_order_size`` (LIVE_ORDER_SIZE env) as USD notional fallback.
 
         The resulting shares are clamped to the Polymarket CLOB minimum
-        (POLY_CLOB_MIN_SHARES, default 5) and floored so that an insufficient
-        budget causes a logged skip rather than an invalid order.
-        Supports both BUY_UP and BUY_DOWN signals.
+        (POLY_CLOB_MIN_SHARES, default 5).  An insufficient budget causes a
+        logged skip rather than an invalid order.
         """
+        _SKIP = (0.0, 0.0)
         self._entry_stats["attempts"] += 1
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
 
@@ -636,25 +770,23 @@ class LiveExecutionEngine:
                 signal, best_ask, self.min_entry_ask, self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
-            return False
+            return _SKIP
 
         spread = best_ask - best_bid
         if spread <= 0 or spread > self.max_spread:
             self._entry_stats["skip_spread"] += 1
             logging.warning("⚠️ Bad spread %.4f, skip signal %s.", spread, signal)
             self._log_entry_stats_if_due()
-            return False
+            return _SKIP
 
         if signal not in ("BUY_UP", "BUY_DOWN"):
             self._entry_stats["skip_signal"] += 1
             logging.warning("Skip signal: unsupported live signal %s.", signal)
             self._log_entry_stats_if_due()
-            return False
+            return _SKIP
 
-        # Polymarket CLOB requires at least this many shares per order.
         poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
 
-        # Convert USD notional → shares using current ask price.
         exec_price = max(0.001, best_ask)
         usd_notional = order_size or budget_usd or self.min_order_size
         shares = usd_notional / exec_price
@@ -668,7 +800,7 @@ class LiveExecutionEngine:
             )
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
-            return False
+            return _SKIP
 
         # Round down to 2 decimal places — CLOB rejects fractional shares beyond that.
         shares = float(int(shares * 100) / 100)
@@ -683,7 +815,7 @@ class LiveExecutionEngine:
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
             self._log_entry_stats_if_due()
-            return False
+            return _SKIP
 
         tracked = TrackedOrder(
             order_id=order_id,
@@ -695,12 +827,30 @@ class LiveExecutionEngine:
             filled_size=shares if immediate else 0.0,
         )
         self._active_orders[order_id] = tracked
-        if not immediate:
-            asyncio.ensure_future(self._poll_order(tracked))
         self._entry_stats["executed"] += 1
         logging.info(
             "[LIVE] Entry tracked: %s %.2f shares @ %.4f (%.2f USD) token=%s id=%s immediate=%s",
             signal, shares, price, shares * price, token_id[:20], order_id[:20], immediate,
         )
+
+        if not immediate:
+            # Wait for _poll_order to confirm fill — run it as a task and await it.
+            poll_task = asyncio.ensure_future(self._poll_order(tracked))
+            await poll_task
+
+        filled = tracked.filled_size if tracked.filled_size > 0 else (
+            tracked.size if tracked.status == OrderStatus.FILLED else 0.0
+        )
+        avg_price = tracked.price
+
         self._log_entry_stats_if_due()
-        return True
+        if filled > 0:
+            logging.info(
+                "[LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
+                filled, avg_price, token_id[:20],
+            )
+            return (filled, avg_price)
+        logging.warning(
+            "[LIVE] BUY not filled (status=%s) — treating as skip.", tracked.status,
+        )
+        return _SKIP
