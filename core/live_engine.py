@@ -191,7 +191,26 @@ class LiveExecutionEngine:
         if not self.test_mode:
             if not private_key or not funder:
                 raise ValueError("LIVE_MODE=1 requires PRIVATE_KEY and FUNDER env vars.")
-            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            api_key = os.getenv("POLIMARKET_API_KEY") or os.getenv("POLY_API_KEY")
+            api_secret = os.getenv("POLIMARKET_API_SECRET") or os.getenv("POLY_API_SECRET")
+            api_passphrase = os.getenv("POLIMARKET_API_PASSPHRASE") or os.getenv("POLY_API_PASSPHRASE")
+            if api_key and api_secret and api_passphrase:
+                try:
+                    from py_clob_client.clob_types import ApiCreds
+                    self.client.set_api_creds(ApiCreds(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        api_passphrase=api_passphrase,
+                    ))
+                    logging.info("[LIVE] ClobClient authenticated via explicit API credentials.")
+                except Exception as exc:
+                    logging.warning(
+                        "[LIVE] Failed to set explicit API creds (%s); falling back to derive.", exc
+                    )
+                    self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            else:
+                logging.info("[LIVE] No explicit API keys found; deriving credentials from private key.")
+                self.client.set_api_creds(self.client.create_or_derive_api_creds())
 
     def fetch_usdc_balance(self) -> float | None:
         """Return available USDC balance on the Polymarket CLOB account.
@@ -522,11 +541,24 @@ class LiveExecutionEngine:
         asyncio.ensure_future(self._poll_order(tracked))
         logging.info("[LIVE] Close position tracked: SELL %.2f @ %.4f id=%s", size, price, order_id)
 
-    async def execute(self, signal: str, token_id: str, order_size: float | None = None) -> None:
+    async def execute(
+        self,
+        signal: str,
+        token_id: str,
+        order_size: float | None = None,
+        budget_usd: float | None = None,
+    ) -> None:
         """Validate spread and place limit BUY order with full lifecycle tracking.
 
-        ``order_size`` overrides ``min_order_size`` when provided so the live
-        order matches the simulated notional from the engine decision.
+        Size resolution priority:
+          1. ``order_size`` when given — treated as USD notional and converted to
+             shares using the current best_ask price.
+          2. ``budget_usd`` — USD budget to convert to shares at best_ask.
+          3. ``min_order_size`` (from LIVE_ORDER_SIZE config) as USD notional.
+
+        The resulting shares are clamped to the Polymarket CLOB minimum
+        (POLY_CLOB_MIN_SHARES, default 5) and floored so that an insufficient
+        budget causes a logged skip rather than an invalid order.
         Supports both BUY_UP and BUY_DOWN signals.
         """
         self._entry_stats["attempts"] += 1
@@ -554,11 +586,35 @@ class LiveExecutionEngine:
             self._log_entry_stats_if_due()
             return
 
-        size = order_size if (order_size and order_size > 0) else self.min_order_size
+        # Polymarket CLOB requires at least this many shares per order.
+        poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+
+        # Convert USD notional → shares using current ask price.
+        exec_price = max(0.001, best_ask)
+        usd_notional = order_size or budget_usd or self.min_order_size
+        shares = usd_notional / exec_price
+
+        if shares < poly_min_shares:
+            # Try to fill up to the minimum using all available budget.
+            min_cost = poly_min_shares * exec_price
+            logging.warning(
+                "⚠️ Skip %s: budget %.2f USD → %.2f shares < CLOB minimum %.0f shares "
+                "(need %.2f USD @ %.4f). Insufficient balance.",
+                signal, usd_notional, shares, poly_min_shares, min_cost, exec_price,
+            )
+            self._entry_stats["skip_signal"] += 1
+            self._log_entry_stats_if_due()
+            return
+
+        # Round down to 2 decimal places — CLOB rejects fractional shares beyond that.
+        shares = float(int(shares * 100) / 100)
+        if shares < poly_min_shares:
+            shares = poly_min_shares
+
         # Limit order just inside best ask to maximise fill probability.
-        price = max(0.01, min(0.99, best_ask - 0.002))
+        price = max(0.01, min(0.99, exec_price - 0.002))
         order_id = await asyncio.to_thread(
-            self._place_limit_raw, token_id, BUY, price, size
+            self._place_limit_raw, token_id, BUY, price, shares
         )
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
@@ -570,13 +626,13 @@ class LiveExecutionEngine:
             token_id=token_id,
             side=BUY,
             price=price,
-            size=size,
+            size=shares,
         )
         self._active_orders[order_id] = tracked
         asyncio.ensure_future(self._poll_order(tracked))
         self._entry_stats["executed"] += 1
         logging.info(
-            "[LIVE] Entry tracked: %s size=%.2f @ %.4f token=%s id=%s",
-            signal, size, price, token_id[:20], order_id,
+            "[LIVE] Entry tracked: %s %.2f shares @ %.4f (%.2f USD) token=%s id=%s",
+            signal, shares, price, shares * price, token_id[:20], order_id,
         )
         self._log_entry_stats_if_due()

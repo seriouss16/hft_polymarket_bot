@@ -560,11 +560,20 @@ class HFTEngine:
     def _deposit_trade_notional(self) -> float:
         """Return target trade USD based on current live balance and sizing mode.
 
-        Uses pnl.balance (current session balance) as the sizing base so
-        position size shrinks automatically as the session balance decreases.
-        When HFT_TRADE_PCT_OF_DEPOSIT > 0 the notional is that percentage of
-        the *current* balance; otherwise the fixed HFT_DEFAULT_TRADE_USD is
-        used, capped by the current balance.
+        When HFT_TRADE_PCT_OF_DEPOSIT = 0: fixed HFT_DEFAULT_TRADE_USD, capped
+        by current balance (size shrinks if balance falls below the fixed step).
+
+        When HFT_TRADE_PCT_OF_DEPOSIT > 0: profit-scaling mode.
+          size = fixed_step + pct% of profit above starting deposit
+          - Balance at or below start → size = fixed_step (or balance if lower).
+          - Balance above start → bonus = (balance - deposit_usd) * pct / 100.
+          - Total is always capped by current balance.
+
+        Example: deposit=2, step=2, pct=10.
+          balance=2.00 → 2.00 + 0.00 = 2.00
+          balance=2.20 → 2.00 + 0.02 = 2.02
+          balance=3.00 → 2.00 + 0.10 = 2.10
+          balance=1.80 → min(2.00, 1.80) = 1.80
         """
         current_balance = max(0.0, self.pnl.balance)
         if current_balance <= 0.0:
@@ -573,9 +582,10 @@ class HFTEngine:
         pct = self.trade_pct_of_deposit
         if pct <= 0.0:
             return min(fixed, current_balance)
-        pct_amount = current_balance * (pct / 100.0)
-        chosen = max(fixed, pct_amount)
-        return max(0.0, min(chosen, current_balance))
+        profit_above_start = max(0.0, current_balance - self.deposit_usd)
+        bonus = profit_above_start * (pct / 100.0)
+        size = fixed + bonus
+        return max(0.0, min(size, current_balance))
 
     def _tier_dynamic_amount(self, exec_price: float) -> float:
         """Compute notional from price tier and risk-per-tick before deposit cap."""

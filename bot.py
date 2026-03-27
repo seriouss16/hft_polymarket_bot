@@ -759,16 +759,19 @@ async def main():
                     if isinstance(decision, dict) and decision.get("event") == "OPEN":
                         _open_side = decision.get("side", "")
                         if _open_side in ("BUY_UP", "BUY_DOWN"):
-                            _live_size = float(
+                            # Pass USD notional as budget_usd; live_exec converts to
+                            # shares at current ask and enforces CLOB minimum.
+                            _budget = float(
                                 decision.get("cost_usd")
-                                or decision.get("shares_bought")
                                 or float(os.environ["LIVE_ORDER_SIZE"])
                             )
                             _live_tid = (
                                 token_up_id if _open_side == "BUY_UP"
                                 else (token_down_id or token_up_id)
                             )
-                            await live_exec.execute(_open_side, _live_tid, order_size=_live_size)
+                            await live_exec.execute(
+                                _open_side, _live_tid, budget_usd=_budget
+                            )
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now
