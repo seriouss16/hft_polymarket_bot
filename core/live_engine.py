@@ -530,7 +530,7 @@ class LiveExecutionEngine:
         filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
         if filled > 0:
             logging.info(
-                "[LIVE] FAK SELL done: filled=%.4f / %.4f @ %.4f token=%s",
+                "🔴 [LIVE] FAK SELL done: filled=%.4f / %.4f @ %.4f token=%s",
                 filled, size, price, token_id[:20],
             )
         else:
@@ -866,36 +866,44 @@ class LiveExecutionEngine:
 
         # Verify actual on-chain CTF balance before placing any SELL.  Polymarket
         # deducts a protocol fee in shares at fill time, so the wallet balance may
-        # be less than the CLOB-reported filled_size.  Selling more than held always
-        # fails with "not enough balance / allowance".
+        # be slightly less than the CLOB-reported filled_size.  Selling more than
+        # held always fails with "not enough balance / allowance".
+        # If the balance API returns 0 (ledger lag) we keep the original size and
+        # let the CLOB reject minimally — retry is handled by _poll_order reprice.
         actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
-        if actual_bal is not None and actual_bal < size:
+        if actual_bal is not None and actual_bal > 0 and actual_bal < size:
             logging.warning(
-                "[LIVE] close_position: correcting size %.4f → %.4f "
-                "(actual on-chain balance after fee deduction) token=%s",
+                "⚠️ [LIVE] SELL size corrected: %.4f → %.4f "
+                "(on-chain balance after fee) token=%s",
                 size, actual_bal, token_id[:20],
             )
             size = actual_bal
+        elif actual_bal is not None and actual_bal == 0:
+            logging.warning(
+                "⚠️ [LIVE] close_position: on-chain balance=0 (possible lag) — "
+                "keeping requested size=%.4f token=%s",
+                size, token_id[:20],
+            )
         if size <= 0:
             logging.error(
-                "[LIVE] close_position: on-chain balance is 0 for token=%s — nothing to sell.",
+                "🛑 [LIVE] close_position: size is 0 for token=%s — nothing to sell.",
                 token_id[:20],
             )
             return (0.0, 0.0)
 
         if size < poly_min:
             logging.warning(
-                "[LIVE] close_position: size %.2f < min %.0f — FAK market sell.",
+                "⚠️ [LIVE] close_position: size %.2f < min %.0f — FAK market sell.",
                 size, poly_min,
             )
             filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
             if filled > 0:
                 logging.info(
-                    "[LIVE] close_position FAK done: filled=%.4f @ %.4f token=%s",
+                    "🔴 [LIVE] FAK SELL done: %.4f @ %.4f token=%s",
                     filled, price, token_id[:20],
                 )
                 return (filled, price)
-            logging.error("close_position: FAK failed for size=%.2f token=%s.", size, token_id[:20])
+            logging.error("🛑 [LIVE] FAK SELL failed: size=%.2f token=%s.", size, token_id[:20])
             return (0.0, 0.0)
 
         best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
@@ -904,9 +912,13 @@ class LiveExecutionEngine:
             self._place_limit_raw, token_id, SELL_SIDE, price, size
         )
         if not order_id:
-            logging.warning("close_position: GTC placement failed, trying FAK.")
+            logging.warning("⚠️ [LIVE] SELL GTC failed, trying FAK token=%s.", token_id[:20])
             filled, fak_price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
             if filled > 0:
+                logging.info(
+                    "🔴 [LIVE] FAK SELL done (GTC fallback): %.4f @ %.4f token=%s",
+                    filled, fak_price, token_id[:20],
+                )
                 return (filled, fak_price)
             await self.emergency_exit(token_id, size, side=SELL_SIDE)
             return (0.0, 0.0)
@@ -922,8 +934,8 @@ class LiveExecutionEngine:
         )
         self._active_orders[order_id] = tracked
         logging.info(
-            "[LIVE] Close position: SELL %.2f @ %.4f id=%s immediate=%s",
-            size, price, order_id[:20], immediate,
+            "🔴 [LIVE] SELL placed: %.4f @ %.4f id=%s immediate=%s token=%s",
+            size, price, order_id[:20], immediate, token_id[:20],
         )
         if not immediate:
             await self._poll_order(tracked)
@@ -932,10 +944,16 @@ class LiveExecutionEngine:
             tracked.size if tracked.status == OrderStatus.FILLED else 0.0
         )
         avg_price = tracked.price
-        logging.info(
-            "[LIVE] close_position done: filled=%.4f / %.4f @ %.4f token=%s",
-            total_filled, size, avg_price, token_id[:20],
-        )
+        if total_filled > 0:
+            logging.info(
+                "🔴 [LIVE] SELL confirmed: filled=%.4f / %.4f @ %.4f token=%s",
+                total_filled, size, avg_price, token_id[:20],
+            )
+        else:
+            logging.error(
+                "🛑 [LIVE] SELL not filled: size=%.4f @ %.4f token=%s",
+                size, avg_price, token_id[:20],
+            )
         return (total_filled, avg_price)
 
     async def execute(
@@ -1030,7 +1048,7 @@ class LiveExecutionEngine:
         self._active_orders[order_id] = tracked
         self._entry_stats["executed"] += 1
         logging.info(
-            "[LIVE] Entry tracked: %s %.2f shares @ %.4f (%.2f USD) token=%s id=%s immediate=%s",
+            "🟢 [LIVE] BUY placed: %s %.2f sh @ %.4f (%.2f USD) token=%s id=%s immediate=%s",
             signal, shares, price, shares * price, token_id[:20], order_id[:20], immediate,
         )
 
@@ -1045,47 +1063,84 @@ class LiveExecutionEngine:
         avg_price = tracked.price
 
         self._log_entry_stats_if_due()
+
+        # Order was cancelled, failed, or stale — nothing was filled on-chain.
+        # No balance verification needed; FAK cleanup is irrelevant.
+        if tracked.status in (OrderStatus.CANCELLED, OrderStatus.FAILED):
+            logging.warning(
+                "⚠️ [LIVE] BUY order %s (status=%s) — skip.",
+                tracked.order_id[:20], tracked.status,
+            )
+            self._active_orders.pop(tracked.order_id, None)
+            return _SKIP
+
+        # Order was confirmed FILLED or PARTIAL — shares were actually received on-chain.
+        # Wait for the CLOB ledger to settle before reading the balance (observed lag
+        # up to ~600 ms for immediate fills).  We loop until the balance appears or we
+        # exhaust all retries, then TRUST the CLOB-reported fill so we never abandon a
+        # real position.
         if filled <= 0:
             logging.warning(
-                "[LIVE] BUY not filled (status=%s) — treating as skip.", tracked.status,
+                "⚠️ [LIVE] BUY status=%s but filled=0 — skip.", tracked.status,
             )
             return _SKIP
 
-        # Verify actual on-chain balance — Polymarket deducts a protocol fee in
-        # CTF shares at fill time, so the real spendable balance may be slightly
-        # below the CLOB-reported filled_size.  Use the wallet balance as the
-        # authoritative figure; fall back to filled if the query fails.
         poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
-        actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+        _bal_delays = [0.3, 0.5, 0.8, 1.0, 1.5]  # cumulative ~4.1 s max wait
+        actual_bal: float | None = None
+        for _i, _delay in enumerate(_bal_delays):
+            await asyncio.sleep(_delay)
+            _b = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            if _b is not None and _b > 0:
+                actual_bal = _b
+                logging.info(
+                    "🟢 [LIVE] On-chain balance confirmed: %.4f sh "
+                    "(attempt %d, delay %.1fs) token=%s",
+                    actual_bal, _i + 1, _delay, token_id[:20],
+                )
+                break
+            logging.debug(
+                "[LIVE] Balance still 0 on attempt %d — retrying in %.1fs token=%s",
+                _i + 1, _bal_delays[_i + 1] if _i + 1 < len(_bal_delays) else 0,
+                token_id[:20],
+            )
+
         if actual_bal is not None:
             if abs(actual_bal - filled) > 0.005:
                 logging.warning(
-                    "[LIVE] BUY fill adjusted by fee: reported=%.4f actual=%.4f "
-                    "(diff=%.4f) token=%s",
+                    "⚠️ [LIVE] BUY adjusted for protocol fee: reported=%.4f actual=%.4f "
+                    "(fee=%.4f sh) token=%s",
                     filled, actual_bal, filled - actual_bal, token_id[:20],
                 )
             filled = actual_bal
+        else:
+            # Ledger lag persists beyond all retries — use CLOB-reported fill.
+            # The order WAS confirmed FILLED, so shares exist on-chain even if the
+            # balance API hasn't caught up.  Proceeding prevents phantom positions.
+            logging.warning(
+                "⚠️ [LIVE] On-chain balance not confirmed after %d retries "
+                "— trusting CLOB fill=%.4f token=%s",
+                len(_bal_delays), filled, token_id[:20],
+            )
 
         if filled < poly_min_shares:
-            # Cannot sell via GTC — immediately exit via FAK market order.
+            # Confirmed partial fill below CLOB minimum — can't use GTC to sell.
+            # FAK-sell whatever arrived and treat as skip (no open position).
             logging.warning(
-                "[LIVE] Actual balance %.4f shares < min %.0f after fee deduction "
-                "— FAK-selling immediately, skipping trade.",
-                filled, poly_min_shares,
+                "⚠️ [LIVE] Confirmed balance %.4f sh < min %.0f — "
+                "FAK-selling residual, skipping. token=%s",
+                filled, poly_min_shares, token_id[:20],
             )
-            if filled > 0:
-                fak_filled = await self._fak_sell(token_id, filled)
-                logging.info(
-                    "[LIVE] FAK exit after sub-min buy: sold=%.4f token=%s",
-                    fak_filled, token_id[:20],
-                )
-            # Clean up tracked order and report as skip so bot does not open a
-            # phantom position it cannot close.
+            fak_filled = await self._fak_sell(token_id, filled)
+            logging.info(
+                "🔴 [LIVE] FAK residual exit: sold=%.4f token=%s",
+                fak_filled, token_id[:20],
+            )
             self._active_orders.pop(tracked.order_id, None)
             return _SKIP
 
         logging.info(
-            "[LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
+            "🟢 [LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
             filled, avg_price, token_id[:20],
         )
         return (filled, avg_price)
