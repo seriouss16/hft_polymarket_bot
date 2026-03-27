@@ -970,7 +970,7 @@ class HFTEngine:
         if aggressive and trend == "UP" and edge >= buy_edge_dyn:
             up_speed_ok = up_speed_ok or speed >= self.aggressive_entry_relax_speed
         if aggressive and trend == "DOWN" and edge <= -sell_edge_dyn:
-            down_speed_ok = down_speed_ok or speed <= self.aggressive_entry_relax_speed_down
+            down_speed_ok = down_speed_ok or speed >= -self.aggressive_entry_relax_speed_down
         low = self.entry_extreme_price_low
         high = self.entry_extreme_price_high
         if (
@@ -1001,7 +1001,7 @@ class HFTEngine:
             aggressive
             and trend == "DOWN"
             and edge <= -sell_edge_dyn
-            and speed <= self.aggressive_entry_relax_speed_down
+            and speed >= -self.aggressive_entry_relax_speed_down
         )
         if (
             trend == "DOWN"
@@ -1212,7 +1212,7 @@ class HFTEngine:
             spread_up, spread_down, edge_now, trend["trend"]
         )
         speed_ok = self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
-        z_ok = self.entry_zscore_trend_ok(trend["trend"])
+        z_ok = self.entry_zscore_trend_ok(trend["trend"], edge_speed=trend["speed"])
         cex_ok = self.entry_cex_bid_imbalance_ok(trend["trend"], cex_bid_imbalance)
         entry_context_ok = speed_ok and z_ok and cex_ok
         chop_latency_ok = (
@@ -1643,8 +1643,8 @@ class HFTEngine:
                 reaction_confirmed = self._hold_met(hold_sec) and side_move >= self.poly_take_profit_move
                 protective_stop = self._hold_met(hold_sec) and side_move <= -self.poly_stop_move
             else:
-                reaction_confirmed = self._hold_met(hold_sec) and side_move <= -self.poly_take_profit_move
-                protective_stop = self._hold_met(hold_sec) and side_move >= self.poly_stop_move
+                reaction_confirmed = self._hold_met(hold_sec) and side_move >= self.poly_take_profit_move
+                protective_stop = self._hold_met(hold_sec) and side_move <= -self.poly_stop_move
             unrealized = self.pnl.get_unrealized_pnl(poly_orderbook)
             _, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line

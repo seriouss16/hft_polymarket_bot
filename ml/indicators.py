@@ -8,7 +8,7 @@ def compute_rsi(prices, period=14):
     if len(prices) < period + 1:
         return 50.0
     deltas = np.diff(prices)
-    seed = deltas[:period+1]
+    seed = deltas[:period]
     up = seed[seed >= 0].sum() / period
     down = -seed[seed < 0].sum() / period
     if down == 0: return 100.0
