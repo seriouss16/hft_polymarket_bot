@@ -160,6 +160,7 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
+        self.min_entry_ask = float(os.getenv("HFT_MIN_ENTRY_ASK", "0.08"))
         self.skip_stats_log_sec = float(os.getenv("HFT_LIVE_SKIP_STATS_LOG_SEC", "30"))
         self._last_skip_stats_log_ts = time.time()
         self._entry_stats: dict[str, int] = {
@@ -628,11 +629,11 @@ class LiveExecutionEngine:
         self._entry_stats["attempts"] += 1
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
 
-        if best_ask >= self.max_entry_ask:
+        if best_ask <= self.min_entry_ask or best_ask >= self.max_entry_ask:
             self._entry_stats["skip_ask_cap"] += 1
             logging.warning(
-                "Skip %s: best_ask %.4f >= max entry ask %.4f.",
-                signal, best_ask, self.max_entry_ask,
+                "Skip %s: best_ask %.4f outside allowed range [%.3f, %.3f].",
+                signal, best_ask, self.min_entry_ask, self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
             return False

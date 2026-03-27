@@ -618,6 +618,10 @@ async def main():
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
 
+                # Block engine entries during live-skip cooldown to prevent phantom
+                # sim positions from accumulating when the CLOB rejects every BUY.
+                _skip_cooldown_active = LIVE_MODE and (now < _live_skip_until)
+
                 decision = await strategy_hub.process_tick(
                     fast_price=fast_price,
                     poly_orderbook=poly_book.book,
@@ -626,7 +630,7 @@ async def main():
                     zscore=zscore,
                     latency_ms=latency_ms,
                     recent_pnl=pnl.last_realized_pnl,
-                    meta_enabled=trade_allowed or BYPASS_META_GATE,
+                    meta_enabled=(trade_allowed or BYPASS_META_GATE) and not _skip_cooldown_active,
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                     skew_ms=skew_ms,
                 )
@@ -787,14 +791,16 @@ async def main():
                             _open_signal = _raw_side
                         if _open_signal in ("BUY_UP", "BUY_DOWN"):
                             if now < _live_skip_until:
-                                # Still in post-skip cooldown — roll back the sim position
-                                # immediately without even attempting a live order.
-                                _budget_cs = float(
-                                    decision.get("cost_usd")
-                                    or float(os.environ["LIVE_ORDER_SIZE"])
-                                )
-                                pnl.rollback_last_open(_budget_cs)
-                                logging.info(
+                                # Engine entries are already blocked by meta_enabled=False
+                                # above, so this branch should not be reached.  Guard kept
+                                # defensively in case an OPEN slips through (e.g. BYPASS_META_GATE).
+                                if pnl.inventory > 0:
+                                    _budget_cs = float(
+                                        decision.get("cost_usd")
+                                        or float(os.environ["LIVE_ORDER_SIZE"])
+                                    )
+                                    pnl.rollback_last_open(_budget_cs)
+                                logging.debug(
                                     "[LIVE] OPEN suppressed during skip-cooldown (%.1fs left).",
                                     _live_skip_until - now,
                                 )
