@@ -34,8 +34,8 @@ class PolyOrderBook:
                         "subscriptions": [
                             {
                                 "topic": "crypto_prices_chainlink",
-                                "type": "update",
-                                "filters": "symbol:BTC/USD",
+                                "type": "*",
+                                "filters": "",
                             }
                         ],
                     }
