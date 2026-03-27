@@ -28,14 +28,14 @@ class PolyOrderBook:
         """Subscribe to RTDS Chainlink stream and update ``self.book`` until disconnect."""
         while True:
             try:
-                async with websockets.connect(self.url) as ws:
+                async with websockets.connect(self.url, ping_interval=10, ping_timeout=5) as ws:
                     sub = {
                         "action": "subscribe",
                         "subscriptions": [
                             {
                                 "topic": "crypto_prices_chainlink",
-                                "type": "*",
-                                "filters": "",
+                                "type": "update",
+                                "filters": "symbol:BTC/USD",
                             }
                         ],
                     }

@@ -29,7 +29,7 @@ class FastExchangeProvider:
         
         while True:
             try:
-                async with websockets.connect(uri) as ws:
+                async with websockets.connect(uri, ping_interval=10, ping_timeout=5) as ws:
                     logging.info(f"✅ [{self.name}] Соединение установлено: {uri}")
                     
                     if self.name == "coinbase":
@@ -60,6 +60,9 @@ class FastExchangeProvider:
                         elif self.name == "coinbase":
                             if data.get("type") == "ticker":
                                 price = float(data["price"])
+                                if "best_bid" in data and "best_ask" in data:
+                                    bid_px = float(data["best_bid"])
+                                    ask_px = float(data["best_ask"])
 
                         if price:
                             loop_ts = asyncio.get_running_loop().time()

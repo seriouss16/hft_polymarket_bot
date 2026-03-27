@@ -472,8 +472,8 @@ async def main():
                                 poly_book.book["down_ask_size_top"] = float(
                                     ob_down.get("ask_size_top", 0.0)
                                 )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logging.warning("CLOB book pull failed: %s", exc)
                     last_book_pull_time = now
                     if _net_dbg:
                         _nw_t3 = time.perf_counter()
