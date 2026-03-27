@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+import threading
 from pathlib import Path
 
 
@@ -790,16 +791,17 @@ async def main():
                         else:
                             _open_signal = _raw_side
                         if _open_signal in ("BUY_UP", "BUY_DOWN"):
+                            _trade_info = decision.get("trade") or {}
+                            _cost_usd = (
+                                float(_trade_info.get("amount_usd") or 0.0)
+                                or float(os.environ["LIVE_ORDER_SIZE"])
+                            )
                             if now < _live_skip_until:
                                 # Engine entries are already blocked by meta_enabled=False
                                 # above, so this branch should not be reached.  Guard kept
                                 # defensively in case an OPEN slips through (e.g. BYPASS_META_GATE).
                                 if pnl.inventory > 0:
-                                    _budget_cs = float(
-                                        decision.get("cost_usd")
-                                        or float(os.environ["LIVE_ORDER_SIZE"])
-                                    )
-                                    pnl.rollback_last_open(_budget_cs)
+                                    pnl.rollback_last_open(_cost_usd)
                                 logging.debug(
                                     "[LIVE] OPEN suppressed during skip-cooldown (%.1fs left).",
                                     _live_skip_until - now,
@@ -807,10 +809,7 @@ async def main():
                             else:
                                 # Pass USD notional as budget_usd; live_exec converts to
                                 # shares at current ask and enforces CLOB minimum.
-                                _budget = float(
-                                    decision.get("cost_usd")
-                                    or float(os.environ["LIVE_ORDER_SIZE"])
-                                )
+                                _budget = _cost_usd
                                 _live_tid = (
                                     token_up_id if _open_signal == "BUY_UP"
                                     else (token_down_id or token_up_id)
@@ -893,7 +892,20 @@ async def main():
         except Exception as exc:
             logging.error("Final report failed: %s", exc)
 
+def _suppress_uvloop_shutdown_error(args: threading.ExceptHookArgs) -> None:
+    """Silence the benign RuntimeError from uvloop cleanup thread on Ctrl+C.
+
+    uvloop's internal shutdown thread calls call_soon_threadsafe after the loop
+    is already closed when the user sends multiple SIGINT signals. This is a
+    known uvloop issue and does not indicate data loss or corruption.
+    """
+    if args.exc_type is RuntimeError and "Event loop is closed" in str(args.exc_value):
+        return
+    threading.__excepthook__(args)
+
+
 if __name__ == "__main__":
+    threading.excepthook = _suppress_uvloop_shutdown_error
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
