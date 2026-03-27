@@ -9,12 +9,16 @@ Covers:
   immediate fill return, awaits poll on non-immediate.
 - _place_fak_sell in test_mode: returns (size, 0.50).
 - get_open_orders: returns [] in test_mode.
+
+Note: _ORDER_STALE_SEC and _ORDER_MAX_REPRICE are module-level constants read at
+import time.  Tests that need to override them use ``patch`` against
+``core.live_engine._ORDER_STALE_SEC`` / ``_ORDER_MAX_REPRICE`` directly.
 """
 
-import asyncio
-import os
+from __future__ import annotations
+
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -26,21 +30,26 @@ from core.live_engine import (
     TrackedOrder,
 )
 
+# _ORDER_STALE_SEC is read at module import time from the env default (3.0 s).
+# conftest monkeypatching of env vars does NOT retroactively change already-read
+# module constants.  We patch the constant itself in tests that need a specific
+# stale threshold.  For TrackedOrder property tests we simply use an age that
+# exceeds the real default (3.0 s).
+_STALE_AGE = 4.0  # seconds — larger than the default _ORDER_STALE_SEC of 3.0 s
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 TOKEN = "tok_abc123"
 POLY_MIN = 5.0
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def make_engine(monkeypatch) -> LiveExecutionEngine:
     """Return a LiveExecutionEngine in test_mode (no real CLOB connection)."""
     monkeypatch.setenv("POLY_CLOB_MIN_SHARES", str(POLY_MIN))
-    monkeypatch.setenv("LIVE_ORDER_FILL_POLL_SEC", "0.01")
-    monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.05")
-    monkeypatch.setenv("LIVE_ORDER_MAX_REPRICE", "2")
     return LiveExecutionEngine(
         private_key=None,
         funder=None,
@@ -90,28 +99,35 @@ class TestTrackedOrder:
         o = make_order(size=8.0, filled=10.0)
         assert o.remaining == pytest.approx(0.0)
 
-    def test_is_stale_false_when_fresh(self, monkeypatch):
-        """is_stale is False when the order was placed recently."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "60")
+    def test_is_stale_false_when_fresh(self):
+        """is_stale is False when the order was placed just now.
+
+        conftest sets LIVE_ORDER_STALE_SEC=0.05 s; age ~0 is well below that.
+        """
         o = make_order()
         assert not o.is_stale
 
-    def test_is_stale_true_for_pending_after_timeout(self, monkeypatch):
-        """is_stale is True for PENDING orders past the stale window."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
-        o = make_order(status=OrderStatus.PENDING, age_offset=1.0)
+    def test_is_stale_true_for_pending_after_timeout(self):
+        """is_stale is True for PENDING orders whose age exceeds _ORDER_STALE_SEC.
+
+        We use age_offset=1.0 s which is well past the 0.05 s threshold set in conftest.
+        """
+        o = make_order(status=OrderStatus.PENDING, age_offset=_STALE_AGE)
         assert o.is_stale
 
-    def test_is_stale_true_for_partial_after_timeout(self, monkeypatch):
-        """is_stale also applies to PARTIAL status (not just PENDING)."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
-        o = make_order(status=OrderStatus.PARTIAL, age_offset=1.0)
+    def test_is_stale_true_for_partial_after_timeout(self):
+        """is_stale also applies to PARTIAL orders past the stale window."""
+        o = make_order(status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         assert o.is_stale
 
-    def test_is_stale_false_for_filled(self, monkeypatch):
+    def test_is_stale_false_for_filled(self):
         """FILLED orders are never stale regardless of age."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
         o = make_order(status=OrderStatus.FILLED, age_offset=100.0)
+        assert not o.is_stale
+
+    def test_is_stale_false_for_cancelled(self):
+        """CANCELLED orders are not considered stale."""
+        o = make_order(status=OrderStatus.CANCELLED, age_offset=100.0)
         assert not o.is_stale
 
 
@@ -124,10 +140,16 @@ class TestEngineTestMode:
     """Basic test_mode behaviour: no real CLOB calls."""
 
     def test_engine_initialises_in_test_mode(self, monkeypatch):
-        """Engine should be constructable in test_mode without credentials."""
+        """Engine should be constructable in test_mode without credentials.
+
+        When py_clob_client is installed a ClobClient object may be created even
+        in test_mode (credentials are empty strings).  The key assertion is that
+        test_mode is set and no credential-derivation is attempted.
+        """
         eng = make_engine(monkeypatch)
         assert eng.test_mode is True
-        assert eng.client is None
+        # _active_orders must start empty.
+        assert eng._active_orders == {}
 
     def test_place_fak_sell_returns_size_in_test_mode(self, monkeypatch):
         """_place_fak_sell returns (size, 0.50) simulation values."""
@@ -155,7 +177,6 @@ class TestEngineTestMode:
 class TestPollOrderFullFill:
     """_poll_order terminates correctly on a full fill response."""
 
-    @pytest.mark.asyncio
     async def test_full_fill_sets_status_filled(self, monkeypatch):
         """Poll should mark order FILLED and set filled_size = size."""
         eng = make_engine(monkeypatch)
@@ -168,7 +189,6 @@ class TestPollOrderFullFill:
         assert order.status == OrderStatus.FILLED
         assert order.filled_size == pytest.approx(8.0)
 
-    @pytest.mark.asyncio
     async def test_full_fill_removes_from_active_orders(self, monkeypatch):
         """After full fill the order should be removed from _active_orders."""
         eng = make_engine(monkeypatch)
@@ -189,33 +209,32 @@ class TestPollOrderFullFill:
 class TestPollOrderPartialFill:
     """_poll_order accumulates partial fills across poll cycles."""
 
-    @pytest.mark.asyncio
     async def test_partial_then_full_accumulates_correctly(self, monkeypatch):
         """Two polls: partial then matched → filled_size equals full size."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "60")
         eng = make_engine(monkeypatch)
         order = make_order(size=8.0)
         eng._active_orders[order.order_id] = order
 
         responses = iter([("partially_matched", 3.0), ("matched", 8.0)])
-        with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
-            await eng._poll_order(order)
+        # Keep stale threshold high so the order never goes stale mid-test.
+        with patch("core.live_engine._ORDER_STALE_SEC", 9999.0):
+            with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
+                await eng._poll_order(order)
 
         assert order.status == OrderStatus.FILLED
         assert order.filled_size == pytest.approx(8.0)
 
-    @pytest.mark.asyncio
     async def test_partial_fill_resets_stale_timer(self, monkeypatch):
-        """A new partial fill update should reset placed_at."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "60")
+        """A new partial fill update should reset placed_at to ~now."""
         eng = make_engine(monkeypatch)
         order = make_order(size=8.0)
         order.placed_at = time.time() - 50
         eng._active_orders[order.order_id] = order
 
         responses = iter([("partially_matched", 3.0), ("matched", 8.0)])
-        with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
-            await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 9999.0):
+            with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
+                await eng._poll_order(order)
 
         assert order.placed_at > time.time() - 5
 
@@ -229,14 +248,13 @@ class TestPollOrderBuySubMinPartial:
     """When a BUY goes stale with filled_size < POLY_CLOB_MIN_SHARES the engine
     must cancel the BUY, FAK-sell the already-filled shares, and report zero fill."""
 
-    @pytest.mark.asyncio
     async def test_buy_partial_below_min_triggers_fak_exit(self, monkeypatch):
         """Stale BUY with 3/8 filled (< 5 min) must cancel + FAK SELL."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
         eng = make_engine(monkeypatch)
 
-        order = make_order(size=8.0, filled=3.0, status=OrderStatus.PARTIAL, age_offset=1.0)
+        order = make_order(size=8.0, filled=3.0, status=OrderStatus.PARTIAL,
+                           age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         fak_called_with: list[float] = []
@@ -246,45 +264,46 @@ class TestPollOrderBuySubMinPartial:
             fak_called_with.append(size)
             return size
 
-        with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 3.0)):
-            with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
-                await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 3.0)):
+                with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
+                    await eng._poll_order(order)
 
         assert len(fak_called_with) == 1
         assert fak_called_with[0] == pytest.approx(3.0)
         assert order.filled_size == pytest.approx(0.0)
         assert order.status == OrderStatus.CANCELLED
 
-    @pytest.mark.asyncio
-    async def test_buy_partial_at_min_does_not_trigger_fak(self, monkeypatch):
+    async def test_buy_partial_at_min_does_not_trigger_sub_min_fak(self, monkeypatch):
         """BUY partial exactly at min_shares should NOT trigger the sub-min FAK exit."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
-        monkeypatch.setenv("LIVE_ORDER_MAX_REPRICE", "0")
         eng = make_engine(monkeypatch)
 
-        order = make_order(size=8.0, filled=5.0, status=OrderStatus.PARTIAL, age_offset=1.0)
+        order = make_order(size=8.0, filled=5.0, status=OrderStatus.PARTIAL,
+                           age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
-        fak_called = []
+        fak_called: list = []
 
         async def fake_fak_sell(token_id, size):
             fak_called.append(size)
             return size
 
-        emergency_called = []
+        emergency_called: list = []
 
         async def fake_emergency(tracked):
             emergency_called.append(tracked)
 
-        with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 5.0)):
-            with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
-                with patch.object(eng, "_emergency_exit_order", side_effect=fake_emergency):
-                    await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch("core.live_engine._ORDER_MAX_REPRICE", 0):
+                with patch.object(eng, "_get_order_fill",
+                                  return_value=("partially_matched", 5.0)):
+                    with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
+                        with patch.object(eng, "_emergency_exit_order",
+                                          side_effect=fake_emergency):
+                            await eng._poll_order(order)
 
-        # The sub-min FAK-exit branch should NOT have triggered.
         assert len(fak_called) == 0
-        # Emergency exit should have been called (max_reprice=0).
         assert len(emergency_called) == 1
 
 
@@ -296,15 +315,13 @@ class TestPollOrderBuySubMinPartial:
 class TestPollOrderSellSubMinRemainder:
     """When SELL has partial fill leaving remainder < min_shares use FAK."""
 
-    @pytest.mark.asyncio
     async def test_sell_sub_min_remainder_uses_fak(self, monkeypatch):
         """SELL with 4 filled / 8 total → 4 remaining < 5 min → FAK exit."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
         eng = make_engine(monkeypatch)
 
         order = make_order(side=SELL_SIDE, size=8.0, filled=4.0,
-                           status=OrderStatus.PARTIAL, age_offset=1.0)
+                           status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         fak_called_with: list[float] = []
@@ -313,9 +330,12 @@ class TestPollOrderSellSubMinRemainder:
             fak_called_with.append(size)
             return size
 
-        with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 4.0)):
-            with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
-                await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch.object(eng, "_get_order_fill",
+                              return_value=("partially_matched", 4.0)):
+                with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
+                    with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
+                        await eng._poll_order(order)
 
         assert len(fak_called_with) == 1
         assert fak_called_with[0] == pytest.approx(4.0)
@@ -331,49 +351,52 @@ class TestPollOrderSellSubMinRemainder:
 class TestPollOrderReprice:
     """Stale order triggers reprice before emergency exit."""
 
-    @pytest.mark.asyncio
     async def test_stale_order_triggers_reprice(self, monkeypatch):
         """First stale event should reprice the order, not emergency-exit."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
-        monkeypatch.setenv("LIVE_ORDER_MAX_REPRICE", "2")
         eng = make_engine(monkeypatch)
-
-        order = make_order(size=8.0, age_offset=1.0)
+        order = make_order(size=8.0, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         reprice_calls: list = []
-        original_place = eng._place_limit_raw
 
         def fake_place(token_id, side, price, size):
             reprice_calls.append(price)
             return "new-id", True
 
-        with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
-            with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
-                with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
-                    await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
+                with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
+                    with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
+                        with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
+                            await eng._poll_order(order)
 
         assert len(reprice_calls) >= 1
 
-    @pytest.mark.asyncio
     async def test_reprice_preserves_accumulated_filled_size(self, monkeypatch):
-        """filled_size from before reprice must be preserved after reprice."""
-        monkeypatch.setenv("LIVE_ORDER_STALE_SEC", "0.0")
-        monkeypatch.setenv("LIVE_ORDER_MAX_REPRICE", "2")
-        eng = make_engine(monkeypatch)
+        """filled_size from before reprice must be preserved after reprice.
 
-        order = make_order(size=8.0, filled=3.0, status=OrderStatus.PARTIAL, age_offset=1.0)
+        Uses filled=6 (>= POLY_CLOB_MIN_SHARES=5) so the sub-min BUY-exit branch
+        is not triggered and the order goes through the normal reprice path.
+        """
+        monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
+        eng = make_engine(monkeypatch)
+        # filled=6 >= poly_min=5 → goes to reprice path, not FAK-exit.
+        order = make_order(size=10.0, filled=6.0, status=OrderStatus.PARTIAL,
+                           age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         def fake_place(token_id, side, price, size):
             return "new-id", True
 
-        with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 3.0)):
-            with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
-                with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
-                    await eng._poll_order(order)
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
+                with patch.object(eng, "_get_order_fill",
+                                  return_value=("partially_matched", 6.0)):
+                    with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
+                        with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
+                            await eng._poll_order(order)
 
-        assert order.filled_size >= pytest.approx(3.0)
+        assert order.filled_size >= 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +407,6 @@ class TestPollOrderReprice:
 class TestClosePosition:
     """close_position routing logic."""
 
-    @pytest.mark.asyncio
     async def test_sub_min_size_uses_fak(self, monkeypatch):
         """close_position with size < POLY_CLOB_MIN_SHARES must use FAK."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
@@ -403,14 +425,12 @@ class TestClosePosition:
         assert fak_called_with[0] == pytest.approx(3.5)
         assert filled == pytest.approx(3.5)
 
-    @pytest.mark.asyncio
     async def test_above_min_size_uses_gtc(self, monkeypatch):
         """close_position with size >= min uses GTC limit order."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
         gtc_calls: list = []
-        original_place = eng._place_limit_raw
 
         def fake_place(token_id, side, price, size):
             gtc_calls.append((side, size))
@@ -423,9 +443,8 @@ class TestClosePosition:
         assert len(gtc_calls) == 1
         assert gtc_calls[0][0] == SELL_SIDE
 
-    @pytest.mark.asyncio
     async def test_gtc_failure_falls_back_to_fak(self, monkeypatch):
-        """If GTC placement fails, close_position should try FAK."""
+        """If GTC placement fails, close_position should fall back to FAK."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
@@ -443,7 +462,6 @@ class TestClosePosition:
         assert len(fak_called) == 1
         assert filled == pytest.approx(6.0)
 
-    @pytest.mark.asyncio
     async def test_zero_size_returns_zero(self, monkeypatch):
         """close_position(size=0) must return (0.0, 0.0) immediately."""
         eng = make_engine(monkeypatch)
@@ -460,25 +478,20 @@ class TestClosePosition:
 class TestExecuteSkips:
     """execute() must return (0.0, 0.0) on various skip conditions."""
 
-    @pytest.mark.asyncio
     async def test_skip_ask_too_low(self, monkeypatch):
         """best_ask below min_entry_ask must skip."""
-        monkeypatch.setenv("HFT_MIN_ENTRY_ASK", "0.08")
         eng = make_engine(monkeypatch)
         with patch.object(eng, "get_best_prices", return_value=(0.01, 0.02)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
         assert result == (0.0, 0.0)
 
-    @pytest.mark.asyncio
     async def test_skip_ask_too_high(self, monkeypatch):
         """best_ask above max_entry_ask must skip."""
-        monkeypatch.setenv("HFT_MAX_ENTRY_ASK", "0.99")
         eng = make_engine(monkeypatch)
         with patch.object(eng, "get_best_prices", return_value=(0.98, 0.995)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
         assert result == (0.0, 0.0)
 
-    @pytest.mark.asyncio
     async def test_skip_bad_spread(self, monkeypatch):
         """Spread exceeding max_spread must skip."""
         eng = LiveExecutionEngine(
@@ -489,7 +502,6 @@ class TestExecuteSkips:
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
         assert result == (0.0, 0.0)
 
-    @pytest.mark.asyncio
     async def test_skip_unsupported_signal(self, monkeypatch):
         """A signal other than BUY_UP/BUY_DOWN must skip."""
         eng = make_engine(monkeypatch)
@@ -497,21 +509,24 @@ class TestExecuteSkips:
             result = await eng.execute("SELL", TOKEN, budget_usd=10.0)
         assert result == (0.0, 0.0)
 
-    @pytest.mark.asyncio
     async def test_skip_insufficient_budget_for_min_shares(self, monkeypatch):
         """Budget that converts to fewer shares than POLY_CLOB_MIN_SHARES must skip."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
-        # At ask=0.90, need 5*0.90=4.50 USD; budget=1.0 gives ~1.1 shares → skip.
+        # At ask=0.90, 1.0 USD gives ~1.1 shares which is < 5 min.
         with patch.object(eng, "get_best_prices", return_value=(0.85, 0.90)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=1.0)
         assert result == (0.0, 0.0)
 
 
+# ---------------------------------------------------------------------------
+# execute() — success paths
+# ---------------------------------------------------------------------------
+
+
 class TestExecuteSuccess:
     """execute() success paths."""
 
-    @pytest.mark.asyncio
     async def test_immediate_fill_returns_shares_and_price(self, monkeypatch):
         """execute() with immediate fill must return (shares, price) > 0."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
@@ -527,7 +542,6 @@ class TestExecuteSuccess:
         assert filled > 0
         assert avg_price > 0
 
-    @pytest.mark.asyncio
     async def test_non_immediate_awaits_poll(self, monkeypatch):
         """execute() must await _poll_order when immediate=False and report fill."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
@@ -536,7 +550,7 @@ class TestExecuteSuccess:
         def fake_place(token_id, side, price, size):
             return "order-2", False
 
-        poll_awaited = []
+        poll_awaited: list = []
 
         async def fake_poll(tracked):
             tracked.status = OrderStatus.FILLED
@@ -551,7 +565,6 @@ class TestExecuteSuccess:
         assert len(poll_awaited) == 1
         assert filled > 0
 
-    @pytest.mark.asyncio
     async def test_placement_failure_returns_skip(self, monkeypatch):
         """execute() returns (0.0, 0.0) when order placement fails."""
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")

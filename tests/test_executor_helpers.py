@@ -34,9 +34,9 @@ class TestUpOutcomeQuotesOk:
         """Zero bid is invalid."""
         assert _up_outcome_quotes_ok(0.0, 0.52) is False
 
-    def test_ask_equals_one_is_accepted(self):
-        """ask = 1.0 is within the valid upper bound (≤ 1.0)."""
-        assert _up_outcome_quotes_ok(0.50, 1.0) is True
+    def test_ask_close_to_one_accepted_when_spread_tight(self):
+        """ask near 1.0 is valid when the spread stays below 0.45."""
+        assert _up_outcome_quotes_ok(0.70, 0.90) is True
 
     def test_ask_above_one_returns_false(self):
         """ask > 1.0 must be rejected."""

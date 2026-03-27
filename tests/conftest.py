@@ -5,6 +5,9 @@ import sys
 
 import pytest
 
+# Enable asyncio mode for all async tests in this suite.
+pytest_plugins = ("pytest_asyncio",)
+
 # Allow imports from hft_bot root without package installation.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
