@@ -235,7 +235,7 @@ class StatsCollector:
                 row("--- Journal stats ---", ""),
                 sep,
                 row("Строк в журнале", str(js.rows)),
-                row("✅ Побед / ❌ Убытков", f"{js.win_count} / {js.loss_count}"),
+                row("Побед / Убытков", f"{js.win_count} / {js.loss_count}"),
                 row("Win rate % (journal)", f"{js.win_rate_pct:.1f}"),
                 row("Profit factor", f"{js.profit_factor:.2f}" if js.profit_factor != float('inf') else "∞"),
                 sep,
