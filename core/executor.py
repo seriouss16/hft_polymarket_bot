@@ -105,7 +105,13 @@ class PnLTracker:
         Restores balance and clears inventory so the engine does not attempt to
         close a position that was never opened on-chain.  Only call immediately
         after an OPEN decision when live execution returned False (SKIP).
+        No-op when inventory is already zero (prevents double-restoration).
         """
+        if self.inventory <= 0.0:
+            logging.debug(
+                "[LIVE] rollback_last_open called with no open position — skipped.",
+            )
+            return
         self.balance += amount_usd
         self.inventory = 0.0
         self.entry_price = 0.0
