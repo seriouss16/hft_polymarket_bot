@@ -751,6 +751,18 @@ async def main():
                                 )
                             else:
                                 _live_pnl = 0.0
+                                # SELL completely failed — force-clear the PnL position so the
+                                # engine does not enter an infinite phantom EXIT loop.
+                                if pnl.inventory > 0:
+                                    logging.error(
+                                        "🛑 [LIVE] SELL failed entirely for %.4f shares — "
+                                        "force-clearing PnL state. Manual check required.",
+                                        pnl.inventory,
+                                    )
+                                    pnl.inventory = 0.0
+                                    pnl.entry_price = 0.0
+                                    pnl.entry_ts = 0
+                                    pnl.position_side = None
                             risk.on_trade_closed(_live_pnl, time.time())
                         else:
                             logging.info(
@@ -758,6 +770,17 @@ async def main():
                                 "(phantom position — engine state desync).",
                                 _close_tid[:20],
                             )
+                            # Phantom position: PnL state shows inventory but CLOB has none.
+                            # Force-clear so the engine stops generating EXIT signals.
+                            if pnl.inventory > 0:
+                                logging.warning(
+                                    "[LIVE] Force-clearing phantom PnL position (%.4f sh).",
+                                    pnl.inventory,
+                                )
+                                pnl.inventory = 0.0
+                                pnl.entry_price = 0.0
+                                pnl.entry_ts = 0
+                                pnl.position_side = None
                             risk.on_trade_closed(0.0, time.time())
                     else:
                         risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
@@ -853,6 +876,10 @@ async def main():
                                         _open_signal, _filled_sh, _filled_px,
                                         _filled_sh * _filled_px,
                                         strategy_name=decision.get("strategy_name") or "",
+                                    )
+                                    # Refresh CTF allowance so the subsequent SELL is accepted.
+                                    await asyncio.to_thread(
+                                        live_exec.ensure_conditional_allowance, _live_tid
                                     )
                                 else:
                                     # BUY not filled — impose cooldown to avoid retry spam.

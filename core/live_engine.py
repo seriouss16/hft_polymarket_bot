@@ -209,32 +209,57 @@ class LiveExecutionEngine:
             )
 
     def ensure_allowances(self) -> None:
-        """Set maximum USDC and CTF conditional token allowances for CLOB trading.
+        """Refresh USDC (COLLATERAL) spending allowance for the CLOB at startup.
 
-        Must be called once at startup in live mode.  Without CTF (CONDITIONAL)
-        allowance the CLOB rejects every SELL order with "not enough balance /
-        allowance" even when shares are held in the wallet.
+        Only COLLATERAL allowance is set globally; CONDITIONAL (CTF share) allowance
+        requires a specific token_id and is refreshed per-trade via
+        ``ensure_conditional_allowance(token_id)``.
 
-        Safe to call repeatedly — subsequent calls simply refresh the on-chain
-        approval to max uint256 which is idempotent.
+        Safe to call repeatedly — the on-chain approval is idempotent.
         """
         if self.test_mode or self.client is None:
             return
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
             sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
-            for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
-                params = BalanceAllowanceParams(
-                    asset_type=asset,
-                    signature_type=sig_type,
-                )
-                resp = self.client.update_balance_allowance(params=params)
-                logging.info(
-                    "[LIVE] Allowance refreshed: asset=%s resp=%s", asset, resp,
-                )
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=sig_type,
+            )
+            resp = self.client.update_balance_allowance(params=params)
+            logging.info("[LIVE] COLLATERAL allowance refreshed: %s", resp)
         except Exception as exc:
             logging.error(
-                "[LIVE] ensure_allowances failed: %s — SELL orders may be rejected.", exc,
+                "[LIVE] ensure_allowances failed: %s — BUY orders may be rejected.", exc,
+            )
+
+    def ensure_conditional_allowance(self, token_id: str) -> None:
+        """Refresh CTF conditional token allowance for a specific token_id.
+
+        Must be called after a successful BUY fill so the CLOB accepts the
+        subsequent SELL order.  The CONDITIONAL allowance is per-token and
+        requires the exact token_id to be included in the params.
+        """
+        if self.test_mode or self.client is None:
+            return
+        try:
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE", "2"))
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.CONDITIONAL,
+                token_id=token_id,
+                signature_type=sig_type,
+            )
+            resp = self.client.update_balance_allowance(params=params)
+            logging.info(
+                "[LIVE] CONDITIONAL allowance refreshed: token=%s resp=%s",
+                token_id[:20], resp,
+            )
+        except Exception as exc:
+            logging.error(
+                "[LIVE] ensure_conditional_allowance failed for token=%s: %s "
+                "— SELL may be rejected.",
+                token_id[:20], exc,
             )
 
     def fetch_usdc_balance(self) -> float | None:
@@ -358,14 +383,16 @@ class LiveExecutionEngine:
             logging.info("[SIM FAK SELL] size=%.4f token=%s", size, token_id[:20])
             return (size, 0.50)
         try:
+            from py_clob_client.clob_types import MarketOrderArgs
             best_bid, _ = self.get_best_prices(token_id)
             worst_price = max(0.01, round(best_bid * 0.90, 4))
-            order = self.client.create_market_order(
+            order_args = MarketOrderArgs(
                 token_id=token_id,
                 side=SELL_SIDE,
                 amount=size,
                 price=worst_price,
             )
+            order = self.client.create_market_order(order_args)
             resp = self.client.post_order(order, OrderType.FAK)
             status = str(
                 resp.get("status", "") if isinstance(resp, dict)
