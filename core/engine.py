@@ -1741,15 +1741,22 @@ class HFTEngine:
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
             pos_side = self.pnl.position_side or "UP"
             rsi_x = self._exit_rsi(current_rsi)
+            # Imbalance gate: when RSI is in extreme territory, imbalance alone
+            # is not reliable — a large bid can appear without a real reversal.
+            # Only allow imbalance to trigger internal_reversal when RSI is above
+            # the extreme-low threshold (DOWN) or below extreme-high (UP).
+            _imb_rsi_gate = float(os.getenv("HFT_INTERNAL_REVERSAL_IMB_RSI_GATE", "20.0"))
             if pos_side == "DOWN":
+                _imb_reversal_ok = imbalance >= 0.55 and rsi_x > _imb_rsi_gate
                 internal_reversal = (
-                    imbalance >= 0.55
+                    _imb_reversal_ok
                     or rsi_x >= upper_b
                     or self._last_rsi_slope >= self.rsi_slope_down_exit
                 )
             else:
+                _imb_reversal_ok = imbalance <= 0.45 and rsi_x < (100.0 - _imb_rsi_gate)
                 internal_reversal = (
-                    imbalance <= 0.45
+                    _imb_reversal_ok
                     or rsi_x <= lower_b
                     or self._last_rsi_slope <= self.rsi_slope_up_exit
                 )
