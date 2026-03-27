@@ -344,6 +344,73 @@ class LiveExecutionEngine:
             logging.warning("Cancel failed order=%s: %s", order_id, exc)
             return False
 
+    def _place_fak_sell(self, token_id: str, size: float) -> tuple[float, float]:
+        """Place a FAK (Fill-And-Kill) market SELL for any share size.
+
+        FAK fills what is available immediately and cancels the unfilled remainder —
+        it does not require a minimum order size and bypasses the GTC limit order
+        minimum.  Returns (filled_shares, avg_price) or (0.0, 0.0) on failure.
+
+        The worst-price floor is set to 0.01 to ensure the order is marketable
+        against any resting bid.  Uses ``create_market_order`` from py_clob_client.
+        """
+        if self.test_mode or self.client is None:
+            logging.info("[SIM FAK SELL] size=%.4f token=%s", size, token_id[:20])
+            return (size, 0.50)
+        try:
+            best_bid, _ = self.get_best_prices(token_id)
+            worst_price = max(0.01, round(best_bid * 0.90, 4))
+            order = self.client.create_market_order(
+                token_id=token_id,
+                side=SELL_SIDE,
+                amount=size,
+                price=worst_price,
+            )
+            resp = self.client.post_order(order, OrderType.FAK)
+            status = str(
+                resp.get("status", "") if isinstance(resp, dict)
+                else getattr(resp, "status", "")
+            ).lower()
+            order_id = str(
+                resp.get("orderID") or resp.get("order_id", "")
+                if isinstance(resp, dict) else getattr(resp, "order_id", "")
+            )
+            logging.info(
+                "[LIVE FAK SELL] size=%.4f worst_px=%.4f → id=%s status=%s token=%s",
+                size, worst_price, order_id[:20] if order_id else "?", status, token_id[:20],
+            )
+            if status in ("matched", "filled", "live", "delayed", "unmatched"):
+                # FAK may fill partially or fully — poll the actual fill amount.
+                if order_id:
+                    fill_status, filled = self._get_order_fill(order_id)
+                    if filled > 0:
+                        return (filled, worst_price)
+                # matched/filled without id → assume full fill
+                return (size, worst_price)
+            return (0.0, 0.0)
+        except Exception as exc:
+            logging.error("[LIVE FAK SELL] failed: %s", exc)
+            return (0.0, 0.0)
+
+    def get_open_orders(self, token_id: str | None = None) -> list[dict]:
+        """Return open orders from Polymarket CLOB, optionally filtered by token_id.
+
+        Uses the official ``get_orders`` endpoint which requires L2 auth.
+        Returns an empty list when unavailable or in test mode.
+        """
+        if self.test_mode or self.client is None:
+            return []
+        try:
+            from py_clob_client.clob_types import OpenOrderParams
+            params = OpenOrderParams(asset_id=token_id) if token_id else None
+            resp = self.client.get_orders(params) if params else self.client.get_orders()
+            if isinstance(resp, list):
+                return resp
+            return []
+        except Exception as exc:
+            logging.warning("get_open_orders failed: %s", exc)
+            return []
+
     def _place_limit_raw(
         self, token_id: str, side: str, price: float, size: float
     ) -> tuple[str | None, bool]:
@@ -388,6 +455,25 @@ class LiveExecutionEngine:
             logging.error("Order placement failed %s @ %.4f: %s", side, price, exc)
             return None, False
 
+    async def _fak_sell(self, token_id: str, size: float) -> float:
+        """Execute a FAK market SELL and return total filled shares.
+
+        Delegates to _place_fak_sell (sync) and logs the result.
+        Used when a sub-minimum SELL is needed (CLOB rejects GTC for < min_shares).
+        """
+        filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
+        if filled > 0:
+            logging.info(
+                "[LIVE] FAK SELL done: filled=%.4f / %.4f @ %.4f token=%s",
+                filled, size, price, token_id[:20],
+            )
+        else:
+            logging.error(
+                "🛑 FAK SELL failed: %.4f shares token=%s — manual intervention required.",
+                size, token_id[:20],
+            )
+        return filled
+
     async def _poll_order(self, tracked: TrackedOrder) -> None:
         """Monitor fill status; reprice stale orders; handle partial fills correctly.
 
@@ -395,10 +481,15 @@ class LiveExecutionEngine:
         accumulate across reprice cycles — ``tracked.filled_size`` always reflects
         the running total confirmed by the CLOB.
 
-        For SELL orders whose remaining unfilled quantity falls below the Polymarket
-        CLOB minimum (POLY_CLOB_MIN_SHARES), the remaining shares are sold via an
-        aggressive market-crossing limit instead of a regular reprice, since the
-        CLOB will reject sub-minimum limit orders.
+        BUY partial fill logic:
+          - If a BUY goes stale with partial fill < POLY_CLOB_MIN_SHARES: cancel the
+            BUY and FAK-SELL the already-filled shares so we exit cleanly without
+            holding a position we cannot later sell via a normal limit.
+          - If partial fill >= min_shares: reprice or emergency-exit as normal.
+
+        SELL partial fill logic:
+          - If remaining < min_shares: use FAK SELL instead of a sub-minimum GTC
+            (CLOB rejects GTC below the minimum).
         """
         poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
 
@@ -425,6 +516,7 @@ class LiveExecutionEngine:
                     "⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f",
                     tracked.order_id, clob_filled, tracked.size, tracked.remaining,
                 )
+                # Reset stale timer on new activity.
                 tracked.placed_at = time.time()
 
             if not tracked.is_stale:
@@ -433,6 +525,26 @@ class LiveExecutionEngine:
             remaining = tracked.remaining
             if remaining <= 0:
                 tracked.status = OrderStatus.FILLED
+                break
+
+            # --- BUY stale with partial fill below CLOB minimum ---
+            # Cancel the pending BUY and FAK-SELL what was already filled to avoid
+            # holding unsellable shares.
+            if tracked.side == BUY and 0 < tracked.filled_size < poly_min:
+                self._cancel_order(tracked.order_id)
+                logging.warning(
+                    "⚠️ BUY stale with partial fill %.2f < min %.0f shares — "
+                    "cancelling BUY and FAK-selling filled shares.",
+                    tracked.filled_size, poly_min,
+                )
+                fak_filled = await self._fak_sell(tracked.token_id, tracked.filled_size)
+                # Report net filled as zero so caller treats this as a skip.
+                tracked.filled_size = 0.0
+                tracked.status = OrderStatus.CANCELLED
+                logging.info(
+                    "[LIVE] BUY partial exit: FAK sold %.4f shares token=%s.",
+                    fak_filled, tracked.token_id[:20],
+                )
                 break
 
             if tracked.reprice_count >= _ORDER_MAX_REPRICE:
@@ -455,36 +567,14 @@ class LiveExecutionEngine:
             else:
                 new_price = max(0.01, min(0.99, best_bid - 0.001))
 
-            # For SELL: if remaining < CLOB minimum, place a market-crossing exit
-            # instead of a regular limit (CLOB rejects sub-minimum limit orders).
+            # SELL with remaining < min_shares: use FAK to avoid GTC rejection.
             if tracked.side == SELL_SIDE and remaining < poly_min:
-                market_price = max(0.01, min(0.99, best_bid - 0.01))
                 logging.warning(
-                    "⚠️ SELL remaining %.2f < min %.0f shares — market-crossing @ %.4f.",
-                    remaining, poly_min, market_price,
+                    "⚠️ SELL remaining %.2f < min %.0f shares — FAK sell.",
+                    remaining, poly_min,
                 )
-                oid, imm = await asyncio.to_thread(
-                    self._place_limit_raw, tracked.token_id, SELL_SIDE, market_price, remaining
-                )
-                if oid:
-                    sub = TrackedOrder(
-                        order_id=oid,
-                        token_id=tracked.token_id,
-                        side=SELL_SIDE,
-                        price=market_price,
-                        size=remaining,
-                        status=OrderStatus.FILLED if imm else OrderStatus.PENDING,
-                        filled_size=remaining if imm else 0.0,
-                    )
-                    self._active_orders[oid] = sub
-                    if not imm:
-                        await self._poll_order(sub)
-                    tracked.filled_size += sub.filled_size
-                else:
-                    logging.error(
-                        "🛑 Market-crossing SELL failed %.2f shares token=%s.",
-                        remaining, tracked.token_id,
-                    )
+                fak_filled = await self._fak_sell(tracked.token_id, remaining)
+                tracked.filled_size += fak_filled
                 tracked.status = OrderStatus.FILLED
                 break
 
@@ -527,11 +617,10 @@ class LiveExecutionEngine:
         self._active_orders.pop(tracked.order_id, None)
 
     async def _emergency_exit_order(self, tracked: TrackedOrder) -> None:
-        """Cross the spread aggressively to guarantee fill of remaining size.
+        """Exit remaining size aggressively after reprice attempts exhausted.
 
-        Used when normal repricing is exhausted.  Splits the exit into two legs
-        when remaining size is below POLY_CLOB_MIN_SHARES: first tries a
-        market-crossing limit; if that also fails, logs for manual intervention.
+        For SELL orders: uses FAK market order which works for any size including
+        sub-minimum.  For BUY orders: crosses the spread with a GTC limit.
         Updates ``tracked.filled_size`` with any additional fills.
         """
         self._entry_stats["emergency_exits"] += 1
@@ -542,50 +631,41 @@ class LiveExecutionEngine:
         if remaining <= 0:
             return
 
-        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
-
-        if tracked.side == BUY:
-            price = max(0.01, min(0.99, best_ask + 0.005))
-        else:
-            # Aggressive SELL: cross well below bid.
-            price = max(0.01, min(0.99, best_bid - 0.01))
-
         logging.warning(
-            "🚨 EMERGENCY EXIT: %s %.2f @ %.4f token=%s (min=%.0f)",
-            tracked.side, remaining, price, tracked.token_id, poly_min,
+            "🚨 EMERGENCY EXIT: %s %.2f token=%s (min=%.0f filled=%.2f)",
+            tracked.side, remaining, tracked.token_id[:20], poly_min, tracked.filled_size,
         )
 
-        if tracked.side == SELL_SIDE and remaining < poly_min:
-            # Sub-minimum SELL — log warning; CLOB will reject even aggressive limit
-            # if size < minimum.  Attempt anyway; operator may need to intervene.
-            logging.warning(
-                "⚠️ Emergency SELL remaining %.2f < CLOB min %.0f — CLOB may reject.",
-                remaining, poly_min,
-            )
-
-        order_id, immediate = await asyncio.to_thread(
-            self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
-        )
-        if order_id:
-            emergency = TrackedOrder(
-                order_id=order_id,
-                token_id=tracked.token_id,
-                side=tracked.side,
-                price=price,
-                size=remaining,
-                status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
-                filled_size=remaining if immediate else 0.0,
-            )
-            self._active_orders[order_id] = emergency
-            if not immediate:
-                await self._poll_order(emergency)
-            tracked.filled_size += emergency.filled_size
+        if tracked.side == SELL_SIDE:
+            # FAK handles any size including sub-minimum — preferred for all SELL exits.
+            fak_filled = await self._fak_sell(tracked.token_id, remaining)
+            tracked.filled_size += fak_filled
         else:
-            logging.error(
-                "🛑 Emergency exit placement FAILED token=%s remaining=%.2f"
-                " — manual intervention required.",
-                tracked.token_id, remaining,
+            best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
+            price = max(0.01, min(0.99, best_ask + 0.005))
+            order_id, immediate = await asyncio.to_thread(
+                self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
             )
+            if order_id:
+                emergency = TrackedOrder(
+                    order_id=order_id,
+                    token_id=tracked.token_id,
+                    side=tracked.side,
+                    price=price,
+                    size=remaining,
+                    status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
+                    filled_size=remaining if immediate else 0.0,
+                )
+                self._active_orders[order_id] = emergency
+                if not immediate:
+                    await self._poll_order(emergency)
+                tracked.filled_size += emergency.filled_size
+            else:
+                logging.error(
+                    "🛑 Emergency BUY placement FAILED token=%s remaining=%.2f"
+                    " — manual intervention required.",
+                    tracked.token_id, remaining,
+                )
 
     async def emergency_exit(self, token_id: str, size: float, side: str = SELL_SIDE) -> None:
         """Externally triggered emergency close: cancel all open orders then cross the book.
@@ -705,13 +785,11 @@ class LiveExecutionEngine:
     async def close_position(self, token_id: str, size: float) -> tuple[float, float]:
         """Sell all ``size`` shares and return (total_filled_shares, avg_price).
 
-        Handles three scenarios:
-        - size >= POLY_CLOB_MIN_SHARES: regular limit SELL, polls until full fill.
-          Partial fills are retried via reprice in _poll_order; any remaining below
-          min_shares is sold via a market-crossing limit there.
-        - size < POLY_CLOB_MIN_SHARES: direct market-crossing limit (CLOB will reject
-          a sub-minimum regular limit).
-        - Placement failure: falls back to emergency_exit which crosses the book.
+        - size >= POLY_CLOB_MIN_SHARES: GTC limit just above bid; _poll_order handles
+          partial fills and reprices.  Sub-minimum remainder uses FAK automatically.
+        - size < POLY_CLOB_MIN_SHARES: FAK market SELL immediately — CLOB rejects
+          GTC below the minimum.
+        - GTC placement failure: FAK fallback then emergency_exit.
 
         Blocks until a terminal state and returns (0.0, 0.0) on total failure.
         """
@@ -719,23 +797,32 @@ class LiveExecutionEngine:
             return (0.0, 0.0)
 
         poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
-        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
 
         if size < poly_min:
-            # Sub-minimum: cross the spread aggressively — regular limit is rejected.
-            price = max(0.01, min(0.99, best_bid - 0.01))
             logging.warning(
-                "[LIVE] close_position: size %.2f < min %.0f — market-crossing @ %.4f.",
-                size, poly_min, price,
+                "[LIVE] close_position: size %.2f < min %.0f — FAK market sell.",
+                size, poly_min,
             )
-        else:
-            price = max(0.01, min(0.99, best_bid + 0.002))
+            filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
+            if filled > 0:
+                logging.info(
+                    "[LIVE] close_position FAK done: filled=%.4f @ %.4f token=%s",
+                    filled, price, token_id[:20],
+                )
+                return (filled, price)
+            logging.error("close_position: FAK failed for size=%.2f token=%s.", size, token_id[:20])
+            return (0.0, 0.0)
 
+        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
+        price = max(0.01, min(0.99, best_bid + 0.002))
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, SELL_SIDE, price, size
         )
         if not order_id:
-            logging.warning("close_position: placement failed, trying emergency exit.")
+            logging.warning("close_position: GTC placement failed, trying FAK.")
+            filled, fak_price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
+            if filled > 0:
+                return (filled, fak_price)
             await self.emergency_exit(token_id, size, side=SELL_SIDE)
             return (0.0, 0.0)
 

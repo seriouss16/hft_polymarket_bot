@@ -201,7 +201,7 @@ class PnLTracker:
         if dd > self.max_drawdown:
             self.max_drawdown = dd
         if performance_key:
-            self.strategy_performance.record(str(performance_key), pnl)
+            self.strategy_performance.record_close(str(performance_key), pnl)
         wr = self.wins / self.trades_count * 100 if self.trades_count else 0.0
         _tag = f"{strategy_name}".strip() if strategy_name else ""
         logging.info(

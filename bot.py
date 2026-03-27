@@ -387,6 +387,25 @@ async def main():
         asyncio.create_task(p.connect()) for p in providers
     ]
     poly_connect_task: asyncio.Task | None = None
+    _heartbeat_task: asyncio.Task | None = None
+
+    if LIVE_MODE and live_exec.client is not None:
+        async def _run_heartbeat() -> None:
+            """Send Polymarket CLOB heartbeat every 5 s to keep open orders alive.
+
+            Without a valid heartbeat every ≤15 s the CLOB cancels all open orders.
+            Errors are logged but do not stop the loop.
+            """
+            _hb_id = ""
+            while True:
+                try:
+                    resp = await asyncio.to_thread(live_exec.client.post_heartbeat, _hb_id)
+                    _hb_id = resp.get("heartbeat_id", "") if isinstance(resp, dict) else getattr(resp, "heartbeat_id", "")
+                except Exception as _hb_exc:
+                    logging.debug("[LIVE] Heartbeat failed: %s", _hb_exc)
+                await asyncio.sleep(5.0)
+
+        _heartbeat_task = asyncio.create_task(_run_heartbeat())
 
     token_up_id = None
     token_down_id = None
@@ -878,6 +897,8 @@ async def main():
                 await asyncio.sleep(2.0)
             except Exception as _exc:
                 logging.error("Emergency exit on shutdown failed: %s", _exc)
+        if _heartbeat_task is not None and not _heartbeat_task.done():
+            _heartbeat_task.cancel()
         for _t in provider_tasks:
             if not _t.done():
                 _t.cancel()
