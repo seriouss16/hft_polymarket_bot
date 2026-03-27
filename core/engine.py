@@ -13,12 +13,18 @@ from ml.indicators import compute_rsi, dynamic_rsi_bands
 
 DEBUG_LOG_PATH = "/mnt/work/DEV/PRJ0/prjBJ_arb_polymarket/.cursor/debug-ac56e4.log"
 DEBUG_SESSION_ID = "ac56e4"
+_DEBUG_LOG_ENABLED = os.getenv("HFT_DEBUG_LOG_ENABLED", "0") == "1"
 
 
 def _append_debug_log(payload: dict) -> None:
-    """Append one NDJSON line to active debug session file."""
-    with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    """Append one NDJSON line to active debug session file (gated by HFT_DEBUG_LOG_ENABLED)."""
+    if not _DEBUG_LOG_ENABLED:
+        return
+    try:
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except OSError:
+        pass
 
 
 def _price_array_for_rsi(price_history, max_len: int) -> np.ndarray:

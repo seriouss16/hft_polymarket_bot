@@ -59,15 +59,12 @@ import traceback
 import time
 from datetime import datetime, timezone
 
-# --- Форсируем вывод и отключаем мусор TF ---
 os.environ['PYTHONUNBUFFERED'] = '1'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 print(">>> Инициализация HFT системы...", flush=True)
 
-# Импорты после настройки окружения
-import tensorflow as tf
 from core.selector import MarketSelector
 from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
@@ -288,8 +285,9 @@ async def main():
     )
     journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
     
-    # Отключаем GPU для предсказаний
-    tf.config.set_visible_devices([], 'GPU')
+    if ENABLE_LSTM:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
 
     # --- Запуск провайдеров быстрых цен (Coinbase anchor + Binance lead) ---
     providers = [

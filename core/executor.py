@@ -91,6 +91,7 @@ class PnLTracker:
             maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME", "12"))
         )
         self.regime_cooldown_until = 0.0
+        self._good_regime_winrate = float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49"))
         self.strategy_performance = StrategyPerformanceBook()
 
     def reset_strategy_performance(self) -> None:
@@ -105,7 +106,7 @@ class PnLTracker:
             return True
         winrate = sum(1 for p in self.recent_pnls if p > 0) / len(self.recent_pnls)
         avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
-        return winrate >= float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49")) or avg_pnl > -1.1
+        return winrate >= self._good_regime_winrate or avg_pnl > -1.1
 
     def log_trade(
         self,
@@ -130,14 +131,21 @@ class PnLTracker:
             book_px = float(price)
             exec_price = book_px * (1 + self.fee_rate)
             new_shares = amount_usd / exec_price
+            new_side = "DOWN" if side == "BUY_DOWN" else "UP"
             if self.inventory > 0:
+                if self.position_side and self.position_side != new_side:
+                    logging.warning(
+                        "Mixed-side add blocked: held %s, attempted %s.",
+                        self.position_side, new_side,
+                    )
+                    return None
                 total_cost = self.entry_price * self.inventory + exec_price * new_shares
                 self.inventory += new_shares
                 self.entry_price = total_cost / self.inventory
             else:
                 self.inventory = new_shares
                 self.entry_price = exec_price
-                self.position_side = "DOWN" if side == "BUY_DOWN" else "UP"
+                self.position_side = new_side
             self.balance -= amount_usd
             self.entry_ts = time.time()
             _sn = str(strategy_name).strip() if strategy_name else ""
@@ -249,6 +257,10 @@ class PnLTracker:
             return 0.0
         mark = mark_bid_for_side(book, self.position_side)
         if mark <= 0.0:
+            logging.warning(
+                "Unrealized PnL mark=0 for side=%s — book may be stale or empty.",
+                self.position_side,
+            )
             return 0.0
         return (mark - self.entry_price) * self.inventory
 

@@ -77,10 +77,13 @@ class StatsCollector:
                     try:
                         pnl_sum += float(row.get("pnl") or 0.0)
                     except (TypeError, ValueError):
-                        pass
+                        logging.warning(
+                            "Bad pnl value in journal row %d: %r", n, row.get("pnl"),
+                        )
                     r = str(row.get("exit_reason") or "").strip() or "(empty)"
                     reasons[r] += 1
-        except OSError:
+        except OSError as exc:
+            logging.warning("Cannot read trade journal %s: %s", journal_path, exc)
             return 0, 0.0, Counter()
         return n, pnl_sum, reasons
 

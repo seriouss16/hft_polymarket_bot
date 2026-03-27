@@ -157,6 +157,7 @@ class MarketSelector:
 
         def _do_request():
             resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
             return resp.json()
 
         return await asyncio.to_thread(_do_request)
