@@ -711,3 +711,10 @@ class TestExitReconcile:
         eng = make_engine(monkeypatch)
         assert eng.test_mode is True
         await eng.wait_for_exit_readiness(TOKEN, timeout_sec=0.01)
+
+    async def test_await_sellable_balance_none_in_test_mode(self, monkeypatch):
+        """_await_sellable_balance must return None in test_mode without polling."""
+        eng = make_engine(monkeypatch)
+        assert eng.test_mode is True
+        got = await eng._await_sellable_balance(TOKEN, 5.0)
+        assert got is None

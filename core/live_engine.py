@@ -1108,6 +1108,34 @@ class LiveExecutionEngine:
         )
         return float(best)
 
+    async def _await_sellable_balance(self, token_id: str, requested: float) -> float | None:
+        """Refresh allowance and poll until conditional balance reflects a BUY fill or timeout.
+
+        After a CLOB match, ``get_balance_allowance`` can lag; ``post_order`` SELL then
+        fails with balance 0.  This mirrors the post-BUY balance loop with allowance
+        refresh each step.
+        """
+        if self.test_mode:
+            return None
+        dust = float(
+            os.getenv(
+                "LIVE_CHAIN_EXIT_DUST_SHARES",
+                os.getenv("LIVE_SELL_CHAIN_DUST_SHARES", "0.02"),
+            )
+        )
+        raw = os.getenv("LIVE_SELL_BALANCE_WAIT_DELAYS_SEC", "0,0.25,0.5,1.0,1.5,2.0")
+        delays = [float(x.strip()) for x in raw.split(",") if x.strip()]
+        if not delays:
+            delays = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0]
+        for d in delays:
+            if d > 0:
+                await asyncio.sleep(d)
+            await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+            bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            if bal is not None and bal > dust:
+                return min(requested, bal)
+        return None
+
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics."""
         if self.skip_stats_log_sec <= 0:
@@ -1184,6 +1212,9 @@ class LiveExecutionEngine:
           when CLOB fill tracking is trusted (lower latency).
         - When pre-SELL balance is fetched, best bid is loaded in parallel with
           that call to save one sequential HTTP round-trip before GTC placement.
+        - If pre-SELL balance reads 0 but CLOB filled a BUY, ``_await_sellable_balance``
+          polls with allowance refresh before SELL; GTC/FAK placement retries use
+          ``LIVE_SELL_PLACE_ATTEMPTS``, ``LIVE_SELL_BALANCE_WAIT_DELAYS_SEC``.
 
         Blocks until a terminal state and returns (0.0, 0.0) on total failure.
         """
@@ -1245,6 +1276,15 @@ class LiveExecutionEngine:
                 "keeping requested size=%.4f token=%s",
                 size, token_id[:20],
             )
+            if not self.test_mode:
+                await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+                _wait_bal = await self._await_sellable_balance(token_id, size)
+                if _wait_bal is not None and _wait_bal > 0:
+                    size = min(size, _wait_bal)
+                    logging.info(
+                        "[LIVE] close_position: balance appeared after wait → %.4f sh token=%s",
+                        size, token_id[:20],
+                    )
         if size <= 0:
             logging.error(
                 "🛑 [LIVE] close_position: size is 0 for token=%s — nothing to sell.",
@@ -1272,18 +1312,50 @@ class LiveExecutionEngine:
         else:
             best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.002))
-        order_id, immediate = await asyncio.to_thread(
-            self._place_limit_raw, token_id, SELL_SIDE, price, size
-        )
+        sell_attempts = max(1, int(os.getenv("LIVE_SELL_PLACE_ATTEMPTS", "5")))
+        order_id: str | None = None
+        immediate = False
+        for _att in range(sell_attempts):
+            await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+            order_id, immediate = await asyncio.to_thread(
+                self._place_limit_raw, token_id, SELL_SIDE, price, size
+            )
+            if order_id:
+                break
+            if _att + 1 < sell_attempts:
+                logging.warning(
+                    "[LIVE] SELL GTC placement failed — retry %d/%d (balance/allowance lag) token=%s.",
+                    _att + 1, sell_attempts, token_id[:20],
+                )
+                await self._await_sellable_balance(token_id, size)
+                await asyncio.sleep(
+                    float(os.getenv("LIVE_SELL_PLACE_RETRY_SLEEP_SEC", "0.35"))
+                )
         if not order_id:
             logging.warning("⚠️ [LIVE] SELL GTC failed, trying FAK token=%s.", token_id[:20])
-            filled, fak_price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
-            if filled > 0:
-                logging.info(
-                    "🔴 [LIVE] FAK SELL done (GTC fallback): %.4f @ %.4f token=%s",
-                    filled, fak_price, token_id[:20],
+            fak_attempts = max(1, int(os.getenv("LIVE_SELL_FAK_ATTEMPTS", "4")))
+            filled, fak_price = 0.0, 0.0
+            for _fa in range(fak_attempts):
+                await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+                if _fa > 0:
+                    await self._await_sellable_balance(token_id, size)
+                    await asyncio.sleep(
+                        float(os.getenv("LIVE_SELL_FAK_RETRY_SLEEP_SEC", "0.4"))
+                    )
+                filled, fak_price = await asyncio.to_thread(
+                    self._place_fak_sell, token_id, size
                 )
-                return (filled, fak_price)
+                if filled > 0:
+                    logging.info(
+                        "🔴 [LIVE] FAK SELL done (GTC fallback): %.4f @ %.4f token=%s",
+                        filled, fak_price, token_id[:20],
+                    )
+                    return (filled, fak_price)
+                if _fa + 1 < fak_attempts:
+                    logging.warning(
+                        "[LIVE] FAK SELL failed — retry %d/%d token=%s.",
+                        _fa + 1, fak_attempts, token_id[:20],
+                    )
             await self.emergency_exit(token_id, size, side=SELL_SIDE)
             return (0.0, 0.0)
 
