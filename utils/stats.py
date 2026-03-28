@@ -2,6 +2,7 @@
 
 import csv
 import logging
+import os
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -85,6 +86,20 @@ class StatsCollector:
         self.pnl = pnl_tracker
         self.started_ts = time.time()
 
+    @staticmethod
+    def _session_mode_label() -> str:
+        """Return human-readable session mode string for the report header."""
+        day_mode = os.getenv("DAY_MODE", "0").strip()
+        night_mode = os.getenv("NIGHT_MODE", "0").strip()
+        forced = (day_mode == "1") != (night_mode == "1")
+        if forced:
+            active = "DAY ☀️" if day_mode == "1" else "NIGHT 🌙"
+            return f"{active} [принудительный]"
+        from core.session_profile import current_profile_name  # noqa: PLC0415
+        name = current_profile_name()
+        label = "DAY ☀️" if name == "day" else "NIGHT 🌙"
+        return f"{label} [авто]"
+
     def show_report(self):
         """Print compact PnL summary to stdout (legacy block format)."""
         now_ts = time.time()
@@ -104,6 +119,7 @@ class StatsCollector:
             f"🕒 Старт сессии:      {started_at}",
             f"🧾 Время отчета:      {report_at}",
             f"⏱️ Аптайм:            {uptime_min:>10.1f} min",
+            f"🗂️ Режим:             {self._session_mode_label()}",
             f"💰 Текущий баланс:    {self.pnl.balance:>10.2f} USD",
             f"📈 Чистая прибыль:    {self.pnl.total_pnl:>10.2f} USD ({roi:+.2f}%)",
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
@@ -213,6 +229,7 @@ class StatsCollector:
             row("Итоговая таблица (сессия)", ""),
             sep,
             row("Причина завершения", shutdown_reason),
+            row("Режим", self._session_mode_label()),
             row("Старт сессии", started_at),
             row("Время отчета", report_at),
             row("Аптайм, min", f"{uptime_min:.1f}"),
