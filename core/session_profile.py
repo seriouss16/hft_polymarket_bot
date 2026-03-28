@@ -69,6 +69,14 @@ _NIGHT: dict[str, str] = {
     "HFT_REACTION_W_RSI": "0.60",
     "HFT_REACTION_W_MA": "0.25",
     "HFT_REACTION_W_MACD": "0.15",
+    # RSI slope-filter: night uses relaxed slope (0.0) because Rx changes slowly
+    # on sparse Poly ticks.  Entry bands themselves enforce directionality.
+    # UP_ENTRY_MAX=55: enter UP only when Rx < 55 (BTC not overbought).
+    # DOWN_ENTRY_MIN=45: enter DOWN only when Rx > 45 (BTC not oversold).
+    "HFT_RSI_UP_ENTRY_MAX": "55.0",
+    "HFT_RSI_UP_SLOPE_MIN": "0.0",
+    "HFT_RSI_DOWN_ENTRY_MIN": "45.0",
+    "HFT_RSI_DOWN_SLOPE_MAX": "0.0",
     # Regime filter: night WR is naturally lower due to random reversals in flat BTC.
     # Lower good-regime threshold (0.38) and raise bad-regime floor (0.28) so a
     # small losing streak does not lock the bot for hours.  Shorter memory window
@@ -126,6 +134,13 @@ _DAY: dict[str, str] = {
     "HFT_REACTION_W_RSI": "0.45",
     "HFT_REACTION_W_MA": "0.30",
     "HFT_REACTION_W_MACD": "0.25",
+    # RSI slope-filter for day: require positive slope for UP, negative for DOWN.
+    # Day BTC moves are real and directional — slope confirms momentum direction.
+    # Tighter entry ceiling (UP_ENTRY_MAX=50) for more selective UP entries at day.
+    "HFT_RSI_UP_ENTRY_MAX": "52.0",
+    "HFT_RSI_UP_SLOPE_MIN": "0.3",
+    "HFT_RSI_DOWN_ENTRY_MIN": "48.0",
+    "HFT_RSI_DOWN_SLOPE_MAX": "-0.3",
 }
 
 _CURRENT_PROFILE: str | None = None

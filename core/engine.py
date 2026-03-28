@@ -790,15 +790,27 @@ class HFTEngine:
         self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI", "0.45"))
         self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA", "0.30"))
         self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD", "0.25"))
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "55.0"))
+        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "45.0"))
+        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
         logging.info(
             "[ENGINE] Profile params reloaded: speed_min=%.2f speed_max=%.2f "
-            "latency=%.0fms zscore=%s low_speed_mult=%.2f reaction=%s",
+            "latency=%.0fms zscore=%s low_speed_mult=%.2f reaction=%s "
+            "rsi_up_max=%.1f rsi_down_min=%.1f slope_up=%.2f slope_dn=%.2f",
             self.entry_up_speed_min,
             self.entry_down_speed_max,
             self.entry_max_latency_ms,
             self.entry_zscore_trend_enabled,
             self.entry_low_speed_edge_mult,
             "on" if self.reaction_score_enabled else "off",
+            self.rsi_up_entry_max,
+            self.rsi_down_entry_min,
+            self.rsi_up_slope_min,
+            self.rsi_down_slope_max,
         )
 
     def reset_for_new_market(self):
@@ -1871,6 +1883,9 @@ class HFTEngine:
             # the extreme-low threshold (DOWN) or below extreme-high (UP).
             _imb_rsi_gate = float(os.getenv("HFT_INTERNAL_REVERSAL_IMB_RSI_GATE", "20.0"))
             if pos_side == "DOWN":
+                # DOWN token profits when BTC falls → exit when BTC is overbought
+                # (Rx high) signalling a reversal back up that would hurt the position.
+                # Imbalance gate: only fire on ask-heavy book when RSI not extreme-low.
                 _imb_reversal_ok = imbalance >= 0.55 and rsi_x > _imb_rsi_gate
                 internal_reversal = (
                     _imb_reversal_ok
@@ -1878,10 +1893,14 @@ class HFTEngine:
                     or self._last_rsi_slope >= self.rsi_slope_down_exit
                 )
             else:
+                # UP token profits when BTC rises → take profit when BTC is overbought
+                # (Rx >= upper_b), meaning UP-token price is at its peak.
+                # slope <= rsi_slope_up_exit (e.g. -2) means Rx turning down: momentum fading.
+                # Imbalance gate: bid-light book (imbalance <= 0.45) signals sellers returning.
                 _imb_reversal_ok = imbalance <= 0.45 and rsi_x < (100.0 - _imb_rsi_gate)
                 internal_reversal = (
                     _imb_reversal_ok
-                    or rsi_x <= lower_b
+                    or rsi_x >= upper_b
                     or self._last_rsi_slope <= self.rsi_slope_up_exit
                 )
             reaction_tp_confirmed = reaction_confirmed and internal_reversal
