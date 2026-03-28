@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections import deque
+from typing import Any
 
 import numpy as np
 
@@ -79,6 +80,7 @@ class HFTEngine:
         self.entry_outcome_mid = None
         self.entry_fast_price = None
         self.entry_time = 0.0
+        self._live_entry_sync_pending = False
 
         # --- Тейки и Стопы (в пунктах и USD) ---
         self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
@@ -541,6 +543,77 @@ class HFTEngine:
         self._peak_unrealized = 0.0
         self._trailing_sl_floor = None
 
+    def _snapshot_orderbook_mids(self, poly_orderbook: dict[str, Any]) -> tuple[float, float, float]:
+        """Return poly oracle mid, UP outcome mid, and DOWN outcome mid from one book snapshot."""
+        poly_mid = float(
+            poly_orderbook.get("btc_oracle")
+            or poly_orderbook.get("mid", 0.0)
+            or 0.0
+        )
+        up_ask = float(poly_orderbook["ask"])
+        up_bid = float(poly_orderbook["bid"])
+        up_mid = (up_bid + up_ask) * 0.5
+        down_bid_raw = float(poly_orderbook.get("down_bid", 0.0))
+        down_ask_raw = float(poly_orderbook.get("down_ask", 0.0))
+        if 0.0 < down_bid_raw < down_ask_raw <= 1.0:
+            down_bid = down_bid_raw
+            down_ask = down_ask_raw
+        else:
+            down_ask = max(0.01, min(0.99, 1.0 - up_bid))
+            down_bid = max(0.01, min(0.99, 1.0 - up_ask))
+        down_mid = (down_bid + down_ask) * 0.5
+        return poly_mid, up_mid, down_mid
+
+    def apply_live_entry_after_fill(
+        self,
+        poly_orderbook: dict[str, Any],
+        fast_price: float,
+        book_px: float,
+        exec_px: float,
+        shares_filled: float,
+        cost_usd: float,
+    ) -> None:
+        """Set entry clock and midpoint baselines after a confirmed live BUY fill.
+
+        When log_trade is suppressed, OPEN is emitted before the CLOB confirms;
+        without this call, entry_time would include order latency and exit timing
+        would diverge from paper mode.
+        """
+        if not self._live_entry_sync_pending:
+            return
+        pos = self.pnl.position_side or "UP"
+        poly_mid, up_mid, down_mid = self._snapshot_orderbook_mids(poly_orderbook)
+        outcome_mid = down_mid if pos == "DOWN" else up_mid
+        _ts = time.time()
+        self.entry_time = _ts
+        self.last_trade_time = _ts
+        self.entry_poly_mid = poly_mid
+        self.entry_outcome_mid = outcome_mid
+        self.entry_fast_price = fast_price
+        self._live_entry_sync_pending = False
+        self._reset_trailing_state()
+        self.entry_context["entry_book_px"] = float(book_px)
+        self.entry_context["entry_exec_px"] = float(exec_px)
+        self.entry_context["shares_bought"] = float(shares_filled)
+        self.entry_context["cost_usd"] = float(cost_usd)
+        self.entry_context["entry_up_bid"] = float(poly_orderbook.get("bid", 0.0))
+        self.entry_context["entry_up_ask"] = float(poly_orderbook.get("ask", 0.0))
+        self.entry_context["entry_down_bid"] = float(poly_orderbook.get("down_bid", 0.0))
+        self.entry_context["entry_down_ask"] = float(poly_orderbook.get("down_ask", 0.0))
+
+    def rollback_live_open_signal(self) -> None:
+        """Clear deferred live OPEN state when the CLOB BUY did not fill."""
+        if not self._live_entry_sync_pending:
+            return
+        self._live_entry_sync_pending = False
+        self.entry_time = 0.0
+        self.entry_poly_mid = None
+        self.entry_outcome_mid = None
+        self.entry_fast_price = None
+        self.entry_context = {}
+        self.position_trend = "FLAT"
+        self._reset_trailing_state()
+
     def _opposite_trend_exit_triggered(
         self,
         pos_side: str,
@@ -832,6 +905,7 @@ class HFTEngine:
         self._filter_diag_stats = {}
         self._last_filter_diag_log_ts = time.time()
         self.last_close_time = 0.0
+        self._live_entry_sync_pending = False
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -1643,12 +1717,16 @@ class HFTEngine:
                 )
             else:
                 self._diag_inc("entry_open_ok")
-                self.last_trade_time = time.time()
-                self._reset_trailing_state()
-                self.entry_poly_mid = poly_mid
-                self.entry_outcome_mid = up_mid
-                self.entry_fast_price = fast_price
-                self.entry_time = time.time()
+                _sup = bool(open_event.get("suppressed"))
+                if not _sup:
+                    self.last_trade_time = time.time()
+                    self._reset_trailing_state()
+                    self.entry_poly_mid = poly_mid
+                    self.entry_outcome_mid = up_mid
+                    self.entry_fast_price = fast_price
+                    self.entry_time = time.time()
+                else:
+                    self._live_entry_sync_pending = True
                 self.position_trend = trend["trend"]
                 self.entry_context = {
                     "entry_edge": fast_price - poly_mid,
@@ -1724,12 +1802,16 @@ class HFTEngine:
                 )
             else:
                 self._diag_inc("entry_open_ok")
-                self.last_trade_time = time.time()
-                self._reset_trailing_state()
-                self.entry_poly_mid = poly_mid
-                self.entry_outcome_mid = down_mid
-                self.entry_fast_price = fast_price
-                self.entry_time = time.time()
+                _sup = bool(open_event.get("suppressed"))
+                if not _sup:
+                    self.last_trade_time = time.time()
+                    self._reset_trailing_state()
+                    self.entry_poly_mid = poly_mid
+                    self.entry_outcome_mid = down_mid
+                    self.entry_fast_price = fast_price
+                    self.entry_time = time.time()
+                else:
+                    self._live_entry_sync_pending = True
                 self.position_trend = trend["trend"]
                 self.entry_context = {
                     "entry_edge": fast_price - poly_mid,

@@ -1090,11 +1090,52 @@ async def main():
                                         _filled_sh * _filled_px,
                                         strategy_name=decision.get("strategy_name") or "",
                                     )
+                                    _hft_eng = getattr(
+                                        strategy_hub.get_active_strategy(),
+                                        "_engine",
+                                        None,
+                                    )
+                                    if (
+                                        _hft_eng is not None
+                                        and getattr(
+                                            _hft_eng, "_live_entry_sync_pending", False
+                                        )
+                                    ):
+                                        _apply_fast = fast_price
+                                        if USE_SMART_FAST:
+                                            _nf = aggregator.get_weighted_price()
+                                        else:
+                                            _nf = (
+                                                aggregator.get_coinbase_price()
+                                                or aggregator.get_weighted_price()
+                                            )
+                                        if _nf is not None:
+                                            _apply_fast = float(_nf)
+                                        _book_px = float(
+                                            poly_book.book.get("down_ask", 0.0)
+                                            if _open_signal == "BUY_DOWN"
+                                            else poly_book.book.get("ask", 0.0)
+                                        )
+                                        _hft_eng.apply_live_entry_after_fill(
+                                            poly_book.book,
+                                            _apply_fast,
+                                            _book_px,
+                                            float(_filled_px),
+                                            float(_filled_sh),
+                                            float(_filled_sh * _filled_px),
+                                        )
                                     # Refresh CTF allowance so the subsequent SELL is accepted.
                                     await asyncio.to_thread(
                                         live_exec.ensure_conditional_allowance, _live_tid
                                     )
                                 else:
+                                    _hft_eng = getattr(
+                                        strategy_hub.get_active_strategy(),
+                                        "_engine",
+                                        None,
+                                    )
+                                    if _hft_eng is not None:
+                                        _hft_eng.rollback_live_open_signal()
                                     # BUY not filled — impose cooldown to avoid retry spam.
                                     _live_skip_until = now + _live_skip_cooldown_sec
                                     logging.info(
