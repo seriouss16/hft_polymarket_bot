@@ -1083,12 +1083,23 @@ class LiveExecutionEngine:
         # let the CLOB reject minimally — retry is handled by _poll_order reprice.
         actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
         if actual_bal is not None and actual_bal > 0 and actual_bal < size:
-            logging.warning(
-                "⚠️ [LIVE] SELL size corrected: %.4f → %.4f "
-                "(on-chain balance after fee) token=%s",
-                size, actual_bal, token_id[:20],
-            )
-            size = actual_bal
+            if actual_bal < poly_min and size >= poly_min:
+                logging.warning(
+                    "⚠️ [LIVE] On-chain %.4f < CLOB min while selling %.4f "
+                    "(likely lag or prior-window dust — keeping requested size) token=%s",
+                    actual_bal,
+                    size,
+                    token_id[:20],
+                )
+            else:
+                logging.warning(
+                    "⚠️ [LIVE] SELL size corrected: %.4f → %.4f "
+                    "(on-chain balance after fee) token=%s",
+                    size,
+                    actual_bal,
+                    token_id[:20],
+                )
+                size = actual_bal
         elif actual_bal is not None and actual_bal == 0:
             logging.warning(
                 "⚠️ [LIVE] close_position: on-chain balance=0 (possible lag) — "

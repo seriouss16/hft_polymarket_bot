@@ -192,8 +192,10 @@ class PnLTracker:
         self.balance += proceeds
         self._buy_cost_usd = 0.0
         self.inventory = max(0.0, self.inventory - filled_shares)
-        if self.inventory <= 0.0:
+        _dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES", "0.05"))
+        if self.inventory <= _dust:
             self.inventory = 0.0
+        if self.inventory <= 0.0:
             self.entry_price = 0.0
             self.entry_ts = 0
             self.position_side = None
