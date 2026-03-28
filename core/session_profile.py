@@ -56,6 +56,19 @@ _NIGHT: dict[str, str] = {
     # Anchor filter: counter-direction needs a smaller confirmation delta at night
     # because BTC barely moves; even 0.02% deviation from anchor is significant.
     "HFT_ANCHOR_COUNTER_MIN_DELTA_PCT": "0.0002",
+    # Reaction score night profile: short periods to warm up quickly on sparse ticks;
+    # RSI dominates (0.60) because MA/MACD are noisy until history fills up.
+    # MA scale 0.0003 = 0.03%: BTC moves cents at night, not dollars.
+    # MACD hist scale 3.0 USD: EMA(8)-EMA(17) histogram is tiny in calm markets.
+    "HFT_REACTION_MA_PERIOD": "14",
+    "HFT_REACTION_MACD_FAST": "8",
+    "HFT_REACTION_MACD_SLOW": "17",
+    "HFT_REACTION_MACD_SIGNAL": "6",
+    "HFT_REACTION_MA_REL_SCALE": "0.0003",
+    "HFT_REACTION_MACD_HIST_SCALE": "3.0",
+    "HFT_REACTION_W_RSI": "0.60",
+    "HFT_REACTION_W_MA": "0.25",
+    "HFT_REACTION_W_MACD": "0.15",
 }
 
 _DAY: dict[str, str] = {
@@ -80,6 +93,19 @@ _DAY: dict[str, str] = {
     # Anchor filter: intraday moves faster, require stronger confirmation
     # before trading counter to the slot opening price.
     "HFT_ANCHOR_COUNTER_MIN_DELTA_PCT": "0.0005",
+    # Reaction score day profile: standard periods, MACD/MA get more weight
+    # because trends are real and histograms are meaningful in active hours.
+    # MA scale 0.0006 = 0.06%: intraday BTC moves are larger relative to price.
+    # MACD hist scale 15.0 USD: EMA(12)-EMA(26) histogram can reach 10-30 USD intraday.
+    "HFT_REACTION_MA_PERIOD": "21",
+    "HFT_REACTION_MACD_FAST": "12",
+    "HFT_REACTION_MACD_SLOW": "26",
+    "HFT_REACTION_MACD_SIGNAL": "9",
+    "HFT_REACTION_MA_REL_SCALE": "0.0006",
+    "HFT_REACTION_MACD_HIST_SCALE": "15.0",
+    "HFT_REACTION_W_RSI": "0.45",
+    "HFT_REACTION_W_MA": "0.30",
+    "HFT_REACTION_W_MACD": "0.25",
 }
 
 _CURRENT_PROFILE: str | None = None

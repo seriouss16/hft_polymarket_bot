@@ -565,6 +565,18 @@ async def main():
                     or poly_book.book.get("mid")
                     or 0.0
                 )
+            # RTDS connects asynchronously; at market switch btc_oracle is often still 0.
+            # Latch anchor on the first Chainlink tick so Anchor/Δ and _anchor_gate see a real target.
+            if (
+                slot_anchor_price <= 0.0
+                and token_up_id
+                and poly_btc > 0.0
+            ):
+                slot_anchor_price = float(poly_btc)
+                logging.info(
+                    "🎯 Slot anchor latched from Chainlink RTDS: %.2f",
+                    slot_anchor_price,
+                )
             if fast_price and poly_book is not None and poly_btc > 0:
                 if token_up_id and (
                     CLOB_PULL_INTERVAL <= 0.0
