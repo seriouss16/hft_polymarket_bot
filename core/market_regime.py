@@ -93,7 +93,11 @@ class MarketRegimeDetector:
         Returns:
             True when the regime transitioned since the last call.
         """
-        self._speeds.append(abs(speed))
+        # Cap instantaneous speed to avoid single-tick spikes (e.g. 107 pts/s
+        # from a momentary BTC quote jump) from dominating the RMS window.
+        # A single tick contributes at most ACTIVE_SPEED_MIN * 3 to the buffer.
+        _speed_cap = self._active_speed * 3.0
+        self._speeds.append(min(abs(speed), _speed_cap))
         self._stales.append(latency_ms)
 
         if len(self._speeds) < max(5, self._window // 4):
