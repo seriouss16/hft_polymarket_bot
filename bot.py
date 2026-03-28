@@ -288,6 +288,28 @@ def _setup_logging() -> None:
 
 _setup_logging()
 
+
+def _conditional_token_for_position_side(
+    position_side: str | None,
+    token_up_id: str | None,
+    token_down_id: str | None,
+) -> str | None:
+    """Return CLOB conditional token id for an open position.
+
+    ``PnLTracker.position_side`` uses \"UP\"/\"DOWN\"; the engine may emit
+    ``BUY_UP``/``BUY_DOWN``. All of these must map to the correct outcome token.
+    """
+    if position_side in ("BUY_UP", "UP", None):
+        return token_up_id
+    if position_side in ("BUY_DOWN", "DOWN"):
+        return token_down_id or token_up_id
+    logging.warning(
+        "[LIVE] Unrecognized position side %r — using UP token.",
+        position_side,
+    )
+    return token_up_id
+
+
 async def main():
     if _UVLOOP_ACTIVE:
         logging.info("asyncio: uvloop event loop policy active")
@@ -866,9 +888,8 @@ async def main():
                         # TREND_FLIP_EXIT changes decision["side"] to the new direction,
                         # which would select the wrong token and cause phantom close.
                         _close_side = pnl.position_side or decision.get("side")
-                        _close_tid = (
-                            token_up_id if _close_side in ("BUY_UP", None)
-                            else (token_down_id or token_up_id)
+                        _close_tid = _conditional_token_for_position_side(
+                            _close_side, token_up_id, token_down_id
                         )
                         logging.info(
                             "[LIVE] CLOSE routing: side=%s token=%s (up=%s down=%s)",
@@ -1108,9 +1129,8 @@ async def main():
             )
             try:
                 _exit_side_name = pnl.position_side or "BUY_UP"
-                _exit_tid = (
-                    token_up_id if _exit_side_name in ("BUY_UP", None)
-                    else (token_down_id or token_up_id)
+                _exit_tid = _conditional_token_for_position_side(
+                    _exit_side_name, token_up_id, token_down_id
                 )
                 await live_exec.emergency_exit(_exit_tid, pnl.inventory)
                 await asyncio.sleep(2.0)
