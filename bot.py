@@ -71,6 +71,7 @@ from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.risk_engine import RiskEngine
 from core.session_profile import apply_profile, maybe_switch_profile
+from core.market_regime import MarketRegimeDetector
 from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
@@ -319,6 +320,7 @@ async def main():
     aggregator = FastPriceAggregator()
     pnl = PnLTracker(live_mode=LIVE_MODE)
     stats = StatsCollector(pnl)
+    regime_detector = MarketRegimeDetector()
     strategy_hub = StrategyHub()
     strategy_hub.register(LatencyArbitrageStrategy(pnl, is_test_mode=TEST_MODE))
     if os.getenv("HFT_ENABLE_PHASE_ROUTING", "0") == "1":
@@ -657,6 +659,19 @@ async def main():
                         float(_ft["poly_age_ms"]),
                     )
                     last_skew_warn_time = now
+                # Feed regime detector with current speed and latency.
+                _trend_now = strategy_hub.get_trend_state()
+                _regime_changed = regime_detector.update(
+                    speed=float(_trend_now.get("speed", 0.0)),
+                    latency_ms=latency_ms,
+                )
+                if _regime_changed:
+                    logging.info(
+                        "🔄 [REGIME] Market regime → %s | Reloading profile params.",
+                        regime_detector.get_regime(),
+                    )
+                    strategy_hub.reload_profile_params()
+
                 mark_px = mark_price_for_side(poly_book.book, pnl.position_side)
                 if pnl.inventory > 0 and mark_px > 0.0:
                     equity = pnl.balance + (pnl.inventory * mark_px)
@@ -741,6 +756,7 @@ async def main():
                         f"poly {float(_ft['poly_age_ms']):.0f} "
                         f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
+                        f"Regime: {regime_detector.get_regime()} | "
                         f"Forecast: {forecast:.2f}{profile_suffix}",
                     )
                     last_pulse_time = now
