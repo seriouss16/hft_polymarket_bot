@@ -636,10 +636,13 @@ class LiveExecutionEngine:
             # Historic aliases still accepted: "filled", "order_status_matched".
             if status_str in ("matched", "filled"):
                 tracked.status = OrderStatus.FILLED
-                tracked.filled_size = tracked.size
+                if clob_filled > 0:
+                    tracked.filled_size = min(tracked.size, clob_filled)
+                else:
+                    tracked.filled_size = tracked.size
                 logging.info(
                     "✅ Order filled: id=%s %s %.2f @ %.4f",
-                    tracked.order_id, tracked.side, tracked.size, tracked.price,
+                    tracked.order_id, tracked.side, tracked.filled_size, tracked.price,
                 )
                 break
 
@@ -948,6 +951,15 @@ class LiveExecutionEngine:
             for o in self._active_orders.values()
         )
 
+    def has_pending_sell(self, token_id: str) -> bool:
+        """Return True when a non-terminal SELL order is still tracked for token_id."""
+        return any(
+            o.token_id == token_id
+            and o.side == SELL_SIDE
+            and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
+            for o in self._active_orders.values()
+        )
+
     async def wait_for_buy_fill(self, token_id: str, timeout_sec: float = 5.0) -> float:
         """Wait until all pending BUY orders for token_id reach a terminal state.
 
@@ -984,14 +996,58 @@ class LiveExecutionEngine:
         )
         self._last_skip_stats_log_ts = now
 
+    async def _maybe_warn_or_fak_chain_remainder(
+        self,
+        token_id: str,
+        requested_size: float,
+        total_filled: float,
+        avg_price: float,
+    ) -> tuple[float, float]:
+        """Compare on-chain balance to CLOB fill; warn or optionally FAK the gap."""
+        delay = float(os.getenv("LIVE_POST_SELL_CHAIN_DELAY_SEC", "0.5"))
+        if delay > 0:
+            await asyncio.sleep(delay)
+        bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+        dust = float(os.getenv("LIVE_SELL_CHAIN_DUST_SHARES", "0.03"))
+        gap = max(0.0, requested_size - total_filled)
+        if bal is None or bal <= dust:
+            return (total_filled, avg_price)
+        if gap <= dust and bal < 0.08:
+            return (total_filled, avg_price)
+        if gap > dust and os.getenv("LIVE_CHAIN_SELL_REMAINDER", "0") == "1":
+            fak_sz = min(bal, gap)
+            fak_filled, fak_px = await asyncio.to_thread(self._place_fak_sell, token_id, fak_sz)
+            if fak_filled > 0:
+                denom = total_filled + fak_filled
+                new_avg = (total_filled * avg_price + fak_filled * fak_px) / denom
+                logging.info(
+                    "🔴 [LIVE] Chain gap FAK: +%.4f @ %.4f (total %.4f) token=%s",
+                    fak_filled,
+                    fak_px,
+                    denom,
+                    token_id[:20],
+                )
+                return (denom, new_avg)
+        logging.warning(
+            "⚠️ [LIVE] On-chain balance %.4f shares after SELL (filled %.4f / req %.4f). "
+            "Set LIVE_CHAIN_SELL_REMAINDER=1 to auto-FAK the gap.",
+            bal,
+            total_filled,
+            requested_size,
+        )
+        return (total_filled, avg_price)
+
     async def close_position(self, token_id: str, size: float) -> tuple[float, float]:
         """Sell all ``size`` shares and return (total_filled_shares, avg_price).
 
-        - size >= POLY_CLOB_MIN_SHARES: GTC limit just above bid; _poll_order handles
-          partial fills and reprices.  Sub-minimum remainder uses FAK automatically.
+        - size >= POLY_CLOB_MIN_SHARES: GTC limit just above bid; the fill is always
+          verified via ``_poll_order`` (even when post_order reports immediate match)
+          so ``size_matched`` from the CLOB is trusted instead of assuming full size.
         - size < POLY_CLOB_MIN_SHARES: FAK market SELL immediately — CLOB rejects
           GTC below the minimum.
         - GTC placement failure: FAK fallback then emergency_exit.
+        - After a successful fill, optionally compares on-chain balance to the
+          request (see ``LIVE_CHAIN_SELL_REMAINDER`` and ``_maybe_warn_or_fak_chain_remainder``).
 
         Blocks until a terminal state and returns (0.0, 0.0) on total failure.
         """
@@ -1065,21 +1121,24 @@ class LiveExecutionEngine:
             side=SELL_SIDE,
             price=price,
             size=size,
-            status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
-            filled_size=size if immediate else 0.0,
+            status=OrderStatus.PENDING,
+            filled_size=0.0,
         )
         self._active_orders[order_id] = tracked
         logging.info(
-            "🔴 [LIVE] SELL placed: %.4f @ %.4f id=%s immediate=%s token=%s",
+            "🔴 [LIVE] SELL placed: %.4f @ %.4f id=%s immediate=%s token=%s — polling fill",
             size, price, order_id[:20], immediate, token_id[:20],
         )
-        if not immediate:
-            await self._poll_order(tracked)
+        await self._poll_order(tracked)
 
         total_filled = tracked.filled_size if tracked.filled_size > 0 else (
             tracked.size if tracked.status == OrderStatus.FILLED else 0.0
         )
         avg_price = tracked.price
+        if total_filled > 0 and not self.test_mode:
+            total_filled, avg_price = await self._maybe_warn_or_fak_chain_remainder(
+                token_id, size, total_filled, avg_price
+            )
         if total_filled > 0:
             logging.info(
                 "🔴 [LIVE] SELL confirmed: filled=%.4f / %.4f @ %.4f token=%s",

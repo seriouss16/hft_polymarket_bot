@@ -436,12 +436,20 @@ class TestClosePosition:
             gtc_calls.append((side, size))
             return "sell-id", True
 
+        async def fake_poll(tracked):
+            """Simulate CLOB confirming the full SELL after placement."""
+            tracked.status = OrderStatus.FILLED
+            tracked.filled_size = tracked.size
+            eng._active_orders.pop(tracked.order_id, None)
+
         with patch.object(eng, "get_best_prices", return_value=(0.60, 0.65)):
             with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
-                filled, price = await eng.close_position(TOKEN, 6.0)
+                with patch.object(eng, "_poll_order", side_effect=fake_poll):
+                    filled, price = await eng.close_position(TOKEN, 6.0)
 
         assert len(gtc_calls) == 1
         assert gtc_calls[0][0] == SELL_SIDE
+        assert filled == pytest.approx(6.0)
 
     async def test_gtc_failure_falls_back_to_fak(self, monkeypatch):
         """If GTC placement fails, close_position should fall back to FAK."""
