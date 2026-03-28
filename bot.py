@@ -517,6 +517,13 @@ async def main():
                         token_up_id = up_id
                         token_down_id = down_id
                         strategy_hub.reset_for_new_market()
+                        # Reset orderbook cache to avoid stale data from previous market
+                        if poly_book and hasattr(poly_book, 'book'):
+                            poly_book.book.clear()
+                            poly_book.book["bid"] = 0.0
+                            poly_book.book["ask"] = 1.0
+                            poly_book.book["down_bid"] = 1.0
+                            poly_book.book["down_ask"] = 0.0
                         if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET", "0") == "1":
                             pnl.reset_strategy_performance()
                         if poly_connect_task is not None and not poly_connect_task.done():
@@ -629,6 +636,10 @@ async def main():
                             poly_book.book["ask"] = up_ask
                             poly_book.book["bid_size_top"] = float(ob_up.get("bid_size_top", poly_book.book.get("bid_size_top", 1.0)))
                             poly_book.book["ask_size_top"] = float(ob_up.get("ask_size_top", poly_book.book.get("ask_size_top", 1.0)))
+                        else:
+                            # Reset stale UP data to force complement calculation
+                            poly_book.book.pop("bid", None)
+                            poly_book.book.pop("ask", None)
                         if down_valid:
                             poly_book.book["down_bid"] = down_bid
                             poly_book.book["down_ask"] = down_ask
@@ -639,6 +650,10 @@ async def main():
                                 poly_book.book["down_ask_size_top"] = float(
                                     ob_down.get("ask_size_top", 0.0)
                                 )
+                        else:
+                            # Reset stale DOWN data to force complement calculation
+                            poly_book.book.pop("down_bid", None)
+                            poly_book.book.pop("down_ask", None)
                     except Exception as exc:
                         logging.warning("CLOB book pull failed: %s", exc)
                     last_book_pull_time = now
@@ -782,9 +797,27 @@ async def main():
                     up_ask = float(poly_book.book.get("ask", 0.0))
                     d_bid = float(poly_book.book.get("down_bid", 0.0))
                     d_ask = float(poly_book.book.get("down_ask", 0.0))
-                    if not (0.0 < d_bid < d_ask <= 1.0):
-                        d_bid = max(0.01, min(0.99, 1.0 - up_ask))
-                        d_ask = max(0.01, min(0.99, 1.0 - up_bid))
+                    # Validate UP+DOWN ≈ 1.0 (binary market constraint). If mismatch, use complement.
+                    _up_mid = (up_bid + up_ask) / 2.0 if (0.0 < up_bid < up_ask <= 1.0) else 0.5
+                    _down_mid = (d_bid + d_ask) / 2.0 if (0.0 < d_bid < d_ask <= 1.0) else 0.5
+                    _sum_mid = _up_mid + _down_mid
+                    if abs(_sum_mid - 1.0) > 0.05:  # More than 5c deviation = stale/wrong data
+                        logging.warning(
+                            "Book mismatch: UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f, using complement",
+                            up_bid, up_ask, d_bid, d_ask, _sum_mid,
+                        )
+                        if 0.0 < up_bid < up_ask <= 1.0:
+                            # UP looks valid, derive DOWN from it
+                            d_bid = max(0.01, min(0.99, 1.0 - up_ask))
+                            d_ask = max(0.01, min(0.99, 1.0 - up_bid))
+                        elif 0.0 < d_bid < d_ask <= 1.0:
+                            # DOWN looks valid, derive UP from it
+                            up_bid = max(0.01, min(0.99, 1.0 - d_ask))
+                            up_ask = max(0.01, min(0.99, 1.0 - d_bid))
+                        else:
+                            # Neither valid, use fallback
+                            d_bid = max(0.01, min(0.99, 1.0 - up_ask))
+                            d_ask = max(0.01, min(0.99, 1.0 - up_bid))
                     if trend["trend"] == "UP":
                         book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f}"
                     elif trend["trend"] == "DOWN":
