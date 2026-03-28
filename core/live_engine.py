@@ -405,14 +405,14 @@ class LiveExecutionEngine:
     def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
         """Return top-N orderbook metrics for imbalance and pressure.
 
-        Retries the SDK call on transient errors, then falls back to the public
-        HTTP book endpoint so the bot can keep a coherent snapshot without spamming
-        warnings on every tick.
+        Retries the SDK call on transient errors without blocking sleeps between
+        attempts (avoids holding asyncio thread-pool workers), then falls back
+        to the public HTTP book endpoint so the bot can keep a coherent snapshot
+        without spamming warnings on every tick.
         """
         if self.client is None:
             return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
         max_attempts = max(1, int(os.getenv("CLOB_ORDERBOOK_RETRIES", "3")))
-        backoff = float(os.getenv("CLOB_ORDERBOOK_RETRY_BACKOFF_SEC", "0.07"))
         last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
@@ -422,8 +422,6 @@ class LiveExecutionEngine:
                 return _snapshot_from_levels(bid_levels, ask_levels, depth)
             except Exception as exc:
                 last_exc = exc
-                if attempt + 1 < max_attempts:
-                    time.sleep(backoff * (2**attempt))
         snap = self._orderbook_snapshot_http(token_id, depth, log_errors=False)
         if last_exc is not None:
             logging.debug(
