@@ -433,6 +433,10 @@ async def main():
     last_slot_ts: int | None = None
     last_skew_warn_time = 0.0
     last_high_latency_warn_time = 0.0
+    # BTC Chainlink price recorded at the moment the slot opens.
+    # The market resolves "Up" if BTC-end >= BTC-start, so this price acts as
+    # the natural target/anchor for trader position bias within the slot.
+    slot_anchor_price: float = 0.0
 
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
     if ENABLE_LSTM:
@@ -497,7 +501,18 @@ async def main():
                             up_id[:16], (down_id or "")[:16],
                         )
                     else:
-                        logging.info(f"🎯 Смена рынка: {question}")
+                        _anchor_now = float(
+                            poly_book.book.get("btc_oracle")
+                            or poly_book.book.get("mid")
+                            or 0.0
+                        ) if poly_book is not None else 0.0
+                        if _anchor_now > 0.0:
+                            slot_anchor_price = _anchor_now
+                        logging.info(
+                            "🎯 Смена рынка: %s | anchor=%.2f",
+                            question,
+                            slot_anchor_price,
+                        )
                         token_up_id = up_id
                         token_down_id = down_id
                         strategy_hub.reset_for_new_market()
@@ -705,6 +720,7 @@ async def main():
                     meta_enabled=(trade_allowed or BYPASS_META_GATE) and not _skip_cooldown_active,
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                     skew_ms=skew_ms,
+                    slot_anchor_price=slot_anchor_price,
                 )
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
@@ -767,6 +783,7 @@ async def main():
                         f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Regime: {regime_detector.get_regime()} | "
+                        f"Anchor: {slot_anchor_price:.2f} Δ={fast_price - slot_anchor_price:+.2f} | "
                         f"Forecast: {forecast:.2f}{profile_suffix}",
                     )
                     last_pulse_time = now
