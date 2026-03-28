@@ -1982,9 +1982,11 @@ class HFTEngine:
                     self._diag_inc("exit_reason_reaction_tp")
                 _trail_info = ""
                 if self.trailing_tp_enabled or self.trailing_sl_enabled:
+                    _sf = self._trailing_sl_floor
+                    _sl_floor_s = f"{_sf:.4f}" if _sf is not None else "None"
                     _trail_info = (
                         f" peak_pnl={self._peak_unrealized:+.4f}"
-                        f" sl_floor={self._trailing_sl_floor}"
+                        f" sl_floor={_sl_floor_s}"
                     )
                 logging.info(
                     "📌 Exit reason=%s hold=%.1fs poly_move=%.4f side_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "

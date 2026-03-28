@@ -38,9 +38,16 @@ _NIGHT: dict[str, str] = {
     "HFT_ENTRY_UP_SPEED_MIN": "0.0",
     "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
     "HFT_SPEED_FLOOR": "0.0",
-    # Poly WS is sparse: allow up to 3 s staleness before blocking entries.
-    "HFT_ENTRY_MAX_LATENCY_MS": "3000.0",
+    # Poly WS is sparse: allow ~3.8 s staleness before blocking entries (logs showed
+    # 3.0–3.5 s spikes around slot changes).
+    "HFT_ENTRY_MAX_LATENCY_MS": "3800.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2500.0",
+    # Cross-feed skew is recv-order noise, not true clock skew; 0 ms blocks almost
+    # all entries when CB and Poly WS drift. Night uses a wide tolerance.
+    "HFT_ENTRY_MAX_SKEW_MS": "2000.0",
+    # Allow 5c asks when the book pins cheap contracts (0.08 blocked valid signals).
+    "HFT_ENTRY_MIN_ASK_UP": "0.05",
+    "HFT_ENTRY_MIN_ASK_DOWN": "0.05",
     # Z-score is meaningless at near-zero speed.
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
