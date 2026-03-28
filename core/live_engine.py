@@ -1108,6 +1108,10 @@ class LiveExecutionEngine:
         - GTC placement failure: FAK fallback then emergency_exit.
         - After a successful fill, optionally compares on-chain balance to the
           request (see ``LIVE_CHAIN_SELL_REMAINDER`` and ``_maybe_warn_or_fak_chain_remainder``).
+        - Set ``LIVE_SKIP_PRESELL_BALANCE=1`` to skip the pre-SELL balance query
+          when CLOB fill tracking is trusted (lower latency).
+        - When pre-SELL balance is fetched, best bid is loaded in parallel with
+          that call to save one sequential HTTP round-trip before GTC placement.
 
         Blocks until a terminal state and returns (0.0, 0.0) on total failure.
         """
@@ -1139,8 +1143,12 @@ class LiveExecutionEngine:
         # Set LIVE_SKIP_PRESELL_BALANCE=1 to skip this round-trip when fill size is
         # trusted from CLOB polling (faster exit).
         actual_bal: float | None = None
+        bb_pre: float | None = None
         if not skip_presell:
-            actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            actual_bal, (bb_pre, _) = await asyncio.gather(
+                asyncio.to_thread(self.fetch_conditional_balance, token_id),
+                asyncio.to_thread(self.get_best_prices, token_id),
+            )
         if actual_bal is not None and actual_bal > 0 and actual_bal < size:
             if actual_bal < poly_min and size >= poly_min:
                 logging.warning(
@@ -1187,7 +1195,10 @@ class LiveExecutionEngine:
             logging.error("🛑 [LIVE] FAK SELL failed: size=%.2f token=%s.", size, token_id[:20])
             return (0.0, 0.0)
 
-        best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
+        if bb_pre is not None:
+            best_bid = bb_pre
+        else:
+            best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.002))
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, SELL_SIDE, price, size
@@ -1246,6 +1257,9 @@ class LiveExecutionEngine:
         token_id: str,
         order_size: float | None = None,
         budget_usd: float | None = None,
+        *,
+        best_bid: float | None = None,
+        best_ask: float | None = None,
     ) -> tuple[float, float]:
         """Place a limit BUY, wait for CLOB confirmation, return (filled_shares, avg_price).
 
@@ -1261,10 +1275,21 @@ class LiveExecutionEngine:
         The resulting shares are clamped to the Polymarket CLOB minimum
         (POLY_CLOB_MIN_SHARES, default 5).  An insufficient budget causes a
         logged skip rather than an invalid order.
+
+        Optional ``best_bid`` and ``best_ask`` skip a CLOB book HTTP round-trip when
+        the caller already has a fresh top-of-book (e.g. from the strategy tick).
         """
         _SKIP = (0.0, 0.0)
         self._entry_stats["attempts"] += 1
-        best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        if (
+            best_bid is not None
+            and best_ask is not None
+            and best_ask > 0.0
+            and best_bid >= 0.0
+        ):
+            best_bid, best_ask = float(best_bid), float(best_ask)
+        else:
+            best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
 
         if best_ask <= self.min_entry_ask or best_ask >= self.max_entry_ask:
             self._entry_stats["skip_ask_cap"] += 1
