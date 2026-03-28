@@ -12,8 +12,9 @@ from enum import Enum
 import requests
 
 CLOB_BOOK_HTTP = "https://clob.polymarket.com/book"
+_CLOB_BOOK_HTTP_TIMEOUT = float(os.getenv("LIVE_CLOB_BOOK_HTTP_TIMEOUT", "1.5"))
 
-_ORDER_FILL_POLL_SEC = float(os.getenv("LIVE_ORDER_FILL_POLL_SEC", "0.4"))
+_ORDER_FILL_POLL_SEC = float(os.getenv("LIVE_ORDER_FILL_POLL_SEC", "0.15"))
 _ORDER_STALE_SEC = float(os.getenv("LIVE_ORDER_STALE_SEC", "3.0"))
 _ORDER_MAX_REPRICE = int(os.getenv("LIVE_ORDER_MAX_REPRICE", "2"))
 _ORDER_EMERGENCY_TICKS = int(os.getenv("LIVE_ORDER_EMERGENCY_TICKS", "3"))
@@ -153,7 +154,7 @@ class LiveExecutionEngine:
 
     Order lifecycle:
       1. execute() / close_position() places a GTC limit and tracks it as PENDING.
-      2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC seconds.
+      2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC seconds (default 0.15).
       3. If unfilled after LIVE_ORDER_STALE_SEC the order is repriced up to
          LIVE_ORDER_MAX_REPRICE times toward best market price.  For BUY, if
          LIVE_MAX_BUY_REPRICE_SLIPPAGE is set and the new limit would exceed that
@@ -382,7 +383,11 @@ class LiveExecutionEngine:
             "pressure": 0.0,
         }
         try:
-            resp = self._http.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=8)
+            resp = self._http.get(
+                CLOB_BOOK_HTTP,
+                params={"token_id": token_id},
+                timeout=_CLOB_BOOK_HTTP_TIMEOUT,
+            )
             resp.raise_for_status()
             data = resp.json()
             bid_levels = _levels_from_book_rows(data.get("bids"))
@@ -1369,7 +1374,7 @@ class LiveExecutionEngine:
         # has not settled yet and we continue polling rather than treating
         # the tiny value as the real post-fee balance.
         _bal_min_frac = float(os.getenv("LIVE_BALANCE_MIN_FRAC", "0.10"))
-        _bal_delays = [0.3, 0.6, 1.0, 1.5, 2.0, 2.5]  # cumulative ~8.4 s max wait
+        _bal_delays = [0.0, 0.15, 0.35, 0.6, 1.0, 1.5]
         actual_bal: float | None = None
         for _i, _delay in enumerate(_bal_delays):
             await asyncio.sleep(_delay)
