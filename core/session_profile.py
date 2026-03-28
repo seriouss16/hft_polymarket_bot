@@ -169,11 +169,20 @@ def _is_night_hour(h: int) -> bool:
 
 
 def current_profile_name() -> str:
-    """Return 'night' or 'day' based on UTC weekday and hour.
+    """Return 'night' or 'day' for the active session profile.
 
-    Weekends (Sat/Sun UTC) are treated as NIGHT for the entire 24 h period
-    because crypto markets are quietest then and exchanges are less active.
+    Manual override via .env (evaluated each call so hot-edits work):
+      DAY_MODE=1  NIGHT_MODE=0  → forced DAY, no auto-switching.
+      DAY_MODE=0  NIGHT_MODE=1  → forced NIGHT, no auto-switching.
+      DAY_MODE=0  NIGHT_MODE=0  → automatic (UTC time + weekend logic).
+      DAY_MODE=1  NIGHT_MODE=1  → automatic (both set = no override).
     """
+    day_mode = os.getenv("DAY_MODE", "0").strip()
+    night_mode = os.getenv("NIGHT_MODE", "0").strip()
+    if day_mode == "1" and night_mode != "1":
+        return "day"
+    if night_mode == "1" and day_mode != "1":
+        return "night"
     if _is_weekend():
         return "night"
     return "night" if _is_night_hour(_utc_hour()) else "day"
@@ -219,7 +228,10 @@ def apply_profile(force: bool = False) -> str:
         return name
     profile_dict = _PROFILE_MAP[name]
     _apply(profile_dict, name)
-    label = "WEEKEND " if _is_weekend() else ""
+    day_mode = os.getenv("DAY_MODE", "0").strip()
+    night_mode = os.getenv("NIGHT_MODE", "0").strip()
+    forced = (day_mode == "1") != (night_mode == "1")
+    label = "[FORCED] " if forced else ("WEEKEND " if _is_weekend() else "")
     logging.info(
         "%s %sNIGHT mode. %s" if name == "night" else "%s %sDAY mode. %s",
         _PROFILE_EMOJI[name],
