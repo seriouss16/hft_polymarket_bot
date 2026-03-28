@@ -1078,9 +1078,31 @@ async def main():
                                     token_up_id if _open_signal == "BUY_UP"
                                     else (token_down_id or token_up_id)
                                 )
+                                _live_bb = 0.0
+                                _live_ba = 0.0
+                                if poly_book is not None and hasattr(poly_book, "book"):
+                                    if _open_signal == "BUY_UP":
+                                        _live_bb = float(poly_book.book.get("bid", 0.0) or 0.0)
+                                        _live_ba = float(poly_book.book.get("ask", 0.0) or 0.0)
+                                    else:
+                                        _live_bb = float(
+                                            poly_book.book.get("down_bid", 0.0) or 0.0
+                                        )
+                                        _live_ba = float(
+                                            poly_book.book.get("down_ask", 0.0) or 0.0
+                                        )
+                                _exec_kw = {}
+                                if _live_bb > 0.0 and _live_ba > 0.0:
+                                    _exec_kw = {
+                                        "best_bid": _live_bb,
+                                        "best_ask": _live_ba,
+                                    }
                                 # Blocks until CLOB confirms fill or timeout.
                                 _filled_sh, _filled_px = await live_exec.execute(
-                                    _open_signal, _live_tid, budget_usd=_cost_usd
+                                    _open_signal,
+                                    _live_tid,
+                                    budget_usd=_cost_usd,
+                                    **_exec_kw,
                                 )
                                 if _filled_sh > 0:
                                     # Record confirmed CLOB fill into PnL tracker.

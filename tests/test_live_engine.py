@@ -510,6 +510,32 @@ class TestClosePosition:
         assert filled == pytest.approx(0.0)
         assert price == pytest.approx(0.0)
 
+    async def test_close_uses_confirmed_buy_fill_not_caller_size(self, monkeypatch):
+        """close_position must place SELL for _confirmed_buys fill when caller differs."""
+        monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
+        eng = make_engine(monkeypatch)
+        eng._confirmed_buys[TOKEN] = 6.15
+
+        gtc_calls: list = []
+
+        def fake_place(token_id, side, price, size):
+            gtc_calls.append(size)
+            return "sell-id", True
+
+        async def fake_poll(tracked):
+            tracked.status = OrderStatus.FILLED
+            tracked.filled_size = tracked.size
+            eng._active_orders.pop(tracked.order_id, None)
+
+        with patch.object(eng, "get_best_prices", return_value=(0.60, 0.65)):
+            with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
+                with patch.object(eng, "_poll_order", side_effect=fake_poll):
+                    filled, price = await eng.close_position(TOKEN, 7.4)
+
+        assert len(gtc_calls) == 1
+        assert gtc_calls[0] == pytest.approx(6.15)
+        assert filled == pytest.approx(6.15)
+
 
 # ---------------------------------------------------------------------------
 # execute() — skip conditions
@@ -580,6 +606,33 @@ class TestExecuteSuccess:
             with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
                 filled, avg_price = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
 
+        assert filled > 0
+        assert avg_price > 0
+
+    async def test_cached_top_of_book_skips_get_best_prices(self, monkeypatch):
+        """Passing best_bid/best_ask must not call get_best_prices."""
+        monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
+        eng = make_engine(monkeypatch)
+        http_calls: list = []
+
+        def fake_get_best(token_id):
+            http_calls.append(token_id)
+            return (0.48, 0.52)
+
+        def fake_place(token_id, side, price, size):
+            return "order-cached", True
+
+        with patch.object(eng, "get_best_prices", side_effect=fake_get_best):
+            with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
+                filled, avg_price = await eng.execute(
+                    "BUY_DOWN",
+                    TOKEN,
+                    budget_usd=10.0,
+                    best_bid=0.48,
+                    best_ask=0.52,
+                )
+
+        assert http_calls == []
         assert filled > 0
         assert avg_price > 0
 
