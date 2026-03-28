@@ -800,10 +800,10 @@ class LiveExecutionEngine:
         if order_id:
             tracked = TrackedOrder(
                 order_id=order_id,
-                token_id=token_id,
+            token_id=token_id,
                 side=side,
-                price=price,
-                size=size,
+            price=price,
+            size=size,
                 status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
                 filled_size=size if immediate else 0.0,
             )

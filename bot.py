@@ -419,6 +419,8 @@ async def main():
     poly_book = None
     last_stats_time = asyncio.get_event_loop().time()
     last_pulse_time = 0
+    _regime_last_price: float = 0.0
+    _regime_last_ts: float = 0.0
     # Timestamp until which live OPEN entries are suppressed after a live BUY skip.
     # Prevents the engine from accumulating phantom sim positions when the CLOB
     # rejects every entry due to insufficient balance for the minimum share count.
@@ -659,19 +661,26 @@ async def main():
                         float(_ft["poly_age_ms"]),
                     )
                     last_skew_warn_time = now
-                # Feed regime detector with current speed and latency.
-                _trend_now = strategy_hub.get_trend_state()
+                # Feed regime detector using raw fast-price velocity (pts/s)
+                # rather than edge_window speed which flips 0↔large every other tick.
+                _regime_dt = now - _regime_last_ts if _regime_last_ts > 0 else 1.0
+                _regime_speed = abs(fast_price - _regime_last_price) / max(_regime_dt, 0.05)
+                _regime_last_price = fast_price
+                _regime_last_ts = now
                 _regime_changed = regime_detector.update(
-                    speed=float(_trend_now.get("speed", 0.0)),
+                    speed=_regime_speed,
                     latency_ms=latency_ms,
                 )
                 if _regime_changed:
-                    logging.info(
-                        "🔄 [REGIME] %s | speed_rms=%.3f stale_median=%.0fms",
-                        regime_detector.get_regime(),
-                        regime_detector.state.speed_rms,
-                        regime_detector.state.stale_median_ms,
-                    )
+                    _regime_now = time.time()
+                    if _regime_now - regime_detector._last_log_ts >= regime_detector._log_min_sec:
+                        regime_detector._last_log_ts = _regime_now
+                        logging.info(
+                            "🔄 [REGIME] %s | speed_rms=%.3f stale_median=%.0fms",
+                            regime_detector.get_regime(),
+                            regime_detector.state.speed_rms,
+                            regime_detector.state.stale_median_ms,
+                        )
 
                 mark_px = mark_price_for_side(poly_book.book, pnl.position_side)
                 if pnl.inventory > 0 and mark_px > 0.0:

@@ -79,6 +79,9 @@ class PnLTracker:
         self.entry_price = 0.0
         self.entry_ts = 0
         self.position_side = None
+        # Actual USD debited from the account for the current open position
+        # (may differ from entry_price * inventory due to protocol fees at buy time).
+        self._buy_cost_usd: float = 0.0
 
         self.trades_count = 0
         self.wins = 0
@@ -120,6 +123,7 @@ class PnLTracker:
         self.entry_price = 0.0
         self.entry_ts = 0
         self.position_side = None
+        self._buy_cost_usd = 0.0
         logging.info(
             "[LIVE] Sim OPEN rolled back — live BUY skipped. Balance restored to %.4f USD.",
             self.balance,
@@ -157,6 +161,7 @@ class PnLTracker:
             self.entry_price = avg_price
             self.position_side = new_side
         self.balance -= amount_usd
+        self._buy_cost_usd += amount_usd
         self.entry_ts = time.time()
         _tag = f"{side} {strategy_name}".strip() if strategy_name else side
         logging.info(
@@ -181,7 +186,11 @@ class PnLTracker:
         proceeds = filled_shares * avg_price
         cost_basis = self.entry_price * filled_shares
         pnl = proceeds - cost_basis
+        # Net PnL accounts for the actual USD debited at buy time (includes
+        # protocol fee on BUY); cleaner than entry_price * shares.
+        net_pnl = proceeds - self._buy_cost_usd if self._buy_cost_usd > 0 else pnl
         self.balance += proceeds
+        self._buy_cost_usd = 0.0
         self.inventory = max(0.0, self.inventory - filled_shares)
         if self.inventory <= 0.0:
             self.inventory = 0.0
@@ -205,8 +214,8 @@ class PnLTracker:
         wr = self.wins / self.trades_count * 100 if self.trades_count else 0.0
         _tag = f"{strategy_name}".strip() if strategy_name else ""
         logging.info(
-            "🔴 [LIVE SELL%s] filled=%.4f sh @ avg %.4f | proceeds %.2f$ | PnL %+.2f$ | WR %.1f%%",
-            f" {_tag}" if _tag else "", filled_shares, avg_price, proceeds, pnl, wr,
+            "🔴 [LIVE SELL%s] filled=%.4f sh @ avg %.4f | proceeds %.2f$ | PnL %+.2f$ (net %+.2f$) | WR %.1f%%",
+            f" {_tag}" if _tag else "", filled_shares, avg_price, proceeds, pnl, net_pnl, wr,
         )
         return pnl
 
