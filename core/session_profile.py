@@ -1,19 +1,20 @@
-"""Session profile loader: applies day/night/weekend parameter overrides from env.
+"""Session profile loader: applies night/day parameter overrides from env.
 
-Five profiles based on UTC weekday + hour:
+Two profiles based on UTC weekday + hour:
 
-  Weekend (Sat/Sun UTC):
-    WEEKEND_NIGHT  — 23:00–06:00 UTC: very calm, sparse Poly WS, range-bound.
-    WEEKEND_DAY    — 06:00–23:00 UTC: still calm but more active range trading.
+  NIGHT — applied when any of the following is true:
+            • Weekday night: 23:00–06:00 UTC (Mon–Fri).
+            • Weekend (Sat/Sun): the entire 24 h period.
+          Low volatility, sparse Poly WS, range-bound BTC.
+          Relaxed latency gates, no speed requirement, short cooldown.
 
-  Weekday (Mon–Fri UTC):
-    WEEKDAY_NIGHT  — 23:00–06:00 UTC: calm, sparse WS, flat BTC.
-    WEEKDAY_DAWN   — 06:00–09:00 UTC: transitional, BTC waking up.
-    WEEKDAY_DAY    — 09:00–23:00 UTC: volatile, fast WS, trending moves.
+  DAY   — weekday daytime: 06:00–23:00 UTC (Mon–Fri only).
+          Higher volatility, fast WS, occasional directional momentum.
+          Tighter latency, optional z-score, slightly longer cooldown.
 
 Each profile overrides a subset of env-vars in-process via os.environ so that
-all downstream code reading from os.getenv() automatically picks up the new values.
-Call strategy_hub.reload_profile_params() after every profile switch to push
+all downstream code reading from os.getenv() automatically picks up the new
+values.  Call strategy_hub.reload_profile_params() after every switch to push
 the new values into running engine instances.
 """
 
@@ -26,110 +27,49 @@ from typing import Final
 
 NIGHT_START_UTC: Final[int] = int(os.getenv("HFT_NIGHT_START_UTC_HOUR", "23"))
 NIGHT_END_UTC: Final[int] = int(os.getenv("HFT_NIGHT_END_UTC_HOUR", "6"))
-DAWN_END_UTC: Final[int] = int(os.getenv("HFT_DAWN_END_UTC_HOUR", "9"))
 
 # ---------------------------------------------------------------------------
 # Profile parameter sets — keys must match HFTEngine.__init__ env reads.
 # Values must be strings (same format as env vars).
 # ---------------------------------------------------------------------------
 
-_WEEKEND_NIGHT: dict[str, str] = {
-    # Very calm: BTC barely moves at night on weekends.
+_NIGHT: dict[str, str] = {
+    # No speed requirement: BTC barely moves at night or on weekends.
     "HFT_ENTRY_UP_SPEED_MIN": "0.0",
     "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
     "HFT_SPEED_FLOOR": "0.0",
-    # Poly WS extremely sparse on weekend nights — allow up to 3 s staleness.
+    # Poly WS is sparse: allow up to 3 s staleness before blocking entries.
     "HFT_ENTRY_MAX_LATENCY_MS": "3000.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2500.0",
-    # Z-score is meaningless at zero speed.
+    # Z-score is meaningless at near-zero speed.
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
-    # Relax low-speed multiplier — entries need to fire at very low momentum.
+    # Very relaxed low-speed multiplier — entries must fire at minimal momentum.
     "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.2",
     "HFT_ENTRY_LOW_SPEED_ABS": "0.3",
-    # Tighter SL/TP for range: book ticks are huge but direction unclear.
+    # SL/TP tuned for range: hold short, exit on small reversal.
     "HFT_POLY_SL_MOVE": "0.0150",
     "HFT_POLY_TP_MOVE": "0.0040",
-    # Min hold: 3 s is enough for range ticks.
     "HFT_MIN_HOLD_SEC": "3.0",
-    # Loss cooldown: very short — range recovers fast.
+    # Very short cooldown — range recovers fast after a loss.
     "LOSS_COOLDOWN_SEC": "3",
 }
 
-_WEEKEND_DAY: dict[str, str] = {
-    # Weekend day: still range-bound but more active (log showed +54% in 18 min).
-    # 97% speed=0 ticks — never require directional speed.
-    "HFT_ENTRY_UP_SPEED_MIN": "0.0",
-    "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
-    "HFT_SPEED_FLOOR": "0.0",
-    # Poly WS somewhat better during day but still 1-2 s stale.
-    "HFT_ENTRY_MAX_LATENCY_MS": "2500.0",
-    "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2000.0",
-    # Z-score: disabled — chaotic at zero speed.
-    "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
-    "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
-    # Low speed multiplier: very relaxed for range.
-    "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.1",
-    "HFT_ENTRY_LOW_SPEED_ABS": "0.3",
-    # Wider SL for large tick jumps (0.39→0.95 in log), TP tuned for range.
-    "HFT_POLY_SL_MOVE": "0.0120",
-    "HFT_POLY_TP_MOVE": "0.0035",
-    "HFT_MIN_HOLD_SEC": "3.0",
-    # Very short cooldown — range markets recover quickly after a loss.
-    "LOSS_COOLDOWN_SEC": "3",
-}
-
-_WEEKDAY_NIGHT: dict[str, str] = {
-    # Weekday night: calm BTC, sparse WS updates, zero speed.
-    "HFT_ENTRY_UP_SPEED_MIN": "0.0",
-    "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
-    "HFT_SPEED_FLOOR": "0.0",
-    "HFT_ENTRY_MAX_LATENCY_MS": "2500.0",
-    "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2000.0",
-    "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
-    "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
-    "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.5",
-    "HFT_ENTRY_LOW_SPEED_ABS": "0.5",
-    "HFT_POLY_SL_MOVE": "0.0100",
-    "HFT_POLY_TP_MOVE": "0.0030",
-    "HFT_MIN_HOLD_SEC": "3.0",
-    "LOSS_COOLDOWN_SEC": "5",
-}
-
-_WEEKDAY_DAWN: dict[str, str] = {
-    # Weekday dawn: BTC waking up, speed occasionally present but often zero.
-    "HFT_ENTRY_UP_SPEED_MIN": "0.0",
-    "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
-    "HFT_SPEED_FLOOR": "0.0",
-    # Slightly tighter than night — WS getting better.
-    "HFT_ENTRY_MAX_LATENCY_MS": "2000.0",
-    "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "1500.0",
-    # Z-score still chaotic in early morning.
-    "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
-    "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
-    "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.5",
-    "HFT_ENTRY_LOW_SPEED_ABS": "0.5",
-    "HFT_POLY_SL_MOVE": "0.0100",
-    "HFT_POLY_TP_MOVE": "0.0030",
-    "HFT_MIN_HOLD_SEC": "3.0",
-    "LOSS_COOLDOWN_SEC": "5",
-}
-
-_WEEKDAY_DAY: dict[str, str] = {
-    # Weekday day: volatile BTC, fast WS, trending moves.
+_DAY: dict[str, str] = {
+    # Weekday day: BTC shows occasional directional momentum.
     "HFT_ENTRY_UP_SPEED_MIN": "2.0",
     "HFT_ENTRY_DOWN_SPEED_MAX": "-2.0",
     "HFT_SPEED_FLOOR": "0.02",
-    # Fast WS → tight staleness gate.
+    # Tighter staleness gate — Poly WS is fast during business hours.
     "HFT_ENTRY_MAX_LATENCY_MS": "1350.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "800.0",
-    # Z-score trends well with volatility.
+    # Z-score trends well with intraday volatility.
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "1",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "2",
-    # Strong low-speed protection against choppy micro-sessions.
+    # Stronger low-speed protection against choppy micro-sessions.
     "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "2.0",
     "HFT_ENTRY_LOW_SPEED_ABS": "1.0",
-    # Tighter SL/TP: trending markets have clear direction, use momentum.
+    # SL/TP: trending direction gives clear signals.
     "HFT_POLY_SL_MOVE": "0.0100",
     "HFT_POLY_TP_MOVE": "0.0030",
     "HFT_MIN_HOLD_SEC": "3.0",
@@ -145,7 +85,7 @@ def _utc_now() -> datetime:
 
 
 def _utc_hour() -> int:
-    """Return current UTC hour (0-23)."""
+    """Return current UTC hour (0–23)."""
     return _utc_now().hour
 
 
@@ -155,31 +95,21 @@ def _is_weekend() -> bool:
 
 
 def _is_night_hour(h: int) -> bool:
-    """Return True if h falls in the night window (wraps midnight)."""
+    """Return True if h falls inside the night window (wraps past midnight)."""
     if NIGHT_START_UTC < NIGHT_END_UTC:
         return NIGHT_START_UTC <= h < NIGHT_END_UTC
     return h >= NIGHT_START_UTC or h < NIGHT_END_UTC
 
 
 def current_profile_name() -> str:
-    """Return the active profile name based on UTC weekday and hour.
+    """Return 'night' or 'day' based on UTC weekday and hour.
 
-    Returns one of: 'weekend_night', 'weekend_day',
-                    'weekday_night', 'weekday_dawn', 'weekday_day'.
+    Weekends (Sat/Sun UTC) are treated as NIGHT for the entire 24 h period
+    because crypto markets are quietest then and exchanges are less active.
     """
-    h = _utc_hour()
-    weekend = _is_weekend()
-    night = _is_night_hour(h)
-
-    if weekend:
-        return "weekend_night" if night else "weekend_day"
-
-    # Weekday branches.
-    if night:
-        return "weekday_night"
-    if NIGHT_END_UTC <= h < DAWN_END_UTC:
-        return "weekday_dawn"
-    return "weekday_day"
+    if _is_weekend():
+        return "night"
+    return "night" if _is_night_hour(_utc_hour()) else "day"
 
 
 def _apply(profile: dict[str, str], name: str) -> None:
@@ -195,20 +125,19 @@ def _apply(profile: dict[str, str], name: str) -> None:
         logging.debug("  [SESSION] %s=%s", key, val)
 
 
-_PROFILE_MAP: dict[str, tuple[dict[str, str], str]] = {
-    "weekend_night": (_WEEKEND_NIGHT, "🌙🏖️  WEEKEND NIGHT"),
-    "weekend_day":   (_WEEKEND_DAY,   "☀️🏖️  WEEKEND DAY"),
-    "weekday_night": (_WEEKDAY_NIGHT, "🌙     WEEKDAY NIGHT"),
-    "weekday_dawn":  (_WEEKDAY_DAWN,  "🌅     WEEKDAY DAWN"),
-    "weekday_day":   (_WEEKDAY_DAY,   "☀️      WEEKDAY DAY"),
+_PROFILE_MAP: dict[str, dict[str, str]] = {
+    "night": _NIGHT,
+    "day": _DAY,
+}
+
+_PROFILE_EMOJI: dict[str, str] = {
+    "night": "🌙",
+    "day": "☀️",
 }
 
 _PROFILE_DESC: dict[str, str] = {
-    "weekend_night": "speed=0 SL=1.5% TP=0.4% latency=3000ms cooldown=3s",
-    "weekend_day":   "speed=0 SL=1.2% TP=0.35% latency=2500ms cooldown=3s",
-    "weekday_night": "speed=0 SL=1.0% TP=0.3% latency=2500ms cooldown=5s",
-    "weekday_dawn":  "speed=0 SL=1.0% TP=0.3% latency=2000ms cooldown=5s",
-    "weekday_day":   "speed=±2 SL=1.0% TP=0.3% latency=1350ms z-score=ON cooldown=5s",
+    "night": "speed=0 SL=1.5% TP=0.4% latency=3000ms cooldown=3s (weekends all day)",
+    "day": "speed=±2 z-score=ON SL=1.0% TP=0.3% latency=1350ms cooldown=5s",
 }
 
 
@@ -221,11 +150,13 @@ def apply_profile(force: bool = False) -> str:
     name = current_profile_name()
     if name == _CURRENT_PROFILE and not force:
         return name
-    profile_dict, emoji_label = _PROFILE_MAP[name]
+    profile_dict = _PROFILE_MAP[name]
     _apply(profile_dict, name)
+    label = "WEEKEND " if _is_weekend() else ""
     logging.info(
-        "%s mode. %s",
-        emoji_label,
+        "%s %sNIGHT mode. %s" if name == "night" else "%s %sDAY mode. %s",
+        _PROFILE_EMOJI[name],
+        label,
         _PROFILE_DESC[name],
     )
     _CURRENT_PROFILE = name
