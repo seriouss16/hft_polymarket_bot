@@ -964,11 +964,23 @@ class LiveExecutionEngine:
     def filled_buy_shares(self, token_id: str) -> float:
         """Return total filled BUY shares currently tracked for token_id.
 
-        Checks both active orders (while poll is running) and the confirmed-buys
-        cache (after the order leaves _active_orders).  This prevents the phantom-
-        position bug where CLOSE arrives after _active_orders cleanup but before
-        clear_filled_buy() is called.
+        When the BUY is no longer pending, the value from ``_confirmed_buys`` (the
+        same fill passed to ``live_open`` after ``execute``) is authoritative so
+        CLOSE never uses ``order.size`` instead of the CLOB-reported fill.
+        While a BUY is still PENDING or PARTIAL, sums fills from active orders.
         """
+        if self.has_pending_buy(token_id):
+            total = 0.0
+            for order in self._active_orders.values():
+                if order.token_id != token_id or order.side != BUY:
+                    continue
+                if order.status == OrderStatus.FILLED:
+                    total += order.filled_size if order.filled_size > 0 else order.size
+                elif order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
+                    total += order.filled_size
+            return total
+        if token_id in self._confirmed_buys:
+            return float(self._confirmed_buys[token_id])
         total = 0.0
         for order in self._active_orders.values():
             if order.token_id != token_id or order.side != BUY:
@@ -977,8 +989,6 @@ class LiveExecutionEngine:
                 total += order.filled_size if order.filled_size > 0 else order.size
             elif order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
                 total += order.filled_size
-        if total == 0.0 and token_id in self._confirmed_buys:
-            total = self._confirmed_buys[token_id]
         return total
 
     def clear_filled_buy(self, token_id: str) -> None:
@@ -1087,6 +1097,9 @@ class LiveExecutionEngine:
     async def close_position(self, token_id: str, size: float) -> tuple[float, float]:
         """Sell all ``size`` shares and return (total_filled_shares, avg_price).
 
+        When ``_confirmed_buys`` holds this token, ``size`` is replaced by that
+        confirmed BUY fill so the SELL matches the same quantity recorded at open.
+
         - size >= POLY_CLOB_MIN_SHARES: GTC limit just above bid; the fill is always
           verified via ``_poll_order`` (even when post_order reports immediate match)
           so ``size_matched`` from the CLOB is trusted instead of assuming full size.
@@ -1101,7 +1114,21 @@ class LiveExecutionEngine:
         if size <= 0:
             return (0.0, 0.0)
 
+        if token_id in self._confirmed_buys:
+            cb = float(self._confirmed_buys[token_id])
+            if cb > 0.0 and abs(size - cb) > 1e-6:
+                logging.info(
+                    "[LIVE] close_position: SELL size set to confirmed BUY fill=%.4f "
+                    "(caller passed %.4f) token=%s",
+                    cb,
+                    size,
+                    token_id[:20],
+                )
+            if cb > 0.0:
+                size = cb
+
         poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+        skip_presell = os.getenv("LIVE_SKIP_PRESELL_BALANCE", "0") == "1"
 
         # Verify actual on-chain CTF balance before placing any SELL.  Polymarket
         # deducts a protocol fee in shares at fill time, so the wallet balance may
@@ -1109,7 +1136,11 @@ class LiveExecutionEngine:
         # held always fails with "not enough balance / allowance".
         # If the balance API returns 0 (ledger lag) we keep the original size and
         # let the CLOB reject minimally — retry is handled by _poll_order reprice.
-        actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+        # Set LIVE_SKIP_PRESELL_BALANCE=1 to skip this round-trip when fill size is
+        # trusted from CLOB polling (faster exit).
+        actual_bal: float | None = None
+        if not skip_presell:
+            actual_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
         if actual_bal is not None and actual_bal > 0 and actual_bal < size:
             if actual_bal < poly_min and size >= poly_min:
                 logging.warning(
