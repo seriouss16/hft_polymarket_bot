@@ -1158,12 +1158,29 @@ async def main():
                                     )
                                     if _hft_eng is not None:
                                         _hft_eng.rollback_live_open_signal()
-                                    # BUY not filled — impose cooldown to avoid retry spam.
-                                    _live_skip_until = now + _live_skip_cooldown_sec
-                                    logging.info(
-                                        "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
-                                        _live_skip_cooldown_sec, _live_skip_until,
+                                    _slip_abort = (
+                                        getattr(live_exec, "_last_buy_skip_reason", None)
+                                        == "slippage_abort"
                                     )
+                                    _cooldown_on_slip = (
+                                        os.getenv(
+                                            "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0"
+                                        )
+                                        == "1"
+                                    )
+                                    if not (_slip_abort and not _cooldown_on_slip):
+                                        # BUY not filled — impose cooldown to avoid retry spam.
+                                        _live_skip_until = now + _live_skip_cooldown_sec
+                                        logging.info(
+                                            "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
+                                            _live_skip_cooldown_sec, _live_skip_until,
+                                        )
+                                    elif _slip_abort:
+                                        logging.info(
+                                            "[LIVE] BUY skipped (slippage guard) — no "
+                                            "live-skip cooldown (set "
+                                            "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT=1 to enable).",
+                                        )
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

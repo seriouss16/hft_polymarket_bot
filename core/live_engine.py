@@ -163,6 +163,9 @@ class LiveExecutionEngine:
          which cancels the stale order and places an aggressive market-crossing limit.
       5. emergency_exit() can also be triggered externally when the engine decides
          the position must close regardless of conditions.
+
+    ``_last_buy_skip_reason`` is set on intentional BUY abort (e.g. slippage guard)
+    so the bot can avoid a live-skip cooldown; see ``LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT``.
     """
 
     def __init__(
@@ -195,6 +198,7 @@ class LiveExecutionEngine:
         # leaves _active_orders so that close_position can still find the shares.
         # Cleared explicitly by clear_filled_buy() after a SELL completes.
         self._confirmed_buys: dict[str, float] = {}
+        self._last_buy_skip_reason: str | None = None
         self.client = None
         self._http = requests.Session()
 
@@ -733,6 +737,7 @@ class LiveExecutionEngine:
                         max_slip,
                         tracked.token_id[:20],
                     )
+                    self._last_buy_skip_reason = "slippage_abort"
                     self._cancel_order(tracked.order_id)
                     tracked.status = OrderStatus.CANCELLED
                     tracked.filled_size = 0.0
@@ -1280,6 +1285,7 @@ class LiveExecutionEngine:
         the caller already has a fresh top-of-book (e.g. from the strategy tick).
         """
         _SKIP = (0.0, 0.0)
+        self._last_buy_skip_reason = None
         self._entry_stats["attempts"] += 1
         if (
             best_bid is not None

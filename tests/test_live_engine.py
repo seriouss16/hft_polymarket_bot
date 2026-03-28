@@ -430,6 +430,7 @@ class TestPollOrderReprice:
         assert order.status == OrderStatus.CANCELLED
         assert order.filled_size == pytest.approx(0.0)
         assert reprice_prices == []
+        assert eng._last_buy_skip_reason == "slippage_abort"
 
 
 # ---------------------------------------------------------------------------
