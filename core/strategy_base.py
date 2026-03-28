@@ -46,6 +46,7 @@ class BaseStrategy(ABC):
         seconds_to_expiry: float | None = None,
         cex_bid_imbalance: float | None = None,
         skew_ms: float = 0.0,
+        slot_anchor_price: float = 0.0,
     ) -> dict[str, Any] | None:
         """Process market tick and optionally return an OPEN/CLOSE event."""
 

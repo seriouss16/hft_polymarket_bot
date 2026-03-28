@@ -53,6 +53,9 @@ _NIGHT: dict[str, str] = {
     "HFT_MIN_HOLD_SEC": "3.0",
     # Very short cooldown — range recovers fast after a loss.
     "LOSS_COOLDOWN_SEC": "3",
+    # Anchor filter: counter-direction needs a smaller confirmation delta at night
+    # because BTC barely moves; even 0.02% deviation from anchor is significant.
+    "HFT_ANCHOR_COUNTER_MIN_DELTA_PCT": "0.0002",
 }
 
 _DAY: dict[str, str] = {
@@ -74,6 +77,9 @@ _DAY: dict[str, str] = {
     "HFT_POLY_TP_MOVE": "0.0030",
     "HFT_MIN_HOLD_SEC": "3.0",
     "LOSS_COOLDOWN_SEC": "5",
+    # Anchor filter: intraday moves faster, require stronger confirmation
+    # before trading counter to the slot opening price.
+    "HFT_ANCHOR_COUNTER_MIN_DELTA_PCT": "0.0005",
 }
 
 _CURRENT_PROFILE: str | None = None

@@ -845,6 +845,34 @@ class HFTEngine:
             return False
         return True
 
+    def _anchor_gate(self, fast_price: float, slot_anchor_price: float) -> tuple[bool, bool]:
+        """Return (up_allowed, down_allowed) based on slot anchor price filter.
+
+        When HFT_ANCHOR_FILTER_ENABLED=1 and a valid anchor is present, entries
+        counter to the anchor direction require the price to have moved at least
+        HFT_ANCHOR_COUNTER_MIN_DELTA_PCT away from the anchor before they are
+        allowed.  Trades aligned with the anchor direction are always allowed.
+        When the filter is disabled or anchor is unknown, both gates are True.
+        """
+        enabled = os.getenv("HFT_ANCHOR_FILTER_ENABLED", "1") == "1"
+        if not enabled or slot_anchor_price <= 0.0 or fast_price <= 0.0:
+            return True, True
+        delta_pct = (fast_price - slot_anchor_price) / slot_anchor_price
+        min_delta = float(os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT", "0.0005"))
+        # BUY_UP is aligned when price > anchor; BUY_DOWN is aligned when price < anchor.
+        # Counter-direction entries require the price to have moved min_delta away from
+        # anchor on the opposite side, suggesting a sustained reversal.
+        if delta_pct > 0.0:
+            anchor_ok_up = True
+            anchor_ok_down = abs(delta_pct) >= min_delta
+        elif delta_pct < 0.0:
+            anchor_ok_up = abs(delta_pct) >= min_delta
+            anchor_ok_down = True
+        else:
+            anchor_ok_up = True
+            anchor_ok_down = True
+        return anchor_ok_up, anchor_ok_down
+
     def _low_speed_edge_multiplier(self, speed: float) -> float:
         """Raise required oracle edge when edge speed is low (fade / chop risk)."""
         if abs(float(speed)) < self.entry_low_speed_abs:
@@ -1247,6 +1275,7 @@ class HFTEngine:
         meta_enabled=True,
         seconds_to_expiry=None,
         skew_ms=0.0,
+        slot_anchor_price: float = 0.0,
         **_ignored,
     ):
         self._diag_inc("ticks")
@@ -1347,6 +1376,7 @@ class HFTEngine:
             )
         signal = None
         slot_entry_ok = self._entry_slot_window_allows(seconds_to_expiry)
+        anchor_ok_up, anchor_ok_down = self._anchor_gate(fast_price, slot_anchor_price)
         _now_entries = time.time()
         _post_close_ok = (
             self.last_close_time <= 0.0
@@ -1522,6 +1552,7 @@ class HFTEngine:
             and book_ok_up
             and spread_gate
             and slot_entry_ok
+            and anchor_ok_up
             and meta_enabled
         ):
             _notional_up = self._calc_dynamic_amount(up_ask)
@@ -1587,6 +1618,8 @@ class HFTEngine:
                 self._diag_inc("entry_block_spread_gate")
             if not slot_entry_ok:
                 self._diag_inc("entry_block_slot")
+            if not anchor_ok_up:
+                self._diag_inc("entry_block_anchor")
             if not meta_enabled:
                 self._diag_inc("entry_block_meta")
 
@@ -1600,6 +1633,7 @@ class HFTEngine:
             and book_ok_down
             and spread_gate
             and slot_entry_ok
+            and anchor_ok_down
             and meta_enabled
         ):
             _notional_dn = self._calc_dynamic_amount(down_ask)
@@ -1665,6 +1699,8 @@ class HFTEngine:
                 self._diag_inc("entry_block_spread_gate")
             if not slot_entry_ok:
                 self._diag_inc("entry_block_slot")
+            if not anchor_ok_down:
+                self._diag_inc("entry_block_anchor")
             if not meta_enabled:
                 self._diag_inc("entry_block_meta")
 
