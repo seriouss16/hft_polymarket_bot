@@ -228,11 +228,6 @@ class HFTEngine:
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
 
-        # --- CEX Дисбаланс (Coinbase/Binance) ---
-        self.entry_cex_imbalance_enabled = os.getenv("HFT_ENTRY_CEX_IMBALANCE_ENABLED", "1") == "1"
-        self.cex_imbalance_up_min = float(os.getenv("HFT_CEX_IMBALANCE_UP_MIN", "0.60"))
-        self.cex_imbalance_down_max = float(os.getenv("HFT_CEX_IMBALANCE_DOWN_MAX", "0.40"))
-
         # --- Anti-spoof: reject one-tick CEX spikes vs lagging Poly oracle. ---
         self.entry_max_edge_jump_pts = float(os.getenv("HFT_ENTRY_MAX_EDGE_JUMP_PTS", "8.0"))
         self.entry_edge_jump_bypass_abs_speed = float(
@@ -747,6 +742,31 @@ class HFTEngine:
         edge *= float(extra_mult)
         return edge, edge
 
+    def reload_profile_params(self) -> None:
+        """Re-read session-profile-controlled env-vars into cached attributes.
+
+        Call this after session_profile.apply_profile() switches NIGHT/DAWN/DAY
+        so that the running engine immediately picks up the new thresholds without
+        requiring a full restart.
+        """
+        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.0"))
+        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.0"))
+        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1200.0"))
+        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
+        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
+        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
+        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
+        logging.info(
+            "[ENGINE] Profile params reloaded: speed_min=%.2f speed_max=%.2f "
+            "latency=%.0fms zscore=%s low_speed_mult=%.2f",
+            self.entry_up_speed_min,
+            self.entry_down_speed_max,
+            self.entry_max_latency_ms,
+            self.entry_zscore_trend_enabled,
+            self.entry_low_speed_edge_mult,
+        )
+
     def reset_for_new_market(self):
         """Clear trend/book memory when switching Polymarket token or slot."""
         self.edge_window.clear()
@@ -954,17 +974,6 @@ class HFTEngine:
             return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
         if trend_dir == "DOWN":
             return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
-        return True
-
-    def entry_cex_bid_imbalance_ok(self, trend_dir: str, cex_bid_imbalance: float | None) -> bool:
-        """Optional CEX bid-heavy filter when upstream passes bid/(bid+ask) for the fast feed."""
-        if not self.entry_cex_imbalance_enabled or cex_bid_imbalance is None:
-            return True
-        x = float(cex_bid_imbalance)
-        if trend_dir == "UP":
-            return x >= self.cex_imbalance_up_min
-        if trend_dir == "DOWN":
-            return x <= self.cex_imbalance_down_max
         return True
 
     def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
@@ -1237,8 +1246,8 @@ class HFTEngine:
         recent_pnl=0.0,
         meta_enabled=True,
         seconds_to_expiry=None,
-        cex_bid_imbalance=None,
         skew_ms=0.0,
+        **_ignored,
     ):
         self._diag_inc("ticks")
         self._emit_filter_diag_if_due()
@@ -1317,8 +1326,7 @@ class HFTEngine:
         )
         speed_ok = self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
         z_ok = self.entry_zscore_trend_ok(trend["trend"], edge_speed=trend["speed"])
-        cex_ok = self.entry_cex_bid_imbalance_ok(trend["trend"], cex_bid_imbalance)
-        entry_context_ok = speed_ok and z_ok and cex_ok
+        entry_context_ok = speed_ok and z_ok
         chop_latency_ok = (
             self.entry_latency_allows_entry(latency_ms)
             and self.entry_skew_allows_entry(skew_ms)
@@ -1384,8 +1392,6 @@ class HFTEngine:
                     self._diag_inc("entry_block_speed")
                 if not z_ok:
                     self._diag_inc("entry_block_zscore")
-                if not cex_ok:
-                    self._diag_inc("entry_block_cex_imbalance")
                 if not self.entry_latency_allows_entry(latency_ms):
                     self._diag_inc("entry_block_latency")
                 if not self.entry_skew_allows_entry(skew_ms):
@@ -1404,7 +1410,7 @@ class HFTEngine:
                 ):
                     logging.info(
                         "Entry blocked by spread_gate: signal=%s stale=%.0fms skew=%.0fms "
-                        "spread_legacy=%s liq=%s speed_z_cex=%s/%s/%s chop_lat_skew_flip=%s/%s/%s "
+                        "spread_legacy=%s liq=%s speed_z=%s/%s chop_lat_skew_flip=%s/%s/%s "
                         "edge_jump=%s agr_age=%s",
                         signal,
                         latency_ms,
@@ -1413,7 +1419,6 @@ class HFTEngine:
                         liquidity_ok,
                         speed_ok,
                         z_ok,
-                        cex_ok,
                         self.entry_latency_allows_entry(latency_ms),
                         self.entry_skew_allows_entry(skew_ms),
                         self.entry_trend_flip_settled_ok(trend["age"]),

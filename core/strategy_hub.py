@@ -58,6 +58,17 @@ class StrategyHub:
         """Expose latency threshold from active strategy."""
         return float(self.get_active_strategy().entry_max_latency_ms)
 
+    def reload_profile_params(self) -> None:
+        """Re-read session-profile env-vars into all registered strategies.
+
+        Call after session_profile.apply_profile() switches NIGHT/DAWN/DAY so
+        that cached engine attributes (speed gates, imbalance thresholds, etc.)
+        are immediately updated without requiring a full restart.
+        """
+        for strategy in self._strategies.values():
+            if hasattr(strategy, "reload_profile_params"):
+                strategy.reload_profile_params()
+
     def reset_for_new_market(self) -> None:
         """Reset state for all registered strategies."""
         for strategy in self._strategies.values():

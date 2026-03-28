@@ -38,9 +38,6 @@ _NIGHT: dict[str, str] = {
     "HFT_SPEED_FLOOR": "0.0",
     # Soft-flow max latency: WS can be 1-2 s stale → raise.
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2000.0",
-    # Imbalance filter: moderate — night entries allowed with weaker book.
-    "HFT_CEX_IMBALANCE_UP_MIN": "0.60",
-    "HFT_CEX_IMBALANCE_DOWN_MAX": "0.40",
 }
 
 _DAWN: dict[str, str] = {
@@ -57,10 +54,6 @@ _DAWN: dict[str, str] = {
     "HFT_ENTRY_LOW_SPEED_ABS": "0.5",
     "HFT_SPEED_FLOOR": "0.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "1500.0",
-    # Tighter imbalance: dawn entries need stronger book confirmation.
-    # Avoids low-imbalance DOWN traps (imb=0.03/0.06 seen causing -$0.45/-$0.59).
-    "HFT_CEX_IMBALANCE_UP_MIN": "0.65",
-    "HFT_CEX_IMBALANCE_DOWN_MAX": "0.35",
 }
 
 _DAY: dict[str, str] = {
@@ -79,9 +72,6 @@ _DAY: dict[str, str] = {
     "HFT_SPEED_FLOOR": "0.02",
     # Soft-flow max latency: daytime feeds are fast.
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "800.0",
-    # Standard imbalance gates for daytime liquid book.
-    "HFT_CEX_IMBALANCE_UP_MIN": "0.70",
-    "HFT_CEX_IMBALANCE_DOWN_MAX": "0.30",
 }
 
 _CURRENT_PROFILE: str | None = None
@@ -134,21 +124,21 @@ def apply_profile(force: bool = False) -> str:
         _apply(_NIGHT, "night")
         logging.info(
             "🌙 [SESSION] NIGHT mode (UTC %02d:00–%02d:00). "
-            "Speed gates OFF, latency 2500ms, z-score OFF, imb ≥0.40/≤0.60.",
+            "Speed gates OFF, latency 2500ms, z-score OFF.",
             NIGHT_START_UTC, NIGHT_END_UTC,
         )
     elif name == "dawn":
         _apply(_DAWN, "dawn")
         logging.info(
             "🌅 [SESSION] DAWN mode (UTC %02d:00–%02d:00). "
-            "Speed gates OFF, latency 2000ms, z-score OFF, imb ≥0.35/≤0.65 (stricter).",
+            "Speed gates OFF, latency 2000ms, z-score OFF.",
             NIGHT_END_UTC, DAWN_END_UTC,
         )
     else:
         _apply(_DAY, "day")
         logging.info(
             "☀️  [SESSION] DAY mode (UTC %02d:00–%02d:00). "
-            "Speed gates ±2 pts/s, latency 1350ms, z-score STRICT_TICKS=2, imb ≥0.30/≤0.70.",
+            "Speed gates ±2 pts/s, latency 1350ms, z-score STRICT_TICKS=2.",
             DAWN_END_UTC, NIGHT_START_UTC,
         )
     _CURRENT_PROFILE = name

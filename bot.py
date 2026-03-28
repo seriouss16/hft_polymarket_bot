@@ -456,10 +456,8 @@ async def main():
             # Check day/night session boundary and reapply profile if needed.
             _switched = maybe_switch_profile()
             if _switched is not None:
-                # Re-read latency cap so the running engine picks it up immediately.
-                strategy_hub.entry_max_latency_ms = float(
-                    os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1350.0")
-                )
+                # Re-read all session-profile-controlled params into running engines.
+                strategy_hub.reload_profile_params()
 
             # 1. Авто-переключение слота.
             # React immediately when UTC time crosses an exact 5m boundary.
@@ -748,6 +746,7 @@ async def main():
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     _live_skip_until = 0.0
+                    _live_pnl = 0.0  # Populated by live path; used for journal/attribution.
                     if LIVE_MODE and token_up_id:
                         # Use the side of the OPEN position, not the exit signal side.
                         # TREND_FLIP_EXIT changes decision["side"] to the new direction,
@@ -824,21 +823,26 @@ async def main():
                                 pnl.position_side = None
                             risk.on_trade_closed(0.0, time.time())
                     else:
-                        risk.on_trade_closed(float(decision.get("pnl", 0.0)), time.time())
+                        # Paper mode: use engine-simulated PnL.
+                        _live_pnl = float(decision.get("pnl", 0.0))
+                        risk.on_trade_closed(_live_pnl, time.time())
                     _rs = strategy_hub.get_rsi_v5_state()
                     _perf_key = decision.get("performance_key")
+                    # In live mode _live_pnl is the real CLOB PnL; in paper it is
+                    # the engine-simulated value — use it for attribution in both cases.
                     if _perf_key:
                         _sl = pnl.strategy_performance.slices.get(str(_perf_key))
                         _cum = _sl.pnl_sum if _sl else 0.0
                         logging.info(
                             "📊 Close attribution: key=%s trade_pnl=%+.4f USD | cumulative_this_key=%+.4f",
                             _perf_key,
-                            float(decision.get("pnl") or 0.0),
+                            _live_pnl,
                             _cum,
                         )
                         _sc = pnl.strategy_performance.summary_compact()
                         if _sc:
                             logging.info("📊 session_slices: %s", _sc)
+                    # Journal uses real CLOB PnL in live mode, sim PnL in paper mode.
                     journal.append(
                         {
                             "ts": time.time(),
@@ -851,7 +855,7 @@ async def main():
                             "entry_depth": decision.get("entry_depth"),
                             "entry_imbalance": decision.get("entry_imbalance"),
                             "latency_ms": decision.get("latency_ms"),
-                            "pnl": decision.get("pnl"),
+                            "pnl": _live_pnl,
                             "exit_reason": decision.get("reason"),
                             "exit_rsi": _rs.get("rsi"),
                             "rsi_band_lower": _rs.get("lower"),

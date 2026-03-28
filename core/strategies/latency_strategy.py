@@ -26,6 +26,10 @@ class LatencyArbitrageStrategy(BaseStrategy):
         """Expose entry latency threshold."""
         return float(self._engine.entry_max_latency_ms)
 
+    def reload_profile_params(self) -> None:
+        """Re-read session-profile env-vars into wrapped engine."""
+        self._engine.reload_profile_params()
+
     def reset_for_new_market(self) -> None:
         """Reset strategy internals for new market context."""
         self._engine.reset_for_new_market()

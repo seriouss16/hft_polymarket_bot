@@ -34,6 +34,10 @@ class PhaseRouterStrategy(BaseStrategy):
         """Return max entry latency across profiles for staleness logging."""
         return self._max_entry_latency_ms
 
+    def reload_profile_params(self) -> None:
+        """Re-read session-profile env-vars into wrapped engine."""
+        self._engine.reload_profile_params()
+
     def reset_for_new_market(self) -> None:
         """Reset wrapped engine; profile returns to latency inside engine."""
         self._engine.reset_for_new_market()
