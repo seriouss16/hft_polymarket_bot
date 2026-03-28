@@ -29,8 +29,8 @@ class BaseStrategy(ABC):
         """Return current trend diagnostics."""
 
     @abstractmethod
-    def get_rsi_v5_state(self) -> dict[str, float]:
-        """Return current RSI diagnostics."""
+    def get_rsi_v5_state(self) -> dict[str, Any]:
+        """Return current RSI or reaction-score diagnostics (0–100 scale)."""
 
     @abstractmethod
     async def process_tick(

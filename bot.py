@@ -744,6 +744,17 @@ async def main():
                         imbalance = bid_size / (bid_size + ask_size + 1e-9)
                     upnl = pnl.get_unrealized_pnl(poly_book.book)
                     rsi_st = strategy_hub.get_rsi_v5_state()
+                    _rx_on = float(rsi_st.get("reaction_on", 0.0)) >= 0.5
+                    _rsi_line = (
+                        f"Rx {rsi_st['rsi']:.1f} raw {rsi_st.get('rsi_raw', rsi_st['rsi']):.1f} "
+                        f"[{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                        f"Δ={rsi_st['slope']:+.2f} m={rsi_st.get('ma_fast', 0.0):.2f} mh={rsi_st.get('macd_hist', 0.0):+.2f}"
+                        if _rx_on
+                        else (
+                            f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                            f"Δ={rsi_st['slope']:+.2f}"
+                        )
+                    )
                     cb_px = aggregator.get_coinbase_price()
                     bn_px = aggregator.get_binance_price()
                     bn_bbo = aggregator.get_binance_bbo()
@@ -774,8 +785,7 @@ async def main():
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
                         f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
                         f"Book: {book_focus} | "
-                        f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
-                        f"Δ={rsi_st['slope']:+.2f} | "
+                        f"{_rsi_line} | "
                         f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
                         f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
                         f"(cb {float(_ft['coinbase_age_ms']):.0f} "
@@ -901,6 +911,7 @@ async def main():
                             "pnl": _live_pnl,
                             "exit_reason": decision.get("reason"),
                             "exit_rsi": _rs.get("rsi"),
+                            "exit_rsi_raw": _rs.get("rsi_raw"),
                             "rsi_band_lower": _rs.get("lower"),
                             "rsi_band_upper": _rs.get("upper"),
                             "rsi_slope": _rs.get("slope"),

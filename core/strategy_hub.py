@@ -78,8 +78,8 @@ class StrategyHub:
         """Return trend state of active strategy."""
         return self.get_active_strategy().get_trend_state()
 
-    def get_rsi_v5_state(self) -> dict[str, float]:
-        """Return RSI state of active strategy."""
+    def get_rsi_v5_state(self) -> dict[str, Any]:
+        """Return RSI or reaction-score state of active strategy."""
         return self.get_active_strategy().get_rsi_v5_state()
 
     async def process_tick(

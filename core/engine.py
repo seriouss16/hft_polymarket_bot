@@ -9,7 +9,13 @@ from collections import deque
 
 import numpy as np
 
-from ml.indicators import compute_rsi, dynamic_rsi_bands
+from ml.indicators import (
+    compute_ema_last,
+    compute_macd_last,
+    compute_reaction_score,
+    compute_rsi,
+    dynamic_rsi_bands,
+)
 
 DEBUG_LOG_PATH = "/mnt/work/DEV/PRJ0/prjBJ_arb_polymarket/.cursor/debug-ac56e4.log"
 DEBUG_SESSION_ID = "ac56e4"
@@ -133,6 +139,19 @@ class HFTEngine:
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
         self._last_rsi_slope = 0.0
+        self._last_rsi_raw = 50.0
+        self._last_ma_fast = 0.0
+        self._last_macd_hist = 0.0
+        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED", "0") == "1"
+        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD", "21"))
+        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST", "12"))
+        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW", "26"))
+        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL", "9"))
+        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE", "0.0008"))
+        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE", "25.0"))
+        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI", "0.45"))
+        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA", "0.30"))
+        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD", "0.25"))
         self.rsi_hold_up_floor = float(
             os.getenv("HFT_RSI_HOLD_UP_FLOOR", os.getenv("HFT_RSI_HOLD_YES_FLOOR", "40.0"))
         )
@@ -622,12 +641,16 @@ class HFTEngine:
         return self._last_rsi
 
     def get_rsi_v5_state(self):
-        """Return RSI value, dynamic exit bands, and per-tick slope for logging."""
+        """Return RSI (or blended reaction score), bands, slope, and MA/MACD extras."""
         return {
             "rsi": self._last_rsi,
+            "rsi_raw": self._last_rsi_raw,
             "upper": self._last_rsi_upper,
             "lower": self._last_rsi_lower,
             "slope": self._last_rsi_slope,
+            "ma_fast": self._last_ma_fast,
+            "macd_hist": self._last_macd_hist,
+            "reaction_on": 1.0 if self.reaction_score_enabled else 0.0,
         }
 
     def _rsi_slope_per_tick(self):
@@ -757,14 +780,25 @@ class HFTEngine:
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
+        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED", "0") == "1"
+        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD", "21"))
+        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST", "12"))
+        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW", "26"))
+        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL", "9"))
+        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE", "0.0008"))
+        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE", "25.0"))
+        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI", "0.45"))
+        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA", "0.30"))
+        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD", "0.25"))
         logging.info(
             "[ENGINE] Profile params reloaded: speed_min=%.2f speed_max=%.2f "
-            "latency=%.0fms zscore=%s low_speed_mult=%.2f",
+            "latency=%.0fms zscore=%s low_speed_mult=%.2f reaction=%s",
             self.entry_up_speed_min,
             self.entry_down_speed_max,
             self.entry_max_latency_ms,
             self.entry_zscore_trend_enabled,
             self.entry_low_speed_edge_mult,
+            "on" if self.reaction_score_enabled else "off",
         )
 
     def reset_for_new_market(self):
@@ -1298,7 +1332,37 @@ class HFTEngine:
             return None
 
         px = _price_array_for_rsi(price_history, self.rsi_price_len)
-        current_rsi = float(compute_rsi(px, period=self.rsi_period))
+        raw_rsi = float(compute_rsi(px, period=self.rsi_period))
+        self._last_rsi_raw = raw_rsi
+        self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
+        _ml, _ms, _mh = compute_macd_last(
+            px,
+            fast=self.reaction_macd_fast,
+            slow=self.reaction_macd_slow,
+            signal=self.reaction_macd_signal,
+        )
+        self._last_macd_hist = float(_mh)
+        _min_rx = max(
+            self.reaction_macd_slow + self.reaction_macd_signal + 1,
+            self.reaction_ma_period + 2,
+            self.rsi_period + 2,
+        )
+        if self.reaction_score_enabled and int(px.size) >= _min_rx:
+            current_rsi = float(
+                compute_reaction_score(
+                    raw_rsi,
+                    float(px[-1]),
+                    self._last_ma_fast,
+                    self._last_macd_hist,
+                    ma_rel_scale=self.reaction_ma_rel_scale,
+                    macd_hist_scale=self.reaction_macd_hist_scale,
+                    w_rsi=self.reaction_w_rsi,
+                    w_ma=self.reaction_w_ma,
+                    w_macd=self.reaction_w_macd,
+                )
+            )
+        else:
+            current_rsi = raw_rsi
         self._last_rsi = current_rsi
         self._rsi_tick_history.append(current_rsi)
         upper_b, lower_b = dynamic_rsi_bands(

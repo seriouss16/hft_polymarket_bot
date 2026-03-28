@@ -1,5 +1,9 @@
 """Technical indicators for fast-price series (Coinbase-first history)."""
 
+from __future__ import annotations
+
+import math
+
 import numpy as np
 
 
@@ -56,3 +60,86 @@ def compute_ma(prices, period):
     if len(prices) < period:
         return prices[-1]
     return np.mean(prices[-period:])
+
+
+def ema_series(prices, period: int) -> np.ndarray:
+    """Return exponential moving average series (same length as prices)."""
+    arr = np.asarray(prices, dtype=np.float64)
+    n = len(arr)
+    out = np.empty(n, dtype=np.float64)
+    if n == 0:
+        return out
+    k = 2.0 / (float(period) + 1.0)
+    out[0] = float(arr[0])
+    for i in range(1, n):
+        out[i] = k * float(arr[i]) + (1.0 - k) * float(out[i - 1])
+    return out
+
+
+def compute_ema_last(prices, period: int) -> float:
+    """Return the last EMA value for the price series."""
+    arr = np.asarray(prices, dtype=np.float64)
+    if arr.size == 0:
+        return 0.0
+    if arr.size < 2:
+        return float(arr[-1])
+    return float(ema_series(arr, period)[-1])
+
+
+def compute_macd_last(
+    prices,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> tuple[float, float, float]:
+    """Return (macd_line, signal_line, histogram) at the last bar.
+
+    MACD line = EMA(fast) - EMA(slow) on the close series; signal = EMA of the
+    MACD line; histogram = MACD - signal.  All in the same units as ``prices``.
+    """
+    arr = np.asarray(prices, dtype=np.float64)
+    n = int(arr.size)
+    if n < max(slow + signal, fast + 1, 3):
+        return 0.0, 0.0, 0.0
+    ema_f = ema_series(arr, fast)
+    ema_s = ema_series(arr, slow)
+    macd_line = ema_f - ema_s
+    sig = ema_series(macd_line, signal)
+    hist = macd_line - sig
+    return float(macd_line[-1]), float(sig[-1]), float(hist[-1])
+
+
+def compute_reaction_score(
+    rsi: float,
+    price: float,
+    ema_fast: float,
+    macd_hist: float,
+    *,
+    ma_rel_scale: float = 0.0008,
+    macd_hist_scale: float = 25.0,
+    w_rsi: float = 0.45,
+    w_ma: float = 0.30,
+    w_macd: float = 0.25,
+) -> float:
+    """Blend RSI, price-vs-EMA, and MACD histogram into one 0–100 oscillator.
+
+    The output uses the same 0–100 scale as RSI so it can replace RSI in entry
+    and exit bands without changing threshold env-vars.  ``ma_rel_scale`` is a
+    typical fractional distance (price - EMA) / EMA at which the MA term is
+    half-saturated toward 0 or 100.  ``macd_hist_scale`` scales histogram in
+    price units (e.g. USD for BTC).
+    """
+    w_sum = float(w_rsi + w_ma + w_macd)
+    if w_sum <= 0.0:
+        return float(np.clip(rsi, 0.0, 100.0))
+    em = max(abs(float(ema_fast)), 1e-9)
+    rel = (float(price) - float(ema_fast)) / em
+    ma_score = 50.0 + 50.0 * math.tanh(rel / max(float(ma_rel_scale), 1e-12))
+    hs = max(abs(float(macd_hist_scale)), 1e-9)
+    macd_score = 50.0 + 50.0 * math.tanh(float(macd_hist) / hs)
+    out = (
+        float(w_rsi) * float(np.clip(rsi, 0.0, 100.0))
+        + float(w_ma) * float(np.clip(ma_score, 0.0, 100.0))
+        + float(w_macd) * float(np.clip(macd_score, 0.0, 100.0))
+    ) / w_sum
+    return float(np.clip(out, 0.0, 100.0))
