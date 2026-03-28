@@ -428,6 +428,8 @@ async def main():
     _live_skip_cooldown_sec = float(os.getenv("LIVE_SKIP_COOLDOWN_SEC", "30.0"))
     last_lstm_time = 0
     last_book_pull_time = 0
+    last_book_mismatch_warn_time = 0.0
+    last_clob_pull_fail_log_time = 0.0
     forecast = 0.0
     last_slot_check_time = 0.0
     last_slot_ts: int | None = None
@@ -655,7 +657,11 @@ async def main():
                             poly_book.book.pop("down_bid", None)
                             poly_book.book.pop("down_ask", None)
                     except Exception as exc:
-                        logging.warning("CLOB book pull failed: %s", exc)
+                        if (now - last_clob_pull_fail_log_time) >= 90.0:
+                            logging.warning("CLOB book pull failed: %s", exc)
+                            last_clob_pull_fail_log_time = now
+                        else:
+                            logging.debug("CLOB book pull failed (rate-limited): %s", exc)
                     last_book_pull_time = now
                     if _net_dbg:
                         _nw_t3 = time.perf_counter()
@@ -694,10 +700,10 @@ async def main():
                     last_high_latency_warn_time = now
                 if (
                     abs(skew_ms) > 800.0
-                    and (now - last_skew_warn_time) >= 120.0
+                    and (now - last_skew_warn_time) >= 300.0
                 ):
-                    logging.warning(
-                        "Large cross-feed skew skew_ms=%.0f (cb_age=%.0f poly_age=%.0f ms); "
+                    logging.info(
+                        "Cross-feed skew skew_ms=%.0f (cb_age=%.0f poly_age=%.0f ms); "
                         "not wall-clock NTP — local recv order of WS messages.",
                         skew_ms,
                         float(_ft["coinbase_age_ms"]),
@@ -736,6 +742,36 @@ async def main():
                 # Block engine entries during live-skip cooldown to prevent phantom
                 # sim positions from accumulating when the CLOB rejects every BUY.
                 _skip_cooldown_active = LIVE_MODE and (now < _live_skip_until)
+
+                # Validate binary market constraint (UP + DOWN ≈ 1.0) and fix
+                # stale/wrong orderbook data before passing it to the engine.
+                _ub = float(poly_book.book.get("bid", 0.0))
+                _ua = float(poly_book.book.get("ask", 0.0))
+                _db = float(poly_book.book.get("down_bid", 0.0))
+                _da = float(poly_book.book.get("down_ask", 0.0))
+                _up_mid_chk = (_ub + _ua) / 2.0 if (0.0 < _ub < _ua <= 1.0) else 0.5
+                _dn_mid_chk = (_db + _da) / 2.0 if (0.0 < _db < _da <= 1.0) else 0.5
+                if abs(_up_mid_chk + _dn_mid_chk - 1.0) > 0.05:
+                    if (now - last_book_mismatch_warn_time) >= 90.0:
+                        logging.info(
+                            "Book mismatch corrected before engine: UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f",
+                            _ub, _ua, _db, _da, _up_mid_chk + _dn_mid_chk,
+                        )
+                        last_book_mismatch_warn_time = now
+                    else:
+                        logging.debug(
+                            "Book mismatch corrected (suppressed repeat): UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f",
+                            _ub, _ua, _db, _da, _up_mid_chk + _dn_mid_chk,
+                        )
+                    if 0.0 < _ub < _ua <= 1.0:
+                        poly_book.book["down_bid"] = max(0.01, min(0.99, 1.0 - _ua))
+                        poly_book.book["down_ask"] = max(0.01, min(0.99, 1.0 - _ub))
+                    elif 0.0 < _db < _da <= 1.0:
+                        poly_book.book["bid"] = max(0.01, min(0.99, 1.0 - _da))
+                        poly_book.book["ask"] = max(0.01, min(0.99, 1.0 - _db))
+                    else:
+                        poly_book.book["down_bid"] = max(0.01, min(0.99, 1.0 - _ua))
+                        poly_book.book["down_ask"] = max(0.01, min(0.99, 1.0 - _ub))
 
                 decision = await strategy_hub.process_tick(
                     fast_price=fast_price,
@@ -797,27 +833,6 @@ async def main():
                     up_ask = float(poly_book.book.get("ask", 0.0))
                     d_bid = float(poly_book.book.get("down_bid", 0.0))
                     d_ask = float(poly_book.book.get("down_ask", 0.0))
-                    # Validate UP+DOWN ≈ 1.0 (binary market constraint). If mismatch, use complement.
-                    _up_mid = (up_bid + up_ask) / 2.0 if (0.0 < up_bid < up_ask <= 1.0) else 0.5
-                    _down_mid = (d_bid + d_ask) / 2.0 if (0.0 < d_bid < d_ask <= 1.0) else 0.5
-                    _sum_mid = _up_mid + _down_mid
-                    if abs(_sum_mid - 1.0) > 0.05:  # More than 5c deviation = stale/wrong data
-                        logging.warning(
-                            "Book mismatch: UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f, using complement",
-                            up_bid, up_ask, d_bid, d_ask, _sum_mid,
-                        )
-                        if 0.0 < up_bid < up_ask <= 1.0:
-                            # UP looks valid, derive DOWN from it
-                            d_bid = max(0.01, min(0.99, 1.0 - up_ask))
-                            d_ask = max(0.01, min(0.99, 1.0 - up_bid))
-                        elif 0.0 < d_bid < d_ask <= 1.0:
-                            # DOWN looks valid, derive UP from it
-                            up_bid = max(0.01, min(0.99, 1.0 - d_ask))
-                            up_ask = max(0.01, min(0.99, 1.0 - d_bid))
-                        else:
-                            # Neither valid, use fallback
-                            d_bid = max(0.01, min(0.99, 1.0 - up_ask))
-                            d_ask = max(0.01, min(0.99, 1.0 - up_bid))
                     if trend["trend"] == "UP":
                         book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f}"
                     elif trend["trend"] == "DOWN":

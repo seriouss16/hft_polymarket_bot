@@ -87,6 +87,17 @@ class StatsCollector:
         self.started_ts = time.time()
 
     @staticmethod
+    def _format_regime_cooldown(cooldown_until: float, now_ts: float) -> str:
+        """Return human-readable regime cooldown line for reports."""
+        if cooldown_until <= 0.0:
+            return "none"
+        if now_ts >= cooldown_until:
+            return "none (expired)"
+        remaining = cooldown_until - now_ts
+        until_iso = datetime.fromtimestamp(cooldown_until).isoformat(timespec="seconds")
+        return f"{until_iso} (in {remaining:.0f}s)"
+
+    @staticmethod
     def _session_mode_label() -> str:
         """Return human-readable session mode string for the report header."""
         day_mode = os.getenv("DAY_MODE", "0").strip()
@@ -128,7 +139,7 @@ class StatsCollector:
             f"📊 Средняя на сделку: {avg_pnl:>+10.4f} USD",
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
             f"📦 В позиции:         {'YES' if self.pnl.inventory > 0 else 'NO'}",
-            f"⏸️ Regime cooldown:   {cooldown_until:>10.0f} (unix ts)",
+            f"⏸️ Regime cooldown:   {self._format_regime_cooldown(cooldown_until, now_ts)}",
         ]
         sp = getattr(self.pnl, "strategy_performance", None)
         if sp is not None and sp.slices:

@@ -340,45 +340,90 @@ class LiveExecutionEngine:
             logging.warning("fetch_usdc_balance failed: %s", exc)
             return None
 
+    def _affordable_buy_shares(self, price: float, desired_shares: float) -> float:
+        """Return a BUY size at ``price`` that fits reported USDC collateral.
+
+        Applies a small safety margin so the CLOB notional stays below balance.
+        Rounds down to two decimals like ``execute()``.  Returns ``desired_shares``
+        unchanged when balance is unknown (test mode or API failure).
+        """
+        if self.test_mode or price <= 0.0 or desired_shares <= 0.0:
+            return desired_shares
+        bal = self.fetch_usdc_balance()
+        if bal is None or bal <= 0.0:
+            return desired_shares
+        safety = float(os.getenv("LIVE_BUY_COLLATERAL_SAFETY", "0.995"))
+        max_notional = bal * safety
+        max_shares = max_notional / price
+        capped = min(desired_shares, max_shares)
+        capped = float(int(capped * 100.0) / 100.0)
+        return max(0.0, capped)
+
     def get_best_prices(self, token_id: str) -> tuple[float, float]:
         """Return best bid and best ask from CLOB order book."""
         snap = self.get_orderbook_snapshot(token_id, depth=1)
         return float(snap["best_bid"]), float(snap["best_ask"])
 
-    def _orderbook_snapshot_http(self, token_id: str, depth: int) -> dict:
+    def _orderbook_snapshot_http(
+        self, token_id: str, depth: int, *, log_errors: bool = True
+    ) -> dict:
         """Fetch and summarize the order book from the public CLOB HTTP endpoint."""
+        empty = {
+            "best_bid": 0.0,
+            "best_ask": 1.0,
+            "bid_size_top": 0.0,
+            "ask_size_top": 0.0,
+            "imbalance": 0.0,
+            "bid_vol_topn": 0.0,
+            "ask_vol_topn": 0.0,
+            "pressure": 0.0,
+        }
         try:
-            resp = self._http.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=5)
+            resp = self._http.get(CLOB_BOOK_HTTP, params={"token_id": token_id}, timeout=8)
             resp.raise_for_status()
             data = resp.json()
             bid_levels = _levels_from_book_rows(data.get("bids"))
             ask_levels = _levels_from_book_rows(data.get("asks"))
             return _snapshot_from_levels(bid_levels, ask_levels, depth)
         except Exception as exc:
-            logging.warning(
+            log_fn = logging.warning if log_errors else logging.debug
+            log_fn(
                 "HTTP CLOB book failed token=%s…: %s",
                 token_id[:28] if token_id else "",
                 exc,
             )
-            return {
-                "best_bid": 0.0,
-                "best_ask": 1.0,
-                "bid_size_top": 0.0,
-                "ask_size_top": 0.0,
-                "imbalance": 0.0,
-                "bid_vol_topn": 0.0,
-                "ask_vol_topn": 0.0,
-                "pressure": 0.0,
-            }
+            return empty
 
     def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
-        """Return top-N orderbook metrics for imbalance and pressure."""
+        """Return top-N orderbook metrics for imbalance and pressure.
+
+        Retries the SDK call on transient errors, then falls back to the public
+        HTTP book endpoint so the bot can keep a coherent snapshot without spamming
+        warnings on every tick.
+        """
         if self.client is None:
-            return self._orderbook_snapshot_http(token_id, depth)
-        book = self.client.get_order_book(token_id)
-        bid_levels = _levels_from_book_rows(book.bids)
-        ask_levels = _levels_from_book_rows(book.asks)
-        return _snapshot_from_levels(bid_levels, ask_levels, depth)
+            return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
+        max_attempts = max(1, int(os.getenv("CLOB_ORDERBOOK_RETRIES", "3")))
+        backoff = float(os.getenv("CLOB_ORDERBOOK_RETRY_BACKOFF_SEC", "0.07"))
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            try:
+                book = self.client.get_order_book(token_id)
+                bid_levels = _levels_from_book_rows(book.bids)
+                ask_levels = _levels_from_book_rows(book.asks)
+                return _snapshot_from_levels(bid_levels, ask_levels, depth)
+            except Exception as exc:
+                last_exc = exc
+                if attempt + 1 < max_attempts:
+                    time.sleep(backoff * (2**attempt))
+        snap = self._orderbook_snapshot_http(token_id, depth, log_errors=False)
+        if last_exc is not None:
+            logging.debug(
+                "CLOB SDK order book failed after %d attempts; HTTP fallback used: %s",
+                max_attempts,
+                last_exc,
+            )
+        return snap
 
     def _get_order_fill(self, order_id: str) -> tuple[str, float]:
         """Return (status_str, filled_size) for an active order from CLOB.
@@ -686,15 +731,39 @@ class LiveExecutionEngine:
 
             self._entry_stats["reprice_total"] += 1
             tracked.reprice_count += 1
+            place_size = remaining
+            if tracked.side == BUY:
+                place_size = self._affordable_buy_shares(new_price, remaining)
+                if place_size <= 0.0:
+                    logging.error(
+                        "Reprice BUY: zero affordable size at %.4f (check USDC balance).",
+                        new_price,
+                    )
+                    tracked.status = OrderStatus.FAILED
+                    break
+                if place_size < poly_min:
+                    logging.error(
+                        "Reprice BUY: affordable size %.4f < CLOB min %.0f at %.4f.",
+                        place_size, poly_min, new_price,
+                    )
+                    tracked.status = OrderStatus.FAILED
+                    break
+                if place_size < remaining - 1e-6:
+                    logging.warning(
+                        "Reprice BUY: size capped %.4f → %.4f so notional fits USDC "
+                        "(price %.4f).",
+                        remaining, place_size, new_price,
+                    )
+                    tracked.size = tracked.filled_size + place_size
             logging.info(
                 "🔄 Repricing order %s: %.4f → %.4f (attempt %d/%d) "
-                "filled=%.2f remaining=%.2f",
+                "filled=%.2f remaining=%.2f place=%.2f",
                 tracked.order_id, tracked.price, new_price,
                 tracked.reprice_count, _ORDER_MAX_REPRICE,
-                tracked.filled_size, remaining,
+                tracked.filled_size, remaining, place_size,
             )
             new_id, new_immediate = await asyncio.to_thread(
-                self._place_limit_raw, tracked.token_id, tracked.side, new_price, remaining
+                self._place_limit_raw, tracked.token_id, tracked.side, new_price, place_size
             )
             if new_id:
                 self._active_orders.pop(tracked.order_id, None)
@@ -744,8 +813,20 @@ class LiveExecutionEngine:
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
             price = max(0.01, min(0.99, best_ask + 0.005))
+            em_size = self._affordable_buy_shares(price, remaining)
+            if em_size <= 0.0 or em_size < poly_min:
+                logging.error(
+                    "Emergency BUY: cannot afford %.4f sh at %.4f (got %.4f, min=%.0f).",
+                    remaining, price, em_size, poly_min,
+                )
+                return
+            if em_size < remaining - 1e-6:
+                logging.warning(
+                    "Emergency BUY: size %.4f → %.4f to fit USDC at %.4f.",
+                    remaining, em_size, price,
+                )
             order_id, immediate = await asyncio.to_thread(
-                self._place_limit_raw, tracked.token_id, tracked.side, price, remaining
+                self._place_limit_raw, tracked.token_id, tracked.side, price, em_size
             )
             if order_id:
                 emergency = TrackedOrder(
@@ -753,9 +834,9 @@ class LiveExecutionEngine:
                     token_id=tracked.token_id,
                     side=tracked.side,
                     price=price,
-                    size=remaining,
+                    size=em_size,
                     status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
-                    filled_size=remaining if immediate else 0.0,
+                    filled_size=em_size if immediate else 0.0,
                 )
                 self._active_orders[order_id] = emergency
                 if not immediate:
@@ -789,23 +870,38 @@ class LiveExecutionEngine:
         else:
             price = max(0.01, min(0.99, best_ask + 0.005))
 
+        place_sz = size
+        if side == BUY:
+            place_sz = self._affordable_buy_shares(price, size)
+            if place_sz <= 0.0:
+                logging.error(
+                    "🛑 EMERGENCY CLOSE BUY: zero affordable size @ %.4f token=%s.",
+                    price, token_id[:20],
+                )
+                return
+            if place_sz < size - 1e-6:
+                logging.warning(
+                    "EMERGENCY CLOSE BUY: size %.2f → %.2f (USDC cap) @ %.4f.",
+                    size, place_sz, price,
+                )
+
         logging.warning(
             "🚨 EMERGENCY CLOSE: %s %.2f @ %.4f token=%s",
-            side, size, price, token_id,
+            side, place_sz, price, token_id,
         )
         self._entry_stats["emergency_exits"] += 1
         order_id, immediate = await asyncio.to_thread(
-            self._place_limit_raw, token_id, side, price, size
+            self._place_limit_raw, token_id, side, price, place_sz
         )
         if order_id:
             tracked = TrackedOrder(
                 order_id=order_id,
-            token_id=token_id,
+                token_id=token_id,
                 side=side,
-            price=price,
-            size=size,
+                price=price,
+                size=place_sz,
                 status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
-                filled_size=size if immediate else 0.0,
+                filled_size=place_sz if immediate else 0.0,
             )
             self._active_orders[order_id] = tracked
             if not immediate:
@@ -1073,6 +1169,15 @@ class LiveExecutionEngine:
         # Negative offset means we pay ask exactly; positive would cross the spread.
         _buy_offset = float(os.getenv("LIVE_BUY_PRICE_OFFSET", "0.0"))
         price = max(0.01, min(0.99, exec_price + _buy_offset))
+        shares = self._affordable_buy_shares(price, shares)
+        if shares < poly_min_shares:
+            logging.warning(
+                "⚠️ Skip %s: USDC balance only allows %.2f sh < min %.0f at %.4f.",
+                signal, shares, poly_min_shares, price,
+            )
+            self._entry_stats["skip_signal"] += 1
+            self._log_entry_stats_if_due()
+            return _SKIP
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, BUY, price, shares
         )
