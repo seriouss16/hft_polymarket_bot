@@ -77,6 +77,8 @@ class MarketRegimeDetector:
         self.state = RegimeState()
         self._last_log_ts: float = 0.0
         self._candidate_regime: Regime = "MIXED"
+        # Count ticks that confirm the candidate; reset only when the current
+        # regime is re-confirmed or a third regime becomes candidate.
         self._candidate_ticks: int = 0
 
     # ------------------------------------------------------------------
@@ -112,16 +114,22 @@ class MarketRegimeDetector:
         self.state.stale_median_ms = stale_median
         self.state.samples = len(self._speeds)
 
-        # Hysteresis: require the candidate regime to be stable for
-        # REGIME_HYSTERESIS_TICKS consecutive ticks before committing.
+        # Hysteresis: a candidate must hold for REGIME_HYSTERESIS_TICKS
+        # consecutive non-interrupted ticks.  A brief bounce back to the
+        # current regime does NOT reset the counter — only a tick that
+        # belongs to a *third* regime (neither current nor candidate) resets.
+        if new_regime == self.state.regime:
+            # Confirmed current regime — discard any pending candidate.
+            self._candidate_regime = self.state.regime
+            self._candidate_ticks = 0
+            return False
+
         if new_regime == self._candidate_regime:
             self._candidate_ticks += 1
         else:
+            # New third-party regime — start fresh candidate.
             self._candidate_regime = new_regime
             self._candidate_ticks = 1
-
-        if self._candidate_regime == self.state.regime:
-            return False
 
         if self._candidate_ticks < self._hysteresis_ticks:
             return False
@@ -129,6 +137,7 @@ class MarketRegimeDetector:
         old = self.state.regime
         self.state.regime = self._candidate_regime
         self.state.changed_at = time.time()
+        self._candidate_ticks = 0
         self._log_change(old, self._candidate_regime, speed_rms, stale_median)
         return True
 

@@ -667,12 +667,11 @@ async def main():
                 )
                 if _regime_changed:
                     logging.info(
-                        "🔄 [REGIME] %s | speed_rms=%.3f stale_median=%.0fms | Reloading profile params.",
+                        "🔄 [REGIME] %s | speed_rms=%.3f stale_median=%.0fms",
                         regime_detector.get_regime(),
                         regime_detector.state.speed_rms,
                         regime_detector.state.stale_median_ms,
                     )
-                    strategy_hub.reload_profile_params()
 
                 mark_px = mark_price_for_side(poly_book.book, pnl.position_side)
                 if pnl.inventory > 0 and mark_px > 0.0:
