@@ -51,18 +51,24 @@ _NIGHT: dict[str, str] = {
     # Allow 5c asks when the book pins cheap contracts (0.08 blocked valid signals).
     "HFT_ENTRY_MIN_ASK_UP": "0.05",
     "HFT_ENTRY_MIN_ASK_DOWN": "0.05",
+    # Late-slot books often pin UP/DOWN near 0.98; 0.97 blocked valid signals in logs.
+    "HFT_ENTRY_MAX_ASK_UP": "0.97",
+    "HFT_ENTRY_MAX_ASK_DOWN": "0.97",
+    # Slightly wider than day; spread_gate still applies per profile.
+    "HFT_MAX_ENTRY_SPREAD": "0.08",
     # Z-score is meaningless at near-zero speed.
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
     # Very relaxed low-speed multiplier — entries must fire at minimal momentum.
     "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.0",
     "HFT_ENTRY_LOW_SPEED_ABS": "0.2",
-    # Phase router: night market is slow/choppy — lower edge threshold, allow higher speed.
+    # Phase router: trend "speed" is BTC pts/s noise in thousands on 5m slots — thresholds
+    # 500/800 forced latency almost always (volatile_speed). Align with observed logs.
     "HFT_PHASE_SOFT_MIN_ABS_EDGE": "3.0",
-    "HFT_PHASE_SOFT_MAX_ABS_SPEED": "500.0",
+    "HFT_PHASE_SOFT_MAX_ABS_SPEED": "15000.0",
     "HFT_PHASE_SOFT_MAX_ABS_EDGE": "35.0",
-    "HFT_PHASE_VOLATILE_MIN_ABS_SPEED": "800.0",
-    "HFT_PHASE_VOLATILE_MIN_ABS_EDGE": "40.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_SPEED": "25000.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_EDGE": "50.0",
     "HFT_PHASE_SOFT_MIN_TREND_AGE_SEC": "1.0",
     # SL/TP tuned for range: hold short, exit on small reversal.
     # Tighter SL to cut losers faster, keep TP for scalping.
@@ -117,6 +123,16 @@ _DAY: dict[str, str] = {
     # Tighter staleness gate — Poly WS is fast during business hours.
     "HFT_ENTRY_MAX_LATENCY_MS": "1350.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "800.0",
+    # Phase router: stricter than night; must reset env when switching from weekend night.
+    "HFT_PHASE_SOFT_MIN_ABS_EDGE": "4.0",
+    "HFT_PHASE_SOFT_MAX_ABS_SPEED": "400.0",
+    "HFT_PHASE_SOFT_MAX_ABS_EDGE": "18.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_SPEED": "600.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_EDGE": "35.0",
+    "HFT_PHASE_SOFT_MIN_TREND_AGE_SEC": "1.0",
+    "HFT_ENTRY_MAX_ASK_UP": "0.97",
+    "HFT_ENTRY_MAX_ASK_DOWN": "0.97",
+    "HFT_MAX_ENTRY_SPREAD": "0.05",
     # Z-score trends well with intraday volatility.
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "1",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "2",
