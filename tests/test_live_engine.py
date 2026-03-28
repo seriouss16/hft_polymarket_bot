@@ -10,6 +10,7 @@ Covers:
 - probe_chain_shares_for_close / wait_for_exit_readiness for EXIT desync.
 - _place_fak_sell in test_mode: returns (size, 0.50).
 - get_open_orders: returns [] in test_mode.
+- _recover_fill_after_cancel: test_mode noop, matched/canceled+fill sync.
 
 Note: _ORDER_STALE_SEC and _ORDER_MAX_REPRICE are module-level constants read at
 import time.  Tests that need to override them use ``patch`` against
@@ -19,7 +20,7 @@ import time.  Tests that need to override them use ``patch`` against
 from __future__ import annotations
 
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -718,3 +719,41 @@ class TestExitReconcile:
         assert eng.test_mode is True
         got = await eng._await_sellable_balance(TOKEN, 5.0)
         assert got is None
+
+
+class TestRecoverFillAfterCancel:
+    """_recover_fill_after_cancel detects fills that race with cancel-before-reprice."""
+
+    async def test_skipped_in_test_mode(self, monkeypatch):
+        """Live engine in test_mode must not sleep or call CLOB sync."""
+        eng = make_engine(monkeypatch)
+        order = make_order()
+        assert await eng._recover_fill_after_cancel(order, "oid-x") is False
+
+    async def test_matched_status_sets_filled(self, monkeypatch):
+        """CLOB matched + size_matched must mark tracked order FILLED."""
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        order = make_order(side=SELL_SIDE, size=10.0, filled=0.0)
+        monkeypatch.setattr(eng, "_get_order_fill", lambda oid: ("matched", 10.0))
+        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock):
+            ok = await eng._recover_fill_after_cancel(order, "oid1")
+        assert ok is True
+        assert order.status == OrderStatus.FILLED
+        assert order.filled_size == pytest.approx(10.0)
+
+    async def test_cancelled_with_full_size_matched(self, monkeypatch):
+        """Canceled status with size_matched to full size must return True."""
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        order = make_order(side=SELL_SIDE, size=10.0309, filled=0.0)
+        monkeypatch.setattr(
+            eng,
+            "_get_order_fill",
+            lambda oid: ("canceled", 10.0309),
+        )
+        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock):
+            ok = await eng._recover_fill_after_cancel(order, "oid1")
+        assert ok is True
+        assert order.status == OrderStatus.FILLED
+        assert order.filled_size == pytest.approx(10.0309)

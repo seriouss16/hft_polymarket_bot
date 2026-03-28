@@ -18,6 +18,9 @@ _ORDER_FILL_POLL_SEC = float(os.getenv("LIVE_ORDER_FILL_POLL_SEC", "0.15"))
 _ORDER_STALE_SEC = float(os.getenv("LIVE_ORDER_STALE_SEC", "3.0"))
 _ORDER_MAX_REPRICE = int(os.getenv("LIVE_ORDER_MAX_REPRICE", "2"))
 _ORDER_EMERGENCY_TICKS = int(os.getenv("LIVE_ORDER_EMERGENCY_TICKS", "3"))
+_REPRICE_POST_CANCEL_SLEEP_SEC = float(os.getenv("LIVE_REPRICE_POST_CANCEL_SLEEP_SEC", "0.35"))
+_REPRICE_POST_CANCEL_FILL_POLLS = max(1, int(os.getenv("LIVE_REPRICE_POST_CANCEL_FILL_POLLS", "8")))
+_REPRICE_POST_CANCEL_POLL_SEC = float(os.getenv("LIVE_REPRICE_POST_CANCEL_POLL_SEC", "0.12"))
 
 
 class OrderStatus(str, Enum):
@@ -484,6 +487,142 @@ class LiveExecutionEngine:
             logging.warning("Cancel failed order=%s: %s", order_id, exc)
             return False
 
+    async def _recover_fill_after_cancel(
+        self,
+        tracked: TrackedOrder,
+        cancelled_order_id: str,
+        *,
+        skip_initial_sleep: bool = False,
+    ) -> bool:
+        """Poll the cancelled order id for a fill that raced with cancel or API lag.
+
+        After ``cancel``, the CLOB may still report the old order as matched or
+        partially matched. Placing a replacement at full ``remaining`` size then
+        fails with insufficient balance. This method waits briefly, polls
+        ``get_order`` until a terminal fill amount is visible, updates
+        ``tracked``, and returns True when no replacement limit order is needed
+        for the original ``tracked.size`` (fully filled or remainder closed via
+        FAK for sub-minimum SELL dust).
+
+        Returns False when a new limit order should be placed for
+        ``tracked.remaining`` (or when nothing matched after polling).
+        """
+        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+        if self.test_mode:
+            return False
+        if not skip_initial_sleep:
+            await asyncio.sleep(_REPRICE_POST_CANCEL_SLEEP_SEC)
+
+        async def _poll_once() -> tuple[str, float]:
+            return await asyncio.to_thread(self._get_order_fill, cancelled_order_id)
+
+        def _apply_matched_size(clob_filled: float) -> bool:
+            """Update tracked from CLOB size_matched; return True if fully done."""
+            if clob_filled <= tracked.filled_size + 1e-9:
+                return False
+            tracked.filled_size = min(tracked.size, clob_filled)
+            tracked.status = OrderStatus.PARTIAL
+            rem = tracked.remaining
+            if rem <= 1e-6:
+                tracked.status = OrderStatus.FILLED
+                logging.info(
+                    "✅ [LIVE] Fill synced after cancel: id=%s %s filled=%.4f @ %.4f",
+                    cancelled_order_id[:20],
+                    tracked.side,
+                    tracked.filled_size,
+                    tracked.price,
+                )
+                return True
+            if tracked.side == SELL_SIDE and rem < poly_min:
+                return False
+            logging.info(
+                "⚡ [LIVE] Partial fill after cancel: id=%s filled=%.4f rem=%.4f",
+                cancelled_order_id[:20],
+                tracked.filled_size,
+                rem,
+            )
+            return False
+
+        async def _fak_dust_if_needed() -> bool:
+            """If SELL remainder is sub-minimum, FAK it and return True if done."""
+            rem = tracked.remaining
+            if rem > 1e-6 and tracked.side == SELL_SIDE and rem < poly_min:
+                fak_filled = await self._fak_sell(tracked.token_id, rem)
+                tracked.filled_size += fak_filled
+                tracked.status = OrderStatus.FILLED
+                logging.info(
+                    "[LIVE] FAK closed sub-min remainder after cancel sync: %.4f",
+                    fak_filled,
+                )
+                return True
+            return False
+
+        for attempt in range(_REPRICE_POST_CANCEL_FILL_POLLS):
+            status_str, clob_filled = await _poll_once()
+            if status_str in ("matched", "filled") or clob_filled >= tracked.size - 1e-6:
+                tracked.filled_size = min(
+                    tracked.size, max(tracked.filled_size, clob_filled)
+                )
+                tracked.status = OrderStatus.FILLED
+                logging.info(
+                    "✅ [LIVE] Fill synced after cancel: id=%s %s filled=%.4f / %.4f @ %.4f",
+                    cancelled_order_id[:20],
+                    tracked.side,
+                    tracked.filled_size,
+                    tracked.size,
+                    tracked.price,
+                )
+                return True
+
+            if status_str in ("partially_matched",) or (
+                clob_filled > tracked.filled_size + 1e-9
+                and status_str
+                not in ("canceled", "cancelled", "canceled_market_resolved")
+            ):
+                if _apply_matched_size(clob_filled):
+                    return True
+                if await _fak_dust_if_needed():
+                    return True
+                return False
+
+            if status_str in ("canceled", "cancelled", "canceled_market_resolved"):
+                if clob_filled > tracked.filled_size + 1e-9:
+                    if _apply_matched_size(clob_filled):
+                        return True
+                    if await _fak_dust_if_needed():
+                        return True
+                    return False
+                return False
+
+            if clob_filled > tracked.filled_size + 1e-9:
+                if _apply_matched_size(clob_filled):
+                    return True
+                if await _fak_dust_if_needed():
+                    return True
+                return False
+
+            if attempt + 1 < _REPRICE_POST_CANCEL_FILL_POLLS:
+                await asyncio.sleep(_REPRICE_POST_CANCEL_POLL_SEC)
+
+        status_str, clob_filled = await _poll_once()
+        if status_str in ("matched", "filled") or clob_filled >= tracked.size - 1e-6:
+            tracked.filled_size = min(
+                tracked.size, max(tracked.filled_size, clob_filled)
+            )
+            tracked.status = OrderStatus.FILLED
+            logging.info(
+                "✅ [LIVE] Late fill after cancel polls: id=%s filled=%.4f",
+                cancelled_order_id[:20],
+                tracked.filled_size,
+            )
+            return True
+        if clob_filled > tracked.filled_size + 1e-9:
+            if _apply_matched_size(clob_filled):
+                return True
+            if await _fak_dust_if_needed():
+                return True
+        return False
+
     def _place_fak_sell(self, token_id: str, size: float) -> tuple[float, float]:
         """Place a FAK (Fill-And-Kill) market SELL for any share size.
 
@@ -621,7 +760,9 @@ class LiveExecutionEngine:
 
         Loop terminates when the order reaches a terminal state.  Partial fills
         accumulate across reprice cycles — ``tracked.filled_size`` always reflects
-        the running total confirmed by the CLOB.
+        the running total confirmed by the CLOB.  After each cancel-before-reprice,
+        ``_recover_fill_after_cancel`` polls the old order id so fills that race
+        with cancel are not mistaken for failed sells.
 
         BUY partial fill logic:
           - If a BUY goes stale with partial fill < POLY_CLOB_MIN_SHARES: cancel the
@@ -746,7 +887,14 @@ class LiveExecutionEngine:
                     tracked.status = OrderStatus.CANCELLED
                     tracked.filled_size = 0.0
                     break
+            cancelled_for_reprice = tracked.order_id
             self._cancel_order(tracked.order_id)
+            if await self._recover_fill_after_cancel(tracked, cancelled_for_reprice):
+                break
+            remaining = tracked.remaining
+            if remaining <= 0:
+                tracked.status = OrderStatus.FILLED
+                break
 
             if tracked.side == BUY:
                 new_price = max(0.01, min(0.99, best_ask + 0.001))
@@ -817,6 +965,14 @@ class LiveExecutionEngine:
                     tracked.filled_size += remaining
                     break
             else:
+                if await self._recover_fill_after_cancel(
+                    tracked, cancelled_for_reprice, skip_initial_sleep=True
+                ):
+                    break
+                remaining = tracked.remaining
+                if remaining <= 0:
+                    tracked.status = OrderStatus.FILLED
+                    break
                 tracked.status = OrderStatus.FAILED
                 logging.error(
                     "Reprice placement failed — filled=%.2f remaining=%.2f unmanaged.",
