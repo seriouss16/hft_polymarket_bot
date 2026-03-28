@@ -166,6 +166,10 @@ class LiveExecutionEngine:
 
     ``_last_buy_skip_reason`` is set on intentional BUY abort (e.g. slippage guard)
     so the bot can avoid a live-skip cooldown; see ``LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT``.
+
+    On EXIT, ``wait_for_exit_readiness`` / ``probe_chain_shares_for_close`` reconcile
+    ledger lag and partial fills before treating a position as phantom; see
+    ``LIVE_CLOSE_WAIT_PENDING_SEC`` and ``LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC``.
     """
 
     def __init__(
@@ -1040,6 +1044,69 @@ class LiveExecutionEngine:
             token_id[:20], filled,
         )
         return filled
+
+    async def wait_for_exit_readiness(self, token_id: str, timeout_sec: float | None = None) -> None:
+        """Wait until in-memory BUY/SELL trackers finish and CLOB has no open orders for token.
+
+        After a partial SELL or ledger lag, fills can still be settling while this
+        method drains pending state so ``filled_buy_shares`` and chain probes see truth.
+        """
+        if self.test_mode:
+            return
+        if timeout_sec is None:
+            timeout_sec = float(os.getenv("LIVE_CLOSE_WAIT_PENDING_SEC", "8"))
+        deadline = time.monotonic() + max(0.1, timeout_sec)
+        while time.monotonic() < deadline:
+            if self.has_pending_buy(token_id) or self.has_pending_sell(token_id):
+                await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+                continue
+            open_list = await asyncio.to_thread(self.get_open_orders, token_id)
+            if open_list:
+                await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+                continue
+            return
+        logging.warning(
+            "[LIVE] wait_for_exit_readiness: timeout %.1fs token=%s (pending/open may remain).",
+            timeout_sec,
+            token_id[:20],
+        )
+
+    async def probe_chain_shares_for_close(self, token_id: str) -> float:
+        """Poll conditional balance when tracked fills are zero; sync ``_confirmed_buys`` if found.
+
+        CLOB-reported fills can land on-chain after the strategy already cleared
+        in-memory state.  Uses the same staggered delay pattern as post-BUY balance
+        checks.  Returns shares to sell (may be below POLY_CLOB_MIN for FAK exit).
+        """
+        if self.test_mode:
+            return 0.0
+        dust = float(
+            os.getenv(
+                "LIVE_CHAIN_EXIT_DUST_SHARES",
+                os.getenv("LIVE_SELL_CHAIN_DUST_SHARES", "0.02"),
+            )
+        )
+        raw_delays = os.getenv("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC", "0,0.15,0.35,0.6,1.0,1.5")
+        delays = [float(x.strip()) for x in raw_delays.split(",") if x.strip()]
+        if not delays:
+            delays = [0.0, 0.15, 0.35, 0.6, 1.0, 1.5]
+        best: float | None = None
+        for d in delays:
+            if d > 0:
+                await asyncio.sleep(d)
+            bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            if bal is not None and bal > dust:
+                best = bal
+                break
+        if best is None or best <= dust:
+            return 0.0
+        self._confirmed_buys[token_id] = best
+        logging.info(
+            "[LIVE] probe_chain_shares_for_close: token=%s → %.4f sh (synced _confirmed_buys).",
+            token_id[:20],
+            best,
+        )
+        return float(best)
 
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics."""

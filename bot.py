@@ -905,6 +905,19 @@ async def main():
                                 "(token=%s).", _close_tid[:20],
                             )
                             _live_filled = await live_exec.wait_for_buy_fill(_close_tid, timeout_sec=5.0)
+                        if _live_filled == 0:
+                            await live_exec.wait_for_exit_readiness(_close_tid)
+                            _live_filled = live_exec.filled_buy_shares(_close_tid)
+                        if _live_filled == 0:
+                            _probe = await live_exec.probe_chain_shares_for_close(_close_tid)
+                            if _probe > 0:
+                                logging.info(
+                                    "[LIVE] Close: using chain-probed %.4f sh (lag or partial-fill "
+                                    "remainder) token=%s",
+                                    _probe,
+                                    _close_tid[:20],
+                                )
+                                _live_filled = _probe
                         if _live_filled > 0:
                             logging.info(
                                 "[LIVE] Close: selling %.4f live-filled shares token=%s",
@@ -940,8 +953,8 @@ async def main():
                             risk.on_trade_closed(_live_pnl, time.time())
                         else:
                             logging.info(
-                                "[LIVE] Close skipped: no live-filled shares for token=%s "
-                                "(phantom position — engine state desync).",
+                                "[LIVE] Close skipped: no tracked or on-chain shares for token=%s "
+                                "after pending/order wait and chain probe.",
                                 _close_tid[:20],
                             )
                             # Phantom position: PnL state shows inventory but CLOB has none.

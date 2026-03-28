@@ -7,6 +7,7 @@ Covers:
 - close_position: sub-minimum FAK path, GTC fallback to FAK on failure.
 - execute(): skip on bad ask, bad spread, unsupported signal, insufficient budget,
   immediate fill return, awaits poll on non-immediate.
+- probe_chain_shares_for_close / wait_for_exit_readiness for EXIT desync.
 - _place_fak_sell in test_mode: returns (size, 0.50).
 - get_open_orders: returns [] in test_mode.
 
@@ -670,3 +671,43 @@ class TestExecuteSuccess:
                 result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
 
         assert result == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Exit reconciliation: chain probe and wait_for_exit_readiness
+# ---------------------------------------------------------------------------
+
+
+class TestExitReconcile:
+    """probe_chain_shares_for_close and wait_for_exit_readiness."""
+
+    async def test_probe_chain_syncs_confirmed_buys(self, monkeypatch):
+        """probe_chain_shares_for_close must set _confirmed_buys when balance exceeds dust."""
+        monkeypatch.setenv("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC", "0")
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+
+        def fake_bal(token_id):
+            return 1.56
+
+        monkeypatch.setattr(eng, "fetch_conditional_balance", fake_bal)
+        got = await eng.probe_chain_shares_for_close(TOKEN)
+        assert got == pytest.approx(1.56)
+        assert eng._confirmed_buys[TOKEN] == pytest.approx(1.56)
+
+    async def test_probe_chain_below_dust_returns_zero(self, monkeypatch):
+        """Balances at or below dust must not sync _confirmed_buys."""
+        monkeypatch.setenv("LIVE_CHAIN_EXIT_DUST_SHARES", "0.5")
+        monkeypatch.setenv("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC", "0")
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        monkeypatch.setattr(eng, "fetch_conditional_balance", lambda tid: 0.1)
+        got = await eng.probe_chain_shares_for_close(TOKEN)
+        assert got == pytest.approx(0.0)
+        assert TOKEN not in eng._confirmed_buys
+
+    async def test_wait_for_exit_readiness_noop_in_test_mode(self, monkeypatch):
+        """wait_for_exit_readiness must return immediately in test_mode."""
+        eng = make_engine(monkeypatch)
+        assert eng.test_mode is True
+        await eng.wait_for_exit_readiness(TOKEN, timeout_sec=0.01)
