@@ -1422,6 +1422,10 @@ class LiveExecutionEngine:
 
         Optional ``best_bid`` and ``best_ask`` skip a CLOB book HTTP round-trip when
         the caller already has a fresh top-of-book (e.g. from the strategy tick).
+
+        After a reported fill, ``fetch_conditional_balance`` must confirm at least
+        ``LIVE_BALANCE_MIN_FRAC`` of the fill before returning success; otherwise the
+        run returns (0,0) unless ``LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1``.
         """
         _SKIP = (0.0, 0.0)
         self._last_buy_skip_reason = None
@@ -1595,6 +1599,9 @@ class LiveExecutionEngine:
                 _i + 1, next_delay, token_id[:20],
             )
 
+        if actual_bal is None and self.test_mode and filled > 0:
+            actual_bal = filled
+
         if actual_bal is not None:
             if abs(actual_bal - filled) > 0.005:
                 logging.warning(
@@ -1604,12 +1611,19 @@ class LiveExecutionEngine:
                 )
             filled = actual_bal
         else:
-            # Ledger lag persists beyond all retries — use CLOB-reported fill.
-            # The order WAS confirmed FILLED, so shares exist on-chain even if the
-            # balance API hasn't caught up.  Proceeding prevents phantom positions.
+            if os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE", "0") != "1":
+                logging.warning(
+                    "⚠️ [LIVE] On-chain balance never matched CLOB fill after %d retries "
+                    "— not opening position (no shares debited / API desync). "
+                    "CLOB reported %.4f sh token=%s. "
+                    "Set LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1 to trust CLOB only.",
+                    len(_bal_delays), filled, token_id[:20],
+                )
+                self._active_orders.pop(tracked.order_id, None)
+                return _SKIP
             logging.warning(
                 "⚠️ [LIVE] On-chain balance not confirmed after %d retries "
-                "— trusting CLOB fill=%.4f token=%s",
+                "— trusting CLOB fill=%.4f token=%s (LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1).",
                 len(_bal_delays), filled, token_id[:20],
             )
 
