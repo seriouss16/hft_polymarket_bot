@@ -38,10 +38,13 @@ _NIGHT: dict[str, str] = {
     "HFT_ENTRY_UP_SPEED_MIN": "0.0",
     "HFT_ENTRY_DOWN_SPEED_MAX": "0.0",
     "HFT_SPEED_FLOOR": "0.0",
+    # Lower entry threshold for night: smaller edge moves are profitable when volatility is low.
+    "HFT_BUY_EDGE": "3.0",
+    "HFT_NOISE_EDGE": "0.5",
     # Poly WS is sparse: allow ~3.8 s staleness before blocking entries (logs showed
     # 3.0–3.5 s spikes around slot changes).
     "HFT_ENTRY_MAX_LATENCY_MS": "3800.0",
-    "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2500.0",
+    "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "2200.0",
     # Cross-feed skew is recv-order noise, not true clock skew; 0 ms blocks almost
     # all entries when CB and Poly WS drift. Night uses a wide tolerance.
     "HFT_ENTRY_MAX_SKEW_MS": "2000.0",
@@ -52,11 +55,19 @@ _NIGHT: dict[str, str] = {
     "HFT_ENTRY_ZSCORE_TREND_ENABLED": "0",
     "HFT_ENTRY_ZSCORE_STRICT_TICKS": "1",
     # Very relaxed low-speed multiplier — entries must fire at minimal momentum.
-    "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.2",
-    "HFT_ENTRY_LOW_SPEED_ABS": "0.3",
+    "HFT_ENTRY_LOW_SPEED_EDGE_MULT": "1.0",
+    "HFT_ENTRY_LOW_SPEED_ABS": "0.2",
+    # Phase router: night market is slow/choppy — lower edge threshold, allow higher speed.
+    "HFT_PHASE_SOFT_MIN_ABS_EDGE": "3.0",
+    "HFT_PHASE_SOFT_MAX_ABS_SPEED": "500.0",
+    "HFT_PHASE_SOFT_MAX_ABS_EDGE": "35.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_SPEED": "800.0",
+    "HFT_PHASE_VOLATILE_MIN_ABS_EDGE": "40.0",
+    "HFT_PHASE_SOFT_MIN_TREND_AGE_SEC": "1.0",
     # SL/TP tuned for range: hold short, exit on small reversal.
-    "HFT_POLY_SL_MOVE": "0.0150",
-    "HFT_POLY_TP_MOVE": "0.0040",
+    # Tighter SL to cut losers faster, keep TP for scalping.
+    "HFT_POLY_SL_MOVE": "0.0120",
+    "HFT_POLY_TP_MOVE": "0.0035",
     "HFT_MIN_HOLD_SEC": "3.0",
     # Very short cooldown — range recovers fast after a loss.
     "LOSS_COOLDOWN_SEC": "3",
