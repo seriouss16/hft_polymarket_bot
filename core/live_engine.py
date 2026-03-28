@@ -43,6 +43,7 @@ class TrackedOrder:
     status: OrderStatus = OrderStatus.PENDING
     filled_size: float = 0.0
     reprice_count: int = 0
+    entry_best_ask: float | None = None
 
     @property
     def age_sec(self) -> float:
@@ -154,7 +155,9 @@ class LiveExecutionEngine:
       1. execute() / close_position() places a GTC limit and tracks it as PENDING.
       2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC seconds.
       3. If unfilled after LIVE_ORDER_STALE_SEC the order is repriced up to
-         LIVE_ORDER_MAX_REPRICE times toward best market price.
+         LIVE_ORDER_MAX_REPRICE times toward best market price.  For BUY, if
+         LIVE_MAX_BUY_REPRICE_SLIPPAGE is set and the new limit would exceed that
+         adverse move vs the original best_ask, the entry is cancelled instead.
       4. If still unfilled after all reprice attempts, emergency_exit() is called
          which cancels the stale order and places an aggressive market-crossing limit.
       5. emergency_exit() can also be triggered externally when the engine decides
@@ -709,6 +712,28 @@ class LiveExecutionEngine:
                 break
 
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
+            if tracked.side == BUY:
+                new_price_probe = max(0.01, min(0.99, best_ask + 0.001))
+                max_slip = float(os.getenv("LIVE_MAX_BUY_REPRICE_SLIPPAGE", "0"))
+                if (
+                    max_slip > 0.0
+                    and tracked.entry_best_ask is not None
+                    and new_price_probe - tracked.entry_best_ask > max_slip
+                ):
+                    logging.warning(
+                        "⚠️ [LIVE] BUY reprice aborted: best ask moved %.4f → %.4f "
+                        "(limit would be %.4f > ref %.4f + max slip %.4f) token=%s",
+                        tracked.entry_best_ask,
+                        best_ask,
+                        new_price_probe,
+                        tracked.entry_best_ask,
+                        max_slip,
+                        tracked.token_id[:20],
+                    )
+                    self._cancel_order(tracked.order_id)
+                    tracked.status = OrderStatus.CANCELLED
+                    tracked.filled_size = 0.0
+                    break
             self._cancel_order(tracked.order_id)
 
             if tracked.side == BUY:
@@ -1283,6 +1308,7 @@ class LiveExecutionEngine:
             size=shares,
             status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
             filled_size=shares if immediate else 0.0,
+            entry_best_ask=best_ask,
         )
         self._active_orders[order_id] = tracked
         self._entry_stats["executed"] += 1

@@ -65,6 +65,7 @@ def make_order(
     filled=0.0,
     status=OrderStatus.PENDING,
     age_offset=0.0,
+    entry_best_ask=None,
 ) -> TrackedOrder:
     """Return a TrackedOrder with configurable state."""
     o = TrackedOrder(
@@ -73,6 +74,7 @@ def make_order(
         side=side,
         price=0.50,
         size=size,
+        entry_best_ask=entry_best_ask,
     )
     o.filled_size = filled
     o.status = status
@@ -397,6 +399,37 @@ class TestPollOrderReprice:
                             await eng._poll_order(order)
 
         assert order.filled_size >= 6.0
+
+    async def test_stale_buy_reprice_aborts_when_slippage_exceeded(self, monkeypatch):
+        """Stale BUY is cancelled when best ask moved beyond LIVE_MAX_BUY_REPRICE_SLIPPAGE."""
+        monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
+        monkeypatch.setenv("LIVE_MAX_BUY_REPRICE_SLIPPAGE", "0.02")
+        eng = make_engine(monkeypatch)
+        order = make_order(
+            size=8.0,
+            age_offset=_STALE_AGE,
+            entry_best_ask=0.50,
+        )
+        eng._active_orders[order.order_id] = order
+        reprice_prices: list = []
+
+        def fake_place(token_id, side, price, size):
+            reprice_prices.append(price)
+            return "new-id", True
+
+        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+            with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
+                with patch.object(
+                    eng,
+                    "get_best_prices",
+                    return_value=(0.40, 0.53),
+                ):
+                    with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
+                        await eng._poll_order(order)
+
+        assert order.status == OrderStatus.CANCELLED
+        assert order.filled_size == pytest.approx(0.0)
+        assert reprice_prices == []
 
 
 # ---------------------------------------------------------------------------
