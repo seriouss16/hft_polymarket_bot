@@ -66,12 +66,18 @@ class MarketRegimeDetector:
         self._active_speed: float = float(os.getenv("REGIME_ACTIVE_SPEED_MIN", "3.0"))
         self._calm_stale: float = float(os.getenv("REGIME_CALM_STALE_MIN_MS", "1200.0"))
         self._log_min_sec: float = float(os.getenv("REGIME_LOG_MIN_SEC", "30.0"))
+        # Minimum ticks a new regime must be sustained before triggering a switch.
+        # Prevents rapid CALM↔MIXED↔CALM flipping when metrics oscillate near
+        # the threshold boundary.  Default: 10 ticks (~2.5 s at 250 ms/tick).
+        self._hysteresis_ticks: int = int(os.getenv("REGIME_HYSTERESIS_TICKS", "10"))
 
         self._speeds: deque[float] = deque(maxlen=self._window)
         self._stales: deque[float] = deque(maxlen=self._window)
 
         self.state = RegimeState()
         self._last_log_ts: float = 0.0
+        self._candidate_regime: Regime = "MIXED"
+        self._candidate_ticks: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,13 +108,24 @@ class MarketRegimeDetector:
         self.state.stale_median_ms = stale_median
         self.state.samples = len(self._speeds)
 
-        if new_regime == self.state.regime:
+        # Hysteresis: require the candidate regime to be stable for
+        # REGIME_HYSTERESIS_TICKS consecutive ticks before committing.
+        if new_regime == self._candidate_regime:
+            self._candidate_ticks += 1
+        else:
+            self._candidate_regime = new_regime
+            self._candidate_ticks = 1
+
+        if self._candidate_regime == self.state.regime:
+            return False
+
+        if self._candidate_ticks < self._hysteresis_ticks:
             return False
 
         old = self.state.regime
-        self.state.regime = new_regime
+        self.state.regime = self._candidate_regime
         self.state.changed_at = time.time()
-        self._log_change(old, new_regime, speed_rms, stale_median)
+        self._log_change(old, self._candidate_regime, speed_rms, stale_median)
         return True
 
     def get_regime(self) -> Regime:

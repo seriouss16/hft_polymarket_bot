@@ -1143,12 +1143,19 @@ class LiveExecutionEngine:
             return _SKIP
 
         poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
-        _bal_delays = [0.3, 0.5, 0.8, 1.0, 1.5]  # cumulative ~4.1 s max wait
+        # Minimum fraction of the CLOB-reported fill that is accepted as a
+        # "real" on-chain balance snapshot (not a partial ledger update).
+        # If the on-chain read is < 10% of what CLOB reported, the ledger
+        # has not settled yet and we continue polling rather than treating
+        # the tiny value as the real post-fee balance.
+        _bal_min_frac = float(os.getenv("LIVE_BALANCE_MIN_FRAC", "0.10"))
+        _bal_delays = [0.3, 0.6, 1.0, 1.5, 2.0, 2.5]  # cumulative ~8.4 s max wait
         actual_bal: float | None = None
         for _i, _delay in enumerate(_bal_delays):
             await asyncio.sleep(_delay)
             _b = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
-            if _b is not None and _b > 0:
+            # Require balance >= 10% of CLOB-reported fill to accept as settled.
+            if _b is not None and _b >= filled * _bal_min_frac:
                 actual_bal = _b
                 logging.info(
                     "🟢 [LIVE] On-chain balance confirmed: %.4f sh "
@@ -1156,10 +1163,12 @@ class LiveExecutionEngine:
                     actual_bal, _i + 1, _delay, token_id[:20],
                 )
                 break
+            next_delay = _bal_delays[_i + 1] if _i + 1 < len(_bal_delays) else 0
             logging.debug(
-                "[LIVE] Balance still 0 on attempt %d — retrying in %.1fs token=%s",
-                _i + 1, _bal_delays[_i + 1] if _i + 1 < len(_bal_delays) else 0,
-                token_id[:20],
+                "[LIVE] Balance %.4f < threshold %.4f on attempt %d "
+                "— retrying in %.1fs token=%s",
+                _b or 0.0, filled * _bal_min_frac,
+                _i + 1, next_delay, token_id[:20],
             )
 
         if actual_bal is not None:
@@ -1202,4 +1211,7 @@ class LiveExecutionEngine:
         )
         # Persist fill so close_position can find shares even after _active_orders cleanup.
         self._confirmed_buys[token_id] = filled
+        # Remove from active orders — immediate fills skip _poll_order so the dict
+        # entry would otherwise accumulate and inflate active_orders counter.
+        self._active_orders.pop(tracked.order_id, None)
         return (filled, avg_price)

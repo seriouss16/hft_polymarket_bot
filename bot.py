@@ -667,8 +667,10 @@ async def main():
                 )
                 if _regime_changed:
                     logging.info(
-                        "🔄 [REGIME] Market regime → %s | Reloading profile params.",
+                        "🔄 [REGIME] %s | speed_rms=%.3f stale_median=%.0fms | Reloading profile params.",
                         regime_detector.get_regime(),
+                        regime_detector.state.speed_rms,
+                        regime_detector.state.stale_median_ms,
                     )
                     strategy_hub.reload_profile_params()
 
