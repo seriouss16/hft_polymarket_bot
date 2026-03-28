@@ -466,6 +466,7 @@ async def main():
             if _switched is not None:
                 # Re-read all session-profile-controlled params into running engines.
                 strategy_hub.reload_profile_params()
+                risk.reload_profile_params()
 
             # 1. Авто-переключение слота.
             # React immediately when UTC time crosses an exact 5m boundary.

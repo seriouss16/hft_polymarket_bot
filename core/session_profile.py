@@ -69,6 +69,18 @@ _NIGHT: dict[str, str] = {
     "HFT_REACTION_W_RSI": "0.60",
     "HFT_REACTION_W_MA": "0.25",
     "HFT_REACTION_W_MACD": "0.15",
+    # Regime filter: night WR is naturally lower due to random reversals in flat BTC.
+    # Lower good-regime threshold (0.38) and raise bad-regime floor (0.28) so a
+    # small losing streak does not lock the bot for hours.  Shorter memory window
+    # (6 trades) reacts faster to regime recovery after a bad burst.
+    # Cooldown 30 s instead of 60 s: night slots are only 5 min, losing 60 s is costly.
+    "HFT_GOOD_REGIME_WINRATE": "0.38",
+    "HFT_BAD_REGIME_WINRATE": "0.28",
+    "HFT_RECENT_TRADES_FOR_REGIME": "6",
+    "HFT_REGIME_COOLDOWN_SEC": "30",
+    # DD gate: night balance is small; allow up to 30% drawdown before meta-blocking.
+    # At $4 capital, 15% DD = $0.60 — too tight for 6–12 trades in a quiet session.
+    "MAX_DRAWDOWN_PCT": "0.30",
 }
 
 _DAY: dict[str, str] = {
@@ -90,6 +102,14 @@ _DAY: dict[str, str] = {
     "HFT_POLY_TP_MOVE": "0.0030",
     "HFT_MIN_HOLD_SEC": "3.0",
     "LOSS_COOLDOWN_SEC": "5",
+    # Regime filter: day session has higher WR potential; standard thresholds.
+    # Memory of 8 trades and 60 s cooldown are correct for active hours.
+    "HFT_GOOD_REGIME_WINRATE": "0.42",
+    "HFT_BAD_REGIME_WINRATE": "0.35",
+    "HFT_RECENT_TRADES_FOR_REGIME": "8",
+    "HFT_REGIME_COOLDOWN_SEC": "60",
+    # DD gate: tighter during active sessions where drawdowns recover faster.
+    "MAX_DRAWDOWN_PCT": "0.20",
     # Anchor filter: intraday moves faster, require stronger confirmation
     # before trading counter to the slot opening price.
     "HFT_ANCHOR_COUNTER_MIN_DELTA_PCT": "0.0005",

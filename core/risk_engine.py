@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 
@@ -15,6 +16,18 @@ class RiskEngine:
     loss_cooldown_sec: float = 0.0
     peak_equity: float = 0.0
     cooldown_until: float = 0.0
+
+    def reload_profile_params(self) -> None:
+        """Re-read session-profile env vars so night/day overrides take effect."""
+        raw = os.getenv("MAX_DRAWDOWN_PCT")
+        if raw is not None:
+            self.max_drawdown_pct = float(raw)
+        raw = os.getenv("MAX_POSITION_PCT")
+        if raw is not None:
+            self.max_position_pct = float(raw)
+        raw = os.getenv("LOSS_COOLDOWN_SEC")
+        if raw is not None:
+            self.loss_cooldown_sec = float(raw)
 
     def update_equity(self, equity: float) -> None:
         """Track new peak equity."""
