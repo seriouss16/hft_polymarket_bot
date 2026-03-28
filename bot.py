@@ -70,6 +70,7 @@ from core.selector import MarketSelector
 from core.executor import PnLTracker, mark_price_for_side
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.risk_engine import RiskEngine
+from core.session_profile import apply_profile, maybe_switch_profile
 from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
@@ -294,6 +295,9 @@ async def main():
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     _validate_required_config(LIVE_MODE)
 
+    # Apply day/night session profile before any strategy objects read env vars.
+    apply_profile(force=True)
+
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     TEST_MODE = not LIVE_MODE
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
@@ -448,6 +452,14 @@ async def main():
                     now,
                 )
                 last_stats_time = now
+
+            # Check day/night session boundary and reapply profile if needed.
+            _switched = maybe_switch_profile()
+            if _switched is not None:
+                # Re-read latency cap so the running engine picks it up immediately.
+                strategy_hub.entry_max_latency_ms = float(
+                    os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1350.0")
+                )
 
             # 1. Авто-переключение слота.
             # React immediately when UTC time crosses an exact 5m boundary.

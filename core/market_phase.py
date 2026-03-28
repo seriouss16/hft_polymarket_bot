@@ -23,6 +23,7 @@ def select_engine_profile(trend_state: dict[str, Any], latency_ms: float) -> Pro
     age = float(trend_state.get("age", 0.0))
 
     soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC", "2.0"))
+    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE", "0.0"))
     soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED", "55.0"))
     soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE", "18.0"))
     soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS", "850.0"))
@@ -39,6 +40,7 @@ def select_engine_profile(trend_state: dict[str, Any], latency_ms: float) -> Pro
     if (
         trend in ("UP", "DOWN")
         and age >= soft_min_age
+        and abs(edge) >= soft_min_edge
         and abs(speed) <= soft_max_speed
         and abs(edge) <= soft_max_edge
         and float(latency_ms) <= soft_max_lat
@@ -60,6 +62,7 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
     age = float(trend_state.get("age", 0.0))
 
     soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC", "2.0"))
+    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE", "0.0"))
     soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED", "55.0"))
     soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE", "18.0"))
     soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS", "850.0"))
@@ -72,6 +75,7 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
     volatile_edge = abs(edge) >= vol_edge
     volatile_speed = abs(speed) >= vol_speed
     age_ok = age >= soft_min_age
+    edge_min_ok = abs(edge) >= soft_min_edge
     speed_ok = abs(speed) <= soft_max_speed
     edge_ok = abs(edge) <= soft_max_edge
     lat_ok = float(latency_ms) <= soft_max_lat
@@ -82,6 +86,7 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
         and not volatile_edge
         and not volatile_speed
         and age_ok
+        and edge_min_ok
         and speed_ok
         and edge_ok
         and lat_ok
@@ -102,6 +107,8 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
     else:
         if not age_ok:
             blockers.append("age_below_soft_min")
+        if not edge_min_ok:
+            blockers.append("edge_below_soft_min")
         if not speed_ok:
             blockers.append("speed_above_soft_max")
         if not edge_ok:
@@ -116,6 +123,7 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
         "blockers": blockers,
         "thresholds": {
             "soft_min_age": soft_min_age,
+            "soft_min_abs_edge": soft_min_edge,
             "soft_max_abs_speed": soft_max_speed,
             "soft_max_abs_edge": soft_max_edge,
             "soft_max_latency_ms": soft_max_lat,
@@ -132,6 +140,7 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
         "checks": {
             "directional": directional,
             "age_ok": age_ok,
+            "edge_min_ok": edge_min_ok,
             "speed_ok": speed_ok,
             "edge_ok": edge_ok,
             "latency_ok": lat_ok,
