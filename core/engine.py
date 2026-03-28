@@ -234,6 +234,9 @@ class HFTEngine:
         self.slot_interval_sec = float(os.getenv("HFT_SLOT_INTERVAL_SEC", "300.0"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC", "5.0"))
         self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC", "20.0"))
+        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC", "3.0"))
+        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC", "20.0"))
+        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC", "45.0"))
         self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC", "2.0"))
         self.entry_rsi_slope_filter_enabled = os.getenv(
             "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "0"
@@ -852,6 +855,11 @@ class HFTEngine:
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
+        self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC", "5.0"))
+        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC", "20.0"))
+        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC", "3.0"))
+        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC", "20.0"))
+        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC", "45.0"))
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
         self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED", "0") == "1"
         self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD", "21"))
@@ -964,6 +972,70 @@ class HFTEngine:
         if self.no_entry_first_sec > 0.0 and sec_from_start <= self.no_entry_first_sec:
             return False
         return True
+
+    async def _close_position_slot_edge(
+        self,
+        reason: str,
+        exit_price: float,
+        hold_sec: float,
+        fast_price: float,
+        poly_mid: float,
+        pos_side: str,
+        up_bid: float,
+        up_ask: float,
+        down_bid: float,
+        down_ask: float,
+    ) -> dict:
+        """Execute SELL for slot-boundary exits and return CLOSE payload after state reset."""
+        close_event = await self.execute("SELL", exit_price)
+        ce = close_event or {}
+        _pk = ce.get("performance_key")
+        result = {
+            "event": "CLOSE",
+            "reason": reason,
+            "entry_edge": self.entry_context.get("entry_edge", 0.0),
+            "exit_edge": fast_price - poly_mid,
+            "duration_sec": hold_sec,
+            "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
+            "entry_speed": self.entry_context.get("entry_speed", 0.0),
+            "entry_depth": self.entry_context.get("entry_depth", 0.0),
+            "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
+            "latency_ms": self.entry_context.get("latency_ms", 0.0),
+            "pnl": float(ce.get("pnl") or 0.0),
+            "side": pos_side,
+            "strategy_name": self.entry_context.get("strategy_name"),
+            "entry_profile": self.entry_context.get("entry_profile"),
+            "performance_key": _pk,
+            "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
+            "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
+            "exit_book_px": float(ce.get("book_px") or exit_price),
+            "exit_exec_px": float(ce.get("exec_px") or 0.0),
+            "shares_bought": self.entry_context.get("shares_bought", 0.0),
+            "shares_sold": float(ce.get("shares_sold") or 0.0),
+            "cost_usd": self.entry_context.get("cost_usd", 0.0),
+            "proceeds_usd": float(ce.get("proceeds_usd") or 0.0),
+            "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
+            "entry_up_bid": self.entry_context.get("entry_up_bid"),
+            "entry_up_ask": self.entry_context.get("entry_up_ask"),
+            "entry_down_bid": self.entry_context.get("entry_down_bid"),
+            "entry_down_ask": self.entry_context.get("entry_down_ask"),
+            "exit_up_bid": up_bid,
+            "exit_up_ask": up_ask,
+            "exit_down_bid": down_bid,
+            "exit_down_ask": down_ask,
+        }
+        self.entry_poly_mid = None
+        self.entry_outcome_mid = None
+        self.entry_fast_price = None
+        self.entry_time = 0.0
+        self.position_trend = "FLAT"
+        self.entry_context = {}
+        self._book_stall_ticks = 0
+        self._prev_up_mid = None
+        self._prev_down_mid = None
+        self.last_close_time = time.time()
+        self._reset_trailing_state()
+        return result
 
     def _anchor_gate(self, fast_price: float, slot_anchor_price: float) -> tuple[bool, bool]:
         """Return (up_allowed, down_allowed) based on slot anchor price filter.
@@ -1874,8 +1946,33 @@ class HFTEngine:
             if self.entry_outcome_mid and self.entry_outcome_mid > 0:
                 side_move = (side_mid - self.entry_outcome_mid) / self.entry_outcome_mid
 
-            if seconds_to_expiry is not None and seconds_to_expiry < 45:
-                pos_side = self.pnl.position_side or "UP"
+            pos_side = self.pnl.position_side or "UP"
+            sec_left = float(seconds_to_expiry) if seconds_to_expiry is not None else None
+
+            if (
+                sec_left is not None
+                and self.slot_force_close_last_sec > 0.0
+                and sec_left <= self.slot_force_close_last_sec
+            ):
+                logging.warning(
+                    "⚠️ СЛОТ: до конца ≤%.1fс (осталось %.2fс) — принудительное закрытие по 99¢.",
+                    self.slot_force_close_last_sec,
+                    sec_left,
+                )
+                return await self._close_position_slot_edge(
+                    "SLOT_END_FORCE",
+                    0.99,
+                    hold_sec,
+                    fast_price,
+                    poly_mid,
+                    pos_side,
+                    up_bid,
+                    up_ask,
+                    down_bid,
+                    down_ask,
+                )
+
+            if sec_left is not None and sec_left < self.slot_99c_max_sec:
                 reached_99c = (
                     (down_bid >= 0.99 or down_ask >= 0.99)
                     if pos_side == "DOWN"
@@ -1883,65 +1980,30 @@ class HFTEngine:
                 )
                 if reached_99c:
                     logging.warning(
-                        "⚠️ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс) и достигнуты 99¢ -> закрываем по 99¢",
-                        float(seconds_to_expiry),
+                        "⚠️ СЛОТ: осталось %.0fс (< %.0fс) и 99¢ на книге — закрываем по 99¢.",
+                        sec_left,
+                        self.slot_99c_max_sec,
                     )
-                    exit_price = 0.99
-                    close_event = await self.execute("SELL", exit_price)
-                    ce = close_event or {}
-                    _pk = ce.get("performance_key")
-                    result = {
-                        "event": "CLOSE",
-                        "reason": "SLOT_EXPIRY_99C",
-                        "entry_edge": self.entry_context.get("entry_edge", 0.0),
-                        "exit_edge": fast_price - poly_mid,
-                        "duration_sec": hold_sec,
-                        "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
-                        "entry_speed": self.entry_context.get("entry_speed", 0.0),
-                        "entry_depth": self.entry_context.get("entry_depth", 0.0),
-                        "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
-                        "latency_ms": self.entry_context.get("latency_ms", 0.0),
-                        "pnl": float(ce.get("pnl") or 0.0),
-                        "side": pos_side,
-                        "strategy_name": self.entry_context.get("strategy_name"),
-                        "entry_profile": self.entry_context.get("entry_profile"),
-                        "performance_key": _pk,
-                        "entry_book_px": self.entry_context.get("entry_book_px", 0.0),
-                        "entry_exec_px": self.entry_context.get("entry_exec_px", 0.0),
-                        "exit_book_px": float(ce.get("book_px") or exit_price),
-                        "exit_exec_px": float(ce.get("exec_px") or 0.0),
-                        "shares_bought": self.entry_context.get("shares_bought", 0.0),
-                        "shares_sold": float(ce.get("shares_sold") or 0.0),
-                        "cost_usd": self.entry_context.get("cost_usd", 0.0),
-                        "proceeds_usd": float(ce.get("proceeds_usd") or 0.0),
-                        "cost_basis_usd": float(ce.get("cost_basis_usd") or 0.0),
-                        "entry_up_bid": self.entry_context.get("entry_up_bid"),
-                        "entry_up_ask": self.entry_context.get("entry_up_ask"),
-                        "entry_down_bid": self.entry_context.get("entry_down_bid"),
-                        "entry_down_ask": self.entry_context.get("entry_down_ask"),
-                        "exit_up_bid": up_bid,
-                        "exit_up_ask": up_ask,
-                        "exit_down_bid": down_bid,
-                        "exit_down_ask": down_ask,
-                    }
-                    self.entry_poly_mid = None
-                    self.entry_outcome_mid = None
-                    self.entry_fast_price = None
-                    self.entry_time = 0.0
-                    self.position_trend = "FLAT"
-                    self.entry_context = {}
-                    self._book_stall_ticks = 0
-                    self._prev_up_mid = None
-                    self._prev_down_mid = None
-                    self.last_close_time = time.time()
-                    self._reset_trailing_state()
-                    return result
+                    return await self._close_position_slot_edge(
+                        "SLOT_EXPIRY_99C",
+                        0.99,
+                        hold_sec,
+                        fast_price,
+                        poly_mid,
+                        pos_side,
+                        up_bid,
+                        up_ask,
+                        down_bid,
+                        down_ask,
+                    )
+
+            if sec_left is not None and sec_left < self.slot_expiry_info_max_sec:
                 _now = time.time()
                 _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC", "8.0"))
                 if _slot_log_sec <= 0.0 or _now - self._last_slot_expiry_info_log_ts >= _slot_log_sec:
                     logging.info(
                         "⏳ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс), но 99¢ не достигнуты -> продолжаем плановый выход.",
-                        float(seconds_to_expiry),
+                        sec_left,
                     )
                     self._last_slot_expiry_info_log_ts = _now
 

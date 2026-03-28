@@ -888,9 +888,28 @@ class LiveExecutionEngine:
                     size, place_sz, price,
                 )
 
+        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+        if side == SELL_SIDE and 0.0 < place_sz < poly_min:
+            logging.warning(
+                "⚠️ EMERGENCY SELL size=%.4f < CLOB min %.0f — FAK market sell.",
+                place_sz,
+                poly_min,
+            )
+            filled = await self._fak_sell(token_id, place_sz)
+            if filled <= 0.0:
+                logging.error(
+                    "🛑 Emergency FAK SELL failed token=%s size=%.4f.",
+                    token_id[:20],
+                    place_sz,
+                )
+            return
+
         logging.warning(
-            "🚨 EMERGENCY CLOSE: %s %.2f @ %.4f token=%s",
-            side, place_sz, price, token_id,
+            "🚨 EMERGENCY CLOSE: %s %.4f @ %.4f token=%s",
+            side,
+            place_sz,
+            price,
+            token_id[:20],
         )
         self._entry_stats["emergency_exits"] += 1
         order_id, immediate = await asyncio.to_thread(
