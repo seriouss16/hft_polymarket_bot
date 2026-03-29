@@ -100,8 +100,8 @@ class StatsCollector:
     @staticmethod
     def _session_mode_label() -> str:
         """Return human-readable session mode string for the report header."""
-        day_mode = os.getenv("DAY_MODE", "0").strip()
-        night_mode = os.getenv("NIGHT_MODE", "0").strip()
+        day_mode = (os.getenv("DAY_MODE") or "0").strip()
+        night_mode = (os.getenv("NIGHT_MODE") or "0").strip()
         forced = (day_mode == "1") != (night_mode == "1")
         if forced:
             active = "DAY ☀️" if day_mode == "1" else "NIGHT 🌙"

@@ -18,8 +18,8 @@ from ml.indicators import (
     dynamic_rsi_bands,
 )
 
-DEBUG_LOG_PATH = "/mnt/work/DEV/PRJ0/prjBJ_arb_polymarket/.cursor/debug-ac56e4.log"
-DEBUG_SESSION_ID = "ac56e4"
+DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
+DEBUG_SESSION_ID = os.getenv("DEBUG_SESSION_ID")
 _DEBUG_LOG_ENABLED = os.getenv("HFT_DEBUG_LOG_ENABLED", "0") == "1"
 
 
@@ -56,26 +56,26 @@ class HFTEngine:
         self._strategy_label = str(strategy_label)
         
         # --- Базовый Edge (в пунктах цены) ---
-        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE", "0.8"))   # Уменьшаем порог шума для более чувствительного входа
-        self.buy_edge = float(os.getenv("HFT_BUY_EDGE", "2.5"))      # Уменьшаем порог входа для большего количества сигналов
-        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS", "5.0"))  # Уменьшаем порог выхода
+        self.noise_edge = float(os.getenv("HFT_NOISE_EDGE"))
+        self.buy_edge = float(os.getenv("HFT_BUY_EDGE"))
+        self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS"))
         
         # --- Тайминги и объемы ---
-        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC", "0.05"))
+        self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC"))
         self.last_trade_time = 0.0
-        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD", "100.0"))
-        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
-        self.exit_on_opposite_trend = os.getenv("HFT_EXIT_ON_OPPOSITE_TREND", "1") == "1"
+        self.max_position = float(os.getenv("HFT_MAX_POSITION_USD"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC"))
+        self.exit_on_opposite_trend = os.getenv("HFT_EXIT_ON_OPPOSITE_TREND") == "1"
         self.opposite_trend_exit_min_hold_sec = float(
-            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC", "0.0")
+            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC")
         )
         self.opposite_trend_exit_min_abs_edge = float(
-            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_ABS_EDGE", "0.0")
+            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_ABS_EDGE")
         )
-        self.post_close_reentry_sec = float(os.getenv("HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC", "0.0"))
+        self.post_close_reentry_sec = float(os.getenv("HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC"))
         self.last_close_time = 0.0
-        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC", "10.0"))
+        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC"))
         self.entry_poly_mid = None
         self.entry_outcome_mid = None
         self.entry_fast_price = None
@@ -83,58 +83,58 @@ class HFTEngine:
         self._live_entry_sync_pending = False
 
         # --- Тейки и Стопы (в пунктах и USD) ---
-        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
-        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD", "2.5"))
-        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD", "1.5"))
-        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT", "0.07"))
-        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT", "0.05"))
-        self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC", "2.0"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE"))
+        self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD"))
+        self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD"))
+        self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT"))
+        self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT"))
+        self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC"))
 
         # --- Trailing TP/SL ---
-        self.trailing_tp_enabled = os.getenv("HFT_TRAILING_TP_ENABLED", "1") == "1"
-        self.trailing_tp_activate_usd = float(os.getenv("HFT_TRAILING_TP_ACTIVATE_USD", "0.04"))
-        self.trailing_tp_pullback_pct = float(os.getenv("HFT_TRAILING_TP_PULLBACK_PCT", "0.35"))
-        self.trailing_tp_min_pullback_usd = float(os.getenv("HFT_TRAILING_TP_MIN_PULLBACK_USD", "0.03"))
-        self.trailing_sl_enabled = os.getenv("HFT_TRAILING_SL_ENABLED", "1") == "1"
-        self.trailing_sl_breakeven_at_usd = float(os.getenv("HFT_TRAILING_SL_BREAKEVEN_AT_USD", "0.06"))
-        self.trailing_sl_step_usd = float(os.getenv("HFT_TRAILING_SL_STEP_USD", "0.04"))
-        self.trailing_sl_step_lock_pct = float(os.getenv("HFT_TRAILING_SL_STEP_LOCK_PCT", "0.50"))
+        self.trailing_tp_enabled = os.getenv("HFT_TRAILING_TP_ENABLED") == "1"
+        self.trailing_tp_activate_usd = float(os.getenv("HFT_TRAILING_TP_ACTIVATE_USD"))
+        self.trailing_tp_pullback_pct = float(os.getenv("HFT_TRAILING_TP_PULLBACK_PCT"))
+        self.trailing_tp_min_pullback_usd = float(os.getenv("HFT_TRAILING_TP_MIN_PULLBACK_USD"))
+        self.trailing_sl_enabled = os.getenv("HFT_TRAILING_SL_ENABLED") == "1"
+        self.trailing_sl_breakeven_at_usd = float(os.getenv("HFT_TRAILING_SL_BREAKEVEN_AT_USD"))
+        self.trailing_sl_step_usd = float(os.getenv("HFT_TRAILING_SL_STEP_USD"))
+        self.trailing_sl_step_lock_pct = float(os.getenv("HFT_TRAILING_SL_STEP_LOCK_PCT"))
         self._peak_unrealized = 0.0
         self._trailing_sl_floor = None
 
         # --- RSI логика ---
         self.rsi_period = 14
-        self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN", "128"))
+        self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN"))
         self._last_rsi = 50.0
         self.rsi_entry_up_low = float(
-            os.getenv("HFT_RSI_ENTRY_UP_LOW", os.getenv("HFT_RSI_ENTRY_YES_LOW", "20.0"))
+            os.getenv("HFT_RSI_ENTRY_UP_LOW") or os.getenv("HFT_RSI_ENTRY_YES_LOW")
         )
         self.rsi_entry_up_high = float(
-            os.getenv("HFT_RSI_ENTRY_UP_HIGH", os.getenv("HFT_RSI_ENTRY_YES_HIGH", "80.0"))
+            os.getenv("HFT_RSI_ENTRY_UP_HIGH") or os.getenv("HFT_RSI_ENTRY_YES_HIGH")
         )
         self.rsi_entry_down_low = float(
-            os.getenv("HFT_RSI_ENTRY_DOWN_LOW", os.getenv("HFT_RSI_ENTRY_NO_LOW", "20.0"))
+            os.getenv("HFT_RSI_ENTRY_DOWN_LOW") or os.getenv("HFT_RSI_ENTRY_NO_LOW")
         )
         self.rsi_entry_down_high = float(
-            os.getenv("HFT_RSI_ENTRY_DOWN_HIGH", os.getenv("HFT_RSI_ENTRY_NO_HIGH", "80.0"))
+            os.getenv("HFT_RSI_ENTRY_DOWN_HIGH") or os.getenv("HFT_RSI_ENTRY_NO_HIGH")
         )
         
         # Выходы по RSI
-        self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE", "85"))
-        self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE", "15"))
-        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD", "0.3"))
-        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN", "10.0"))
-        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH", "90"))
-        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW", "10"))
-        self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K", "0.12"))
-        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC", "0.6"))
-        self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC", "0.0"))
-        self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH", "99.0"))
-        self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW", "1.0"))
+        self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE"))
+        self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE"))
+        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD"))
+        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN"))
+        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH"))
+        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW"))
+        self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K"))
+        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC"))
+        self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC"))
+        self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
+        self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
 
         # --- RSI Slope (Наклон) ---
-        self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED", "1") == "1"
+        self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED") == "1"
         self.rsi_slope_up_exit = -2.0
         self.rsi_slope_down_exit = 2.0
         self._rsi_tick_history = deque(maxlen=10)
@@ -144,21 +144,21 @@ class HFTEngine:
         self._last_rsi_raw = 50.0
         self._last_ma_fast = 0.0
         self._last_macd_hist = 0.0
-        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED", "0") == "1"
-        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD", "21"))
-        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST", "12"))
-        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW", "26"))
-        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL", "9"))
-        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE", "0.0008"))
-        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE", "25.0"))
-        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI", "0.45"))
-        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA", "0.30"))
-        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD", "0.25"))
+        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED") == "1"
+        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD"))
+        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST"))
+        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW"))
+        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL"))
+        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE"))
+        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE"))
+        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI"))
+        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA"))
+        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD"))
         self.rsi_hold_up_floor = float(
-            os.getenv("HFT_RSI_HOLD_UP_FLOOR", os.getenv("HFT_RSI_HOLD_YES_FLOOR", "40.0"))
+            os.getenv("HFT_RSI_HOLD_UP_FLOOR") or os.getenv("HFT_RSI_HOLD_YES_FLOOR")
         )
         self.rsi_hold_down_ceiling = float(
-            os.getenv("HFT_RSI_HOLD_DOWN_CEILING", os.getenv("HFT_RSI_HOLD_NO_CEILING", "60.0"))
+            os.getenv("HFT_RSI_HOLD_DOWN_CEILING") or os.getenv("HFT_RSI_HOLD_NO_CEILING")
         )
         self.rsi_allow_bypass_on_strong_edge = os.getenv(
             "HFT_RSI_ALLOW_BYPASS_STRONG_EDGE", "0"
@@ -166,107 +166,97 @@ class HFTEngine:
         self.rsi_allow_bypass_on_aggressive_edge = os.getenv(
             "HFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "1"
         ) == "1"
-        self.aggressive_entry_relax_speed = float(
-            os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED", "-8.0")
-        )
-        self.aggressive_entry_relax_speed_down = float(
-            os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED_DOWN", "30.0")
-        )
+        self.aggressive_entry_relax_speed = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED"))
+        self.aggressive_entry_relax_speed_down = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED_DOWN"))
 
         # --- Подтверждение входа (Entry Confirm) ---
-        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC", "0.1"))
-        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC", "0.2"))
-        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE", "5.0"))
-        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW", "0.20"))
-        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH", "0.80"))
-        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT", "0.85"))
-        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.0"))
-        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.0"))
+        self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC"))
+        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC"))
+        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE"))
+        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW"))
+        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH"))
+        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT"))
+        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
+        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
 
         # --- Скорость и Акселерация ---
-        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
-        self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED", "0") == "1"
-        self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN", "0.10"))
-        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR", "0.15"))
+        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR"))
+        self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED") == "1"
+        self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN"))
+        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR"))
 
         # --- Динамический объем (Risk Management) ---
-        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD", "5.0"))
-        self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "20.0"))
-        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "100.0"))
-        self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW", "0.30"))
-        self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE", "0.70"))
-        self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE", "0.01"))
-        self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD", "30.0"))
-        self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD", "45.0"))
-        self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD", "80.0"))
+        self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD"))
+        self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD"))
+        self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD"))
+        self.dynamic_cheap_price_below = float(os.getenv("HFT_DYNAMIC_CHEAP_PRICE_BELOW"))
+        self.dynamic_rich_price_above = float(os.getenv("HFT_DYNAMIC_RICH_PRICE_ABOVE"))
+        self.dynamic_min_exec_price = float(os.getenv("HFT_DYNAMIC_MIN_EXEC_PRICE"))
+        self.dynamic_floor_notional_usd = float(os.getenv("HFT_DYNAMIC_FLOOR_NOTIONAL_USD"))
+        self.dynamic_amount_cheap_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_CHEAP_USD"))
+        self.dynamic_amount_rich_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_RICH_USD"))
 
-        self.deposit_usd = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
-        self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT", "10"))
-        self.fixed_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
+        self.deposit_usd = float(os.getenv("HFT_DEPOSIT_USD"))
+        self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT"))
+        self.fixed_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
 
         # --- Стакан (Orderbook) и Ликвидность ---
-        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN", "0.0001"))
-        self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX", "0.0008"))
-        self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS", "30"))
-        self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD", "0.015")) # Не входим если спред > 1.5%
-        self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK", "0.99"))
+        self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN"))
+        self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX"))
+        self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS"))
+        self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD"))
+        self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK"))
         self._prev_up_mid = None
         self._prev_down_mid = None
         self._book_stall_ticks = 0
-        self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT", "2.0"))
-        self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT", "3.0"))
-        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "0.35"))
-        self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE", "12.0"))
-        self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD", "0.03"))
-        self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED", "1") == "1"
+        self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT"))
+        self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT"))
+        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
+        self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE"))
+        self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD"))
+        self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
 
         # --- Задержка (Latency Guard) ---
-        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1200.0"))
-        self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS", "550.0"))
-        self.entry_min_ask_up_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_UP", "0.08"))
-        self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP", "0.97"))
-        self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN", "0.08"))
-        self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN", "0.97"))
-        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS", "400.0"))
-        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT", "1.3"))
-        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC", "30.0"))
-        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT", "2.0"))
-        self.slot_interval_sec = float(os.getenv("HFT_SLOT_INTERVAL_SEC", "300.0"))
-        self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC", "5.0"))
-        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC", "20.0"))
-        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC", "3.0"))
-        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC", "20.0"))
-        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC", "45.0"))
-        self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC", "2.0"))
+        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
+        self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS"))
+        self.entry_min_ask_up_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_UP"))
+        self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP"))
+        self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN"))
+        self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN"))
+        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS"))
+        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT"))
+        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC"))
+        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT"))
+        self.slot_interval_sec = float(os.getenv("HFT_SLOT_INTERVAL_SEC"))
+        self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
+        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC"))
+        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
+        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
+        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
+        self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC"))
         self.entry_rsi_slope_filter_enabled = os.getenv(
-            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED", "0"
+            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED"
         ) == "1"
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "50.0"))
-        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "50.0"))
-        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
-        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
-        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
+        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
+        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX"))
+        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
+        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
 
         # --- Z-Score (Статистический вход) ---
-        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
-        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
+        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
 
         # --- Anti-spoof: reject one-tick CEX spikes vs lagging Poly oracle. ---
-        self.entry_max_edge_jump_pts = float(os.getenv("HFT_ENTRY_MAX_EDGE_JUMP_PTS", "8.0"))
-        self.entry_edge_jump_bypass_abs_speed = float(
-            os.getenv("HFT_ENTRY_EDGE_JUMP_BYPASS_ABS_SPEED", "0")
-        )
-        self.entry_zscore_bypass_abs_speed = float(
-            os.getenv("HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED", "0")
-        )
-        self.entry_aggressive_min_trend_age_sec = float(
-            os.getenv("HFT_AGGRESSIVE_MIN_TREND_AGE_SEC", "0.0")
-        )
+        self.entry_max_edge_jump_pts = float(os.getenv("HFT_ENTRY_MAX_EDGE_JUMP_PTS"))
+        self.entry_edge_jump_bypass_abs_speed = float(os.getenv("HFT_ENTRY_EDGE_JUMP_BYPASS_ABS_SPEED"))
+        self.entry_zscore_bypass_abs_speed = float(os.getenv("HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED"))
+        self.entry_aggressive_min_trend_age_sec = float(os.getenv("HFT_AGGRESSIVE_MIN_TREND_AGE_SEC"))
 
         # --- Вспомогательные состояния ---
         self.soft_exits_enabled = True
-        self.no_entry_guards = os.getenv("HFT_NO_ENTRY_GUARDS", "0") == "1"
+        self.no_entry_guards = os.getenv("HFT_NO_ENTRY_GUARDS") == "1"
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
         self.trend_dir = "FLAT"
@@ -281,7 +271,7 @@ class HFTEngine:
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
         self._last_entry_cap_deny_log_ts = 0.0
-        self.filter_diag_log_sec = float(os.getenv("HFT_FILTER_DIAG_LOG_SEC", "30.0"))
+        self.filter_diag_log_sec = float(os.getenv("HFT_FILTER_DIAG_LOG_SEC"))
         self._last_filter_diag_log_ts = time.time()
         self._filter_diag_stats: dict[str, int] = {}
         self._init_entry_profiles()
@@ -314,33 +304,29 @@ class HFTEngine:
 
     def _build_soft_flow_profile(self, latency_base: dict[str, float | bool]) -> dict[str, float | bool]:
         """Build soft-flow profile from HFT_SOFT_* env with calmer defaults than latency."""
-        sell_abs = os.getenv("HFT_SELL_EDGE_ABS", "5.0")
+        sell_abs = os.getenv("HFT_SELL_EDGE_ABS")
         soft: dict[str, float | bool] = dict(latency_base)
-        soft["noise_edge"] = float(os.getenv("HFT_SOFT_NOISE_EDGE", "1.2"))
-        soft["buy_edge"] = float(os.getenv("HFT_SOFT_BUY_EDGE", "4.0"))
-        soft["sell_edge"] = -float(os.getenv("HFT_SOFT_SELL_EDGE_ABS", sell_abs))
-        soft["entry_confirm_age"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_SEC", "1.0"))
+        soft["noise_edge"] = float(os.getenv("HFT_SOFT_NOISE_EDGE"))
+        soft["buy_edge"] = float(os.getenv("HFT_SOFT_BUY_EDGE"))
+        soft["sell_edge"] = -float(os.getenv("HFT_SOFT_SELL_EDGE_ABS") or sell_abs)
+        soft["entry_confirm_age"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_SEC"))
         soft["reversal_confirm_age"] = float(
-            os.getenv("HFT_SOFT_REVERSAL_CONFIRM_AGE_SEC", str(latency_base["reversal_confirm_age"]))
+            os.getenv("HFT_SOFT_REVERSAL_CONFIRM_AGE_SEC") or str(latency_base["reversal_confirm_age"])
         )
-        soft["entry_confirm_age_strong"] = float(
-            os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_STRONG_SEC", "2.0")
-        )
-        soft["strong_edge_rsi_mult"] = float(os.getenv("HFT_SOFT_STRONG_EDGE_RSI_MULT", "2.5"))
-        soft["aggressive_edge_mult"] = float(os.getenv("HFT_SOFT_AGGRESSIVE_EDGE_MULT", "8.0"))
+        soft["entry_confirm_age_strong"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
+        soft["strong_edge_rsi_mult"] = float(os.getenv("HFT_SOFT_STRONG_EDGE_RSI_MULT"))
+        soft["aggressive_edge_mult"] = float(os.getenv("HFT_SOFT_AGGRESSIVE_EDGE_MULT"))
         soft["entry_momentum_alt_enabled"] = (
-            os.getenv("HFT_SOFT_ENTRY_MOMENTUM_ALT_ENABLED", "0") == "1"
+            os.getenv("HFT_SOFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
         )
-        soft["entry_max_edge_jump_pts"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_EDGE_JUMP_PTS", "4.0"))
-        soft["entry_max_latency_ms"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_LATENCY_MS", "900.0"))
-        soft["speed_floor"] = float(os.getenv("HFT_SOFT_SPEED_FLOOR", str(latency_base["speed_floor"])))
-        soft["entry_low_speed_abs"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_ABS", "0.5"))
-        soft["entry_low_speed_edge_mult"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_EDGE_MULT", "1.5"))
-        soft["entry_aggressive_min_trend_age_sec"] = float(
-            os.getenv("HFT_SOFT_ENTRY_AGGRESSIVE_MIN_TREND_AGE_SEC", "1.0")
-        )
+        soft["entry_max_edge_jump_pts"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_EDGE_JUMP_PTS"))
+        soft["entry_max_latency_ms"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_LATENCY_MS"))
+        soft["speed_floor"] = float(os.getenv("HFT_SOFT_SPEED_FLOOR") or str(latency_base["speed_floor"]))
+        soft["entry_low_speed_abs"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_ABS"))
+        soft["entry_low_speed_edge_mult"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_EDGE_MULT"))
+        soft["entry_aggressive_min_trend_age_sec"] = float(os.getenv("HFT_SOFT_ENTRY_AGGRESSIVE_MIN_TREND_AGE_SEC"))
         soft["rsi_allow_bypass_on_aggressive_edge"] = (
-            os.getenv("HFT_SOFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "0") == "1"
+            os.getenv("HFT_SOFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE") == "1"
         )
         return soft
 
@@ -410,7 +396,7 @@ class HFTEngine:
             self.entry_max_latency_ms,
             self.entry_max_skew_ms,
             self.trend_flip_min_age_sec,
-            os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC", "0.0"),
+            os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC"),
             int(self.no_entry_guards),
             self.cooldown,
             self.post_close_reentry_sec,
@@ -434,10 +420,10 @@ class HFTEngine:
 
     def _regime_allows_new_entries(self) -> bool:
         """Return True when rolling PnL regime allows new entries (optional soft_flow bypass)."""
-        if os.getenv("HFT_REGIME_FILTER_ENABLED", "1") == "0":
+        if os.getenv("HFT_REGIME_FILTER_ENABLED") == "0":
             return True
         if (
-            os.getenv("HFT_REGIME_BYPASS_SOFT_FLOW", "0") == "1"
+            os.getenv("HFT_REGIME_BYPASS_SOFT_FLOW") == "1"
             and self.get_active_profile() == "soft_flow"
         ):
             return True
@@ -764,7 +750,7 @@ class HFTEngine:
         min_p = self.rsi_range_exit_min_profit_usd
         tp_line, _ = self._pnl_target_and_stop_lines()
         min_hold = float(self.rsi_range_exit_min_hold_sec)
-        fade_need_pos = os.getenv("HFT_RSI_RANGE_EXIT_FADE_REQUIRE_POSITIVE", "0") == "1"
+        fade_need_pos = os.getenv("HFT_RSI_RANGE_EXIT_FADE_REQUIRE_POSITIVE") == "1"
         rx = self._exit_rsi(current_rsi)
         if position_side == "UP":
             if rx >= self.rsi_entry_up_high and unrealized >= tp_line:
@@ -848,36 +834,36 @@ class HFTEngine:
         so that the running engine immediately picks up the new thresholds without
         requiring a full restart.
         """
-        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN", "2.0"))
-        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX", "-2.0"))
-        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS", "1200.0"))
-        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED", "1") == "1"
-        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS", "2"))
-        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT", "2.0"))
-        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS", "1.0"))
-        self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC", "5.0"))
-        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC", "20.0"))
-        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC", "3.0"))
-        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC", "20.0"))
-        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC", "45.0"))
-        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR", "0.02"))
-        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED", "0") == "1"
-        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD", "21"))
-        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST", "12"))
-        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW", "26"))
-        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL", "9"))
-        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE", "0.0008"))
-        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE", "25.0"))
-        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI", "0.45"))
-        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA", "0.30"))
-        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD", "0.25"))
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX", "55.0"))
-        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN", "0.0"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN", "45.0"))
-        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX", "0.0"))
-        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE", "0.0030"))
-        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE", "0.0025"))
-        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC", "2.0"))
+        self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
+        self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
+        self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
+        self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
+        self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
+        self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
+        self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
+        self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
+        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC"))
+        self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
+        self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
+        self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
+        self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR"))
+        self.reaction_score_enabled = os.getenv("HFT_REACTION_SCORE_ENABLED") == "1"
+        self.reaction_ma_period = int(os.getenv("HFT_REACTION_MA_PERIOD"))
+        self.reaction_macd_fast = int(os.getenv("HFT_REACTION_MACD_FAST"))
+        self.reaction_macd_slow = int(os.getenv("HFT_REACTION_MACD_SLOW"))
+        self.reaction_macd_signal = int(os.getenv("HFT_REACTION_MACD_SIGNAL"))
+        self.reaction_ma_rel_scale = float(os.getenv("HFT_REACTION_MA_REL_SCALE"))
+        self.reaction_macd_hist_scale = float(os.getenv("HFT_REACTION_MACD_HIST_SCALE"))
+        self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI"))
+        self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA"))
+        self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD"))
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
+        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
+        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX"))
+        self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE"))
+        self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE"))
+        self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC"))
         logging.info(
             "[ENGINE] Profile params reloaded: speed_min=%.2f speed_max=%.2f "
             "latency=%.0fms zscore=%s low_speed_mult=%.2f reaction=%s "
@@ -1046,11 +1032,11 @@ class HFTEngine:
         allowed.  Trades aligned with the anchor direction are always allowed.
         When the filter is disabled or anchor is unknown, both gates are True.
         """
-        enabled = os.getenv("HFT_ANCHOR_FILTER_ENABLED", "1") == "1"
+        enabled = os.getenv("HFT_ANCHOR_FILTER_ENABLED") == "1"
         if not enabled or slot_anchor_price <= 0.0 or fast_price <= 0.0:
             return True, True
         delta_pct = (fast_price - slot_anchor_price) / slot_anchor_price
-        min_delta = float(os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT", "0.0005"))
+        min_delta = float(os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT"))
         # BUY_UP is aligned when price > anchor; BUY_DOWN is aligned when price < anchor.
         # Counter-direction entries require the price to have moved min_delta away from
         # anchor on the opposite side, suggesting a sustained reversal.
@@ -1284,7 +1270,7 @@ class HFTEngine:
         aggressive = self._is_aggressive_oracle_edge(edge)
         if aggressive:
             now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "5.0"))
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC"))
             if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
                 logging.info(
                     "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
@@ -1350,11 +1336,11 @@ class HFTEngine:
                     return None
             return "BUY_DOWN"
         if abs(edge) >= self.buy_edge * self.aggressive_edge_mult * 1.2:
-            sj_min_age = float(os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC", "0.0"))
+            sj_min_age = float(os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC"))
             if sj_min_age > 0.0 and age < sj_min_age:
                 return None
             now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC", "5.0"))
+            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC"))
             if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
                 logging.info(
                     "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
@@ -1479,7 +1465,7 @@ class HFTEngine:
         if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
             self._diag_inc("entry_block_regime")
             _now = time.time()
-            _regime_log_sec = float(os.getenv("HFT_REGIME_SKIP_LOG_MIN_SEC", "15.0"))
+            _regime_log_sec = float(os.getenv("HFT_REGIME_SKIP_LOG_MIN_SEC"))
             if _regime_log_sec <= 0.0 or _now - self._last_regime_skip_log_ts >= _regime_log_sec:
                 logging.info(
                     "Regime filter: recent performance is bad -> skip all entries "
@@ -1655,7 +1641,7 @@ class HFTEngine:
                 if not aggressive_age_ok:
                     self._diag_inc("entry_block_aggressive_age")
                 _now = time.time()
-                _fg_log = float(os.getenv("HFT_FEED_GATE_LOG_MIN_SEC", "30.0"))
+                _fg_log = float(os.getenv("HFT_FEED_GATE_LOG_MIN_SEC"))
                 if (
                     _fg_log > 0.0
                     and _now - self._last_feed_gate_log_ts >= _fg_log
@@ -1732,7 +1718,7 @@ class HFTEngine:
             book_ok_down = book_entry_down or strong_rsi or aggressive_edge
 
         _t_cap = time.time()
-        _cap_log_sec = float(os.getenv("HFT_ENTRY_CAP_DENY_LOG_SEC", "20.0"))
+        _cap_log_sec = float(os.getenv("HFT_ENTRY_CAP_DENY_LOG_SEC"))
         if (
             self.pnl.inventory == 0
             and signal == "BUY_UP"
@@ -1999,7 +1985,7 @@ class HFTEngine:
 
             if sec_left is not None and sec_left < self.slot_expiry_info_max_sec:
                 _now = time.time()
-                _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC", "8.0"))
+                _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC"))
                 if _slot_log_sec <= 0.0 or _now - self._last_slot_expiry_info_log_ts >= _slot_log_sec:
                     logging.info(
                         "⏳ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс), но 99¢ не достигнуты -> продолжаем плановый выход.",
@@ -2025,7 +2011,7 @@ class HFTEngine:
             # is not reliable — a large bid can appear without a real reversal.
             # Only allow imbalance to trigger internal_reversal when RSI is above
             # the extreme-low threshold (DOWN) or below extreme-high (UP).
-            _imb_rsi_gate = float(os.getenv("HFT_INTERNAL_REVERSAL_IMB_RSI_GATE", "20.0"))
+            _imb_rsi_gate = float(os.getenv("HFT_INTERNAL_REVERSAL_IMB_RSI_GATE"))
             if pos_side == "DOWN":
                 # DOWN token profits when BTC falls → exit when BTC is overbought
                 # (Rx high) signalling a reversal back up that would hurt the position.

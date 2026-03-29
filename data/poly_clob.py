@@ -70,5 +70,5 @@ class PolyOrderBook:
                 raise
             except Exception as e:
                 logging.error(f"❌ Poly RTDS Error: {e}")
-                delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0"))
+                delay = float(os.getenv("HFT_WS_RECONNECT_SEC"))
                 await asyncio.sleep(delay)

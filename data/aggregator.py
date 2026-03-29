@@ -67,10 +67,10 @@ class FastPriceAggregator:
             return c_price
 
         drift = float(b["price"]) - c_price
-        blend = max(0.0, min(1.0, float(os.getenv("HFT_SMART_BINANCE_BLEND", "0.7"))))
-        baseline = float(os.getenv("HFT_SMART_CB_BN_BASELINE_USD", "0"))
-        thresh = float(os.getenv("HFT_SMART_DRIFT_THRESHOLD_USD", "20.0"))
-        excess_th = float(os.getenv("HFT_SMART_EXCESS_THRESHOLD_USD", "5.0"))
+        blend = max(0.0, min(1.0, float(os.getenv("HFT_SMART_BINANCE_BLEND"))))
+        baseline = float(os.getenv("HFT_SMART_CB_BN_BASELINE_USD"))
+        thresh = float(os.getenv("HFT_SMART_DRIFT_THRESHOLD_USD"))
+        excess_th = float(os.getenv("HFT_SMART_EXCESS_THRESHOLD_USD"))
 
         if baseline > 0.0:
             excess = drift - baseline

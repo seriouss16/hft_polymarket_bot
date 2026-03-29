@@ -82,5 +82,5 @@ class FastExchangeProvider:
                 raise
             except Exception as e:
                 logging.error(f"❌ [{self.name}] Ошибка: {e}")
-                delay = float(os.getenv("HFT_WS_RECONNECT_SEC", "0"))
+                delay = float(os.getenv("HFT_WS_RECONNECT_SEC"))
                 await asyncio.sleep(delay)

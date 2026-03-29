@@ -25,8 +25,8 @@ import os
 from datetime import datetime, timezone
 from typing import Final
 
-NIGHT_START_UTC: Final[int] = int(os.getenv("HFT_NIGHT_START_UTC_HOUR", "23"))
-NIGHT_END_UTC: Final[int] = int(os.getenv("HFT_NIGHT_END_UTC_HOUR", "6"))
+NIGHT_START_UTC: Final[int] = int(os.getenv("HFT_NIGHT_START_UTC_HOUR"))
+NIGHT_END_UTC: Final[int] = int(os.getenv("HFT_NIGHT_END_UTC_HOUR"))
 
 # ---------------------------------------------------------------------------
 # Profile parameter sets — keys must match HFTEngine.__init__ env reads.
@@ -210,8 +210,8 @@ def current_profile_name() -> str:
       DAY_MODE=0  NIGHT_MODE=0  → automatic (UTC time + weekend logic).
       DAY_MODE=1  NIGHT_MODE=1  → automatic (both set = no override).
     """
-    day_mode = os.getenv("DAY_MODE", "0").strip()
-    night_mode = os.getenv("NIGHT_MODE", "0").strip()
+    day_mode = os.getenv("DAY_MODE") or "0"
+    night_mode = os.getenv("NIGHT_MODE") or "0"
     if day_mode == "1" and night_mode != "1":
         return "day"
     if night_mode == "1" and day_mode != "1":
@@ -261,8 +261,8 @@ def apply_profile(force: bool = False) -> str:
         return name
     profile_dict = _PROFILE_MAP[name]
     _apply(profile_dict, name)
-    day_mode = os.getenv("DAY_MODE", "0").strip()
-    night_mode = os.getenv("NIGHT_MODE", "0").strip()
+    day_mode = os.getenv("DAY_MODE") or "0"
+    night_mode = os.getenv("NIGHT_MODE") or "0"
     forced = (day_mode == "1") != (night_mode == "1")
     label = "[FORCED] " if forced else ("WEEKEND " if _is_weekend() else "")
     logging.info(

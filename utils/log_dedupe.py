@@ -26,8 +26,8 @@ class SameMessageDedupeFilter(logging.Filter):
         if getattr(record, "_dedupe_same_msg_resolved", False):
             return bool(getattr(record, "_dedupe_same_msg_allow", True))
         try:
-            min_sec = float(os.getenv("HFT_LOG_DEDUPE_SAME_MSG_SEC", "1.0"))
-        except ValueError:
+            min_sec = float(os.getenv("HFT_LOG_DEDUPE_SAME_MSG_SEC"))
+        except (ValueError, TypeError):
             min_sec = 1.0
         record._dedupe_same_msg_resolved = True
         if min_sec <= 0.0:

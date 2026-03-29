@@ -61,15 +61,15 @@ class MarketRegimeDetector:
 
     def __init__(self) -> None:
         """Initialise rolling buffers and thresholds from environment."""
-        self._window: int = int(os.getenv("REGIME_WINDOW_TICKS", "60"))
-        self._calm_speed: float = float(os.getenv("REGIME_CALM_SPEED_MAX", "0.5"))
-        self._active_speed: float = float(os.getenv("REGIME_ACTIVE_SPEED_MIN", "3.0"))
-        self._calm_stale: float = float(os.getenv("REGIME_CALM_STALE_MIN_MS", "1200.0"))
-        self._log_min_sec: float = float(os.getenv("REGIME_LOG_MIN_SEC", "30.0"))
+        self._window: int = int(os.getenv("REGIME_WINDOW_TICKS"))
+        self._calm_speed: float = float(os.getenv("REGIME_CALM_SPEED_MAX"))
+        self._active_speed: float = float(os.getenv("REGIME_ACTIVE_SPEED_MIN"))
+        self._calm_stale: float = float(os.getenv("REGIME_CALM_STALE_MIN_MS"))
+        self._log_min_sec: float = float(os.getenv("REGIME_LOG_MIN_SEC"))
         # Minimum ticks a new regime must be sustained before triggering a switch.
         # Prevents rapid CALM↔MIXED↔CALM flipping when metrics oscillate near
         # the threshold boundary.  Default: 10 ticks (~2.5 s at 250 ms/tick).
-        self._hysteresis_ticks: int = int(os.getenv("REGIME_HYSTERESIS_TICKS", "10"))
+        self._hysteresis_ticks: int = int(os.getenv("REGIME_HYSTERESIS_TICKS"))
 
         self._speeds: deque[float] = deque(maxlen=self._window)
         self._stales: deque[float] = deque(maxlen=self._window)

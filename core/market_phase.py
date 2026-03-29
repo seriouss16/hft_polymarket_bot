@@ -14,7 +14,7 @@ def select_engine_profile(trend_state: dict[str, Any], latency_ms: float) -> Pro
     Uses UP/DOWN with bounded speed and edge for soft_flow; large edge/speed or FLAT
     trend selects aggressive latency profile.
     """
-    if os.getenv("HFT_PHASE_SOFT_FLOW_ENABLE", "1") != "1":
+    if os.getenv("HFT_PHASE_SOFT_FLOW_ENABLE") != "1":
         return "latency"
 
     trend = str(trend_state.get("trend", "FLAT"))
@@ -22,14 +22,14 @@ def select_engine_profile(trend_state: dict[str, Any], latency_ms: float) -> Pro
     edge = float(trend_state.get("edge", 0.0))
     age = float(trend_state.get("age", 0.0))
 
-    soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC", "2.0"))
-    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE", "0.0"))
-    soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED", "55.0"))
-    soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE", "18.0"))
-    soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS", "850.0"))
+    soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC"))
+    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE"))
+    soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED"))
+    soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE"))
+    soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS"))
 
-    vol_edge = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_EDGE", "28.0"))
-    vol_speed = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_SPEED", "220.0"))
+    vol_edge = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_EDGE"))
+    vol_speed = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_SPEED"))
 
     if trend == "FLAT":
         return "latency"
@@ -61,16 +61,16 @@ def diagnose_phase(trend_state: dict[str, Any], latency_ms: float) -> dict[str, 
     edge = float(trend_state.get("edge", 0.0))
     age = float(trend_state.get("age", 0.0))
 
-    soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC", "2.0"))
-    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE", "0.0"))
-    soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED", "55.0"))
-    soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE", "18.0"))
-    soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS", "850.0"))
+    soft_min_age = float(os.getenv("HFT_PHASE_SOFT_MIN_TREND_AGE_SEC"))
+    soft_min_edge = float(os.getenv("HFT_PHASE_SOFT_MIN_ABS_EDGE"))
+    soft_max_speed = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_SPEED"))
+    soft_max_edge = float(os.getenv("HFT_PHASE_SOFT_MAX_ABS_EDGE"))
+    soft_max_lat = float(os.getenv("HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS"))
 
-    vol_edge = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_EDGE", "28.0"))
-    vol_speed = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_SPEED", "220.0"))
+    vol_edge = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_EDGE"))
+    vol_speed = float(os.getenv("HFT_PHASE_VOLATILE_MIN_ABS_SPEED"))
 
-    soft_disabled = os.getenv("HFT_PHASE_SOFT_FLOW_ENABLE", "1") != "1"
+    soft_disabled = os.getenv("HFT_PHASE_SOFT_FLOW_ENABLE") != "1"
     directional = trend in ("UP", "DOWN")
     volatile_edge = abs(edge) >= vol_edge
     volatile_speed = abs(speed) >= vol_speed

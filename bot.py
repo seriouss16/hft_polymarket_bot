@@ -44,7 +44,7 @@ _UVLOOP_ACTIVE = False
 def _install_uvloop_policy() -> None:
     """Prefer libuv-backed asyncio loop on Linux/macOS when uvloop is available."""
     global _UVLOOP_ACTIVE
-    if os.getenv("HFT_USE_UVLOOP", "1") == "0":
+    if os.getenv("HFT_USE_UVLOOP") == "0":
         return
     try:
         import uvloop
@@ -84,8 +84,8 @@ from utils.trade_journal import TradeJournal
 
 def _silence_http_client_loggers() -> None:
     """Lower noise from urllib3/requests (used by MarketSelector and HTTP helpers)."""
-    raw = os.getenv("HFT_HTTP_CLIENT_LOG_LEVEL", "WARNING").upper()
-    level = getattr(logging, raw, logging.WARNING)
+    raw = os.getenv("HFT_HTTP_CLIENT_LOG_LEVEL") or "WARNING"
+    level = getattr(logging, raw.upper(), logging.WARNING)
     for name in (
         "urllib3",
         "urllib3.connectionpool",
@@ -252,7 +252,7 @@ def _setup_logging() -> None:
     """Configure stdout logging and per-run file logs with retention."""
     log_dir = Path(os.getenv("HFT_LOG_DIR", str(Path(__file__).resolve().parent / "reports" / "logs")))
     log_dir.mkdir(parents=True, exist_ok=True)
-    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES", "20"))
+    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES"))
     start_tag = datetime.now().strftime("%d%m%y_%H%M%S")
     log_basename = f"bot_{start_tag}.log"
     log_path = log_dir / log_basename
@@ -327,14 +327,14 @@ async def main():
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.environ["STATS_INTERVAL_SEC"])
     # PULSE_INTERVAL_SEC>0: at most one Fast: line per N seconds. When 0, use HFT_FAST_LOG_MIN_SEC.
-    PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC", "0"))
-    FAST_LOG_MIN_SEC = float(os.getenv("HFT_FAST_LOG_MIN_SEC", "0.25"))
+    PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC") or "0")
+    FAST_LOG_MIN_SEC = float(os.getenv("HFT_FAST_LOG_MIN_SEC") or "0.25")
     pulse_log_period = PULSE_INTERVAL if PULSE_INTERVAL > 0.0 else FAST_LOG_MIN_SEC
-    MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC", "0"))
-    CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC", "0"))
-    LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC", "0"))
-    ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM", "0") == "1"
-    SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC", "0"))
+    MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC") or "0")
+    CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC") or "0")
+    LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC") or "0")
+    ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM") == "1"
+    SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC") or "0")
     MIN_SLOT_POLL_SEC = 1.0
 
     # --- Инициализация компонентов ---
@@ -345,16 +345,17 @@ async def main():
     regime_detector = MarketRegimeDetector()
     strategy_hub = StrategyHub()
     strategy_hub.register(LatencyArbitrageStrategy(pnl, is_test_mode=TEST_MODE))
-    if os.getenv("HFT_ENABLE_PHASE_ROUTING", "0") == "1":
+    if os.getenv("HFT_ENABLE_PHASE_ROUTING") == "1":
         strategy_hub.register(PhaseRouterStrategy(pnl, is_test_mode=TEST_MODE))
     default_strategy = os.getenv(
         "HFT_ACTIVE_STRATEGY",
-        "phase_router" if os.getenv("HFT_ENABLE_PHASE_ROUTING", "0") == "1" else "latency_arbitrage",
+        "phase_router" if os.getenv("HFT_ENABLE_PHASE_ROUTING") == "1" else "latency_arbitrage",
     )
-    live_signal_strategy = os.getenv("HFT_LIVE_SIGNAL_STRATEGY", "latency_arbitrage").strip()
+    live_signal_strategy = os.getenv("HFT_LIVE_SIGNAL_STRATEGY") or "latency_arbitrage"
+    live_signal_strategy = live_signal_strategy.strip()
     if default_strategy in strategy_hub.list_strategies():
         strategy_hub.set_active(default_strategy)
-    strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES", "0") == "1")
+    strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES") == "1")
     lstm = AsyncLSTMPredictor(history_len=100)
     live_exec = LiveExecutionEngine(
         private_key=os.getenv("PRIVATE_KEY"),
@@ -369,7 +370,7 @@ async def main():
         max_position_pct=float(os.environ["MAX_POSITION_PCT"]),
         loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
-    journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv"))
+    journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH") or "reports/trade_journal.csv")
 
     # Validate session deposit against real account balance in live mode.
     _session_deposit = float(os.environ["HFT_DEPOSIT_USD"])
@@ -377,7 +378,7 @@ async def main():
         # Refresh USDC and CTF conditional token allowances so SELL orders are accepted.
         # Without CTF allowance the CLOB rejects every SELL with "not enough balance".
         await asyncio.to_thread(live_exec.ensure_allowances)
-        _live_account_balance_limit = float(os.getenv("LIVE_ACCOUNT_BALANCE", "0") or "0")
+        _live_account_balance_limit = float(os.getenv("LIVE_ACCOUNT_BALANCE") or "0")
         _account_balance = live_exec.fetch_usdc_balance()
         _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit
         if _effective_account > 0.0 and _session_deposit > _effective_account:
@@ -447,7 +448,7 @@ async def main():
     # Prevents the engine from accumulating phantom sim positions when the CLOB
     # rejects every entry due to insufficient balance for the minimum share count.
     _live_skip_until: float = 0.0
-    _live_skip_cooldown_sec = float(os.getenv("LIVE_SKIP_COOLDOWN_SEC", "30.0"))
+    _live_skip_cooldown_sec = float(os.getenv("LIVE_SKIP_COOLDOWN_SEC"))
     last_lstm_time = 0
     last_book_pull_time = 0
     last_book_mismatch_warn_time = 0.0
@@ -548,7 +549,7 @@ async def main():
                             poly_book.book["ask"] = 1.0
                             poly_book.book["down_bid"] = 1.0
                             poly_book.book["down_ask"] = 0.0
-                        if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET", "0") == "1":
+                        if os.getenv("HFT_PERF_RESET_ON_NEW_MARKET") == "1":
                             pnl.reset_strategy_performance()
                         if poly_connect_task is not None and not poly_connect_task.done():
                             poly_connect_task.cancel()
@@ -565,7 +566,7 @@ async def main():
                         poly_connect_task = asyncio.create_task(poly_book.connect())
 
             # 2. Получение данных
-            _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG", "0") == "1"
+            _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG") == "1"
             if _net_dbg:
                 _nw_t0 = time.perf_counter()
             if USE_SMART_FAST:
@@ -812,7 +813,7 @@ async def main():
                     diff = fast_price - poly_btc
                     trend = strategy_hub.get_trend_state()
                     profile_suffix = ""
-                    if os.getenv("HFT_LOG_MARKET_PROFILE", "0") == "1":
+                    if os.getenv("HFT_LOG_MARKET_PROFILE") == "1":
                         _gp = getattr(
                             strategy_hub.get_active_strategy(),
                             "get_active_profile",
@@ -1083,7 +1084,7 @@ async def main():
                                 _live_skip_until = now + _live_skip_cooldown_sec
                             # Verify capped budget can still buy CLOB minimum shares.
                             # Use entry ask price from decision if available to estimate shares.
-                            _poly_min_sh = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+                            _poly_min_sh = float(os.getenv("POLY_CLOB_MIN_SHARES"))
                             _trade_dict = decision.get("trade") or {}
                             _entry_ask = float(
                                 _trade_dict.get("exec_px")

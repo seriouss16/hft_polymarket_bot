@@ -69,7 +69,7 @@ class PnLTracker:
         if initial_balance is not None:
             self.initial_balance = float(initial_balance)
         else:
-            self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD", "100.0"))
+            self.initial_balance = float(os.getenv("HFT_DEPOSIT_USD"))
         self.live_mode = live_mode
         # When True, log_trade(BUY) is a no-op — position is written only via
         # live_open() after CLOB confirms the fill.
@@ -89,16 +89,16 @@ class PnLTracker:
         self.max_drawdown = 0.0
         self.peak_balance = self.initial_balance
 
-        self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE", "0.001"))
+        self.fee_rate = float(os.getenv("HFT_SIM_FEE_RATE"))
         self.last_realized_pnl = 0.0
         self.last_close_ts = 0.0
-        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD", "10.0"))
+        self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
 
         self.recent_pnls = deque(
-            maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME", "12"))
+            maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME"))
         )
         self.regime_cooldown_until = 0.0
-        self._good_regime_winrate = float(os.getenv("HFT_GOOD_REGIME_WINRATE", "0.49"))
+        self._good_regime_winrate = float(os.getenv("HFT_GOOD_REGIME_WINRATE"))
         self.strategy_performance = StrategyPerformanceBook()
 
     def reset_strategy_performance(self) -> None:
@@ -192,7 +192,7 @@ class PnLTracker:
         self.balance += proceeds
         self._buy_cost_usd = 0.0
         self.inventory = max(0.0, self.inventory - filled_shares)
-        _dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES", "0.05"))
+        _dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES"))
         if self.inventory <= _dust:
             self.inventory = 0.0
         if self.inventory <= 0.0:
@@ -353,8 +353,8 @@ class PnLTracker:
                     self.recent_pnls
                 )
                 avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
-                bad_wr = float(os.getenv("HFT_BAD_REGIME_WINRATE", "0.48"))
-                cooldown_sec = float(os.getenv("HFT_REGIME_COOLDOWN_SEC", "150"))
+                bad_wr = float(os.getenv("HFT_BAD_REGIME_WINRATE"))
+                cooldown_sec = float(os.getenv("HFT_REGIME_COOLDOWN_SEC"))
                 if winrate < bad_wr or avg_pnl < -0.5:
                     self.regime_cooldown_until = time.time() + cooldown_sec
                     logging.warning(
