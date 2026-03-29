@@ -1049,6 +1049,19 @@ async def main():
                                 float(_trade_info.get("amount_usd") or 0.0)
                                 or float(os.environ["LIVE_ORDER_SIZE"])
                             )
+                            _max_pos_usd = float(
+                                os.getenv(
+                                    "HFT_MAX_POSITION_USD",
+                                    os.environ["LIVE_ORDER_SIZE"],
+                                )
+                            )
+                            if _max_pos_usd > 0.0 and _cost_usd > _max_pos_usd:
+                                logging.info(
+                                    "[LIVE] Capping order %.4f USD → max position %.4f USD.",
+                                    _cost_usd,
+                                    _max_pos_usd,
+                                )
+                                _cost_usd = _max_pos_usd
                             # Cap order size to actual CLOB balance to prevent
                             # "not enough balance" rejections when account dropped
                             # below the configured LIVE_ORDER_SIZE after a loss.
@@ -1091,109 +1104,123 @@ async def main():
                                     token_up_id if _open_signal == "BUY_UP"
                                     else (token_down_id or token_up_id)
                                 )
-                                _live_bb = 0.0
-                                _live_ba = 0.0
-                                if poly_book is not None and hasattr(poly_book, "book"):
-                                    if _open_signal == "BUY_UP":
-                                        _live_bb = float(poly_book.book.get("bid", 0.0) or 0.0)
-                                        _live_ba = float(poly_book.book.get("ask", 0.0) or 0.0)
-                                    else:
-                                        _live_bb = float(
-                                            poly_book.book.get("down_bid", 0.0) or 0.0
-                                        )
-                                        _live_ba = float(
-                                            poly_book.book.get("down_ask", 0.0) or 0.0
-                                        )
-                                _exec_kw = {}
-                                if _live_bb > 0.0 and _live_ba > 0.0:
-                                    _exec_kw = {
-                                        "best_bid": _live_bb,
-                                        "best_ask": _live_ba,
-                                    }
-                                # Blocks until CLOB confirms fill or timeout.
-                                _filled_sh, _filled_px = await live_exec.execute(
-                                    _open_signal,
-                                    _live_tid,
-                                    budget_usd=_cost_usd,
-                                    **_exec_kw,
-                                )
-                                if _filled_sh > 0:
-                                    # Record confirmed CLOB fill into PnL tracker.
-                                    _live_skip_until = 0.0
-                                    pnl.live_open(
-                                        _open_signal, _filled_sh, _filled_px,
-                                        _filled_sh * _filled_px,
-                                        strategy_name=decision.get("strategy_name") or "",
+                                _pending_buy = live_exec.filled_buy_shares(_live_tid)
+                                if pnl.inventory > 1e-9:
+                                    logging.warning(
+                                        "⚠️ [LIVE] Skip OPEN: position already open "
+                                        "(inventory=%.6f sh).",
+                                        pnl.inventory,
                                     )
-                                    _hft_eng = getattr(
-                                        strategy_hub.get_active_strategy(),
-                                        "_engine",
-                                        None,
-                                    )
-                                    if (
-                                        _hft_eng is not None
-                                        and getattr(
-                                            _hft_eng, "_live_entry_sync_pending", False
-                                        )
-                                    ):
-                                        _apply_fast = fast_price
-                                        if USE_SMART_FAST:
-                                            _nf = aggregator.get_weighted_price()
-                                        else:
-                                            _nf = (
-                                                aggregator.get_coinbase_price()
-                                                or aggregator.get_weighted_price()
-                                            )
-                                        if _nf is not None:
-                                            _apply_fast = float(_nf)
-                                        _book_px = float(
-                                            poly_book.book.get("down_ask", 0.0)
-                                            if _open_signal == "BUY_DOWN"
-                                            else poly_book.book.get("ask", 0.0)
-                                        )
-                                        _hft_eng.apply_live_entry_after_fill(
-                                            poly_book.book,
-                                            _apply_fast,
-                                            _book_px,
-                                            float(_filled_px),
-                                            float(_filled_sh),
-                                            float(_filled_sh * _filled_px),
-                                        )
-                                    # Refresh CTF allowance so the subsequent SELL is accepted.
-                                    await asyncio.to_thread(
-                                        live_exec.ensure_conditional_allowance, _live_tid
+                                elif _pending_buy > 1e-9:
+                                    logging.warning(
+                                        "⚠️ [LIVE] Skip OPEN: BUY already pending or "
+                                        "confirmed on token (%.4f sh).",
+                                        _pending_buy,
                                     )
                                 else:
-                                    _hft_eng = getattr(
-                                        strategy_hub.get_active_strategy(),
-                                        "_engine",
-                                        None,
+                                    _live_bb = 0.0
+                                    _live_ba = 0.0
+                                    if poly_book is not None and hasattr(poly_book, "book"):
+                                        if _open_signal == "BUY_UP":
+                                            _live_bb = float(poly_book.book.get("bid", 0.0) or 0.0)
+                                            _live_ba = float(poly_book.book.get("ask", 0.0) or 0.0)
+                                        else:
+                                            _live_bb = float(
+                                                poly_book.book.get("down_bid", 0.0) or 0.0
+                                            )
+                                            _live_ba = float(
+                                                poly_book.book.get("down_ask", 0.0) or 0.0
+                                            )
+                                    _exec_kw = {}
+                                    if _live_bb > 0.0 and _live_ba > 0.0:
+                                        _exec_kw = {
+                                            "best_bid": _live_bb,
+                                            "best_ask": _live_ba,
+                                        }
+                                    # Blocks until CLOB confirms fill or timeout.
+                                    _filled_sh, _filled_px = await live_exec.execute(
+                                        _open_signal,
+                                        _live_tid,
+                                        budget_usd=_cost_usd,
+                                        **_exec_kw,
                                     )
-                                    if _hft_eng is not None:
-                                        _hft_eng.rollback_live_open_signal()
-                                    _slip_abort = (
-                                        getattr(live_exec, "_last_buy_skip_reason", None)
-                                        == "slippage_abort"
-                                    )
-                                    _cooldown_on_slip = (
-                                        os.getenv(
-                                            "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0"
+                                    if _filled_sh > 0:
+                                        # Record confirmed CLOB fill into PnL tracker.
+                                        _live_skip_until = 0.0
+                                        pnl.live_open(
+                                            _open_signal, _filled_sh, _filled_px,
+                                            _filled_sh * _filled_px,
+                                            strategy_name=decision.get("strategy_name") or "",
                                         )
-                                        == "1"
-                                    )
-                                    if not (_slip_abort and not _cooldown_on_slip):
-                                        # BUY not filled — impose cooldown to avoid retry spam.
-                                        _live_skip_until = now + _live_skip_cooldown_sec
-                                        logging.info(
-                                            "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
-                                            _live_skip_cooldown_sec, _live_skip_until,
+                                        _hft_eng = getattr(
+                                            strategy_hub.get_active_strategy(),
+                                            "_engine",
+                                            None,
                                         )
-                                    elif _slip_abort:
-                                        logging.info(
-                                            "[LIVE] BUY skipped (slippage guard) — no "
-                                            "live-skip cooldown (set "
-                                            "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT=1 to enable).",
+                                        if (
+                                            _hft_eng is not None
+                                            and getattr(
+                                                _hft_eng, "_live_entry_sync_pending", False
+                                            )
+                                        ):
+                                            _apply_fast = fast_price
+                                            if USE_SMART_FAST:
+                                                _nf = aggregator.get_weighted_price()
+                                            else:
+                                                _nf = (
+                                                    aggregator.get_coinbase_price()
+                                                    or aggregator.get_weighted_price()
+                                                )
+                                            if _nf is not None:
+                                                _apply_fast = float(_nf)
+                                            _book_px = float(
+                                                poly_book.book.get("down_ask", 0.0)
+                                                if _open_signal == "BUY_DOWN"
+                                                else poly_book.book.get("ask", 0.0)
+                                            )
+                                            _hft_eng.apply_live_entry_after_fill(
+                                                poly_book.book,
+                                                _apply_fast,
+                                                _book_px,
+                                                float(_filled_px),
+                                                float(_filled_sh),
+                                                float(_filled_sh * _filled_px),
+                                            )
+                                        # Refresh CTF allowance so the subsequent SELL is accepted.
+                                        await asyncio.to_thread(
+                                            live_exec.ensure_conditional_allowance, _live_tid
                                         )
+                                    else:
+                                        _hft_eng = getattr(
+                                            strategy_hub.get_active_strategy(),
+                                            "_engine",
+                                            None,
+                                        )
+                                        if _hft_eng is not None:
+                                            _hft_eng.rollback_live_open_signal()
+                                        _slip_abort = (
+                                            getattr(live_exec, "_last_buy_skip_reason", None)
+                                            == "slippage_abort"
+                                        )
+                                        _cooldown_on_slip = (
+                                            os.getenv(
+                                                "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0"
+                                            )
+                                            == "1"
+                                        )
+                                        if not (_slip_abort and not _cooldown_on_slip):
+                                            # BUY not filled — impose cooldown to avoid retry spam.
+                                            _live_skip_until = now + _live_skip_cooldown_sec
+                                            logging.info(
+                                                "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
+                                                _live_skip_cooldown_sec, _live_skip_until,
+                                            )
+                                        elif _slip_abort:
+                                            logging.info(
+                                                "[LIVE] BUY skipped (slippage guard) — no "
+                                                "live-skip cooldown (set "
+                                                "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT=1 to enable).",
+                                            )
             elif (now - last_pulse_time) >= pulse_log_period:
                 # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
                 last_pulse_time = now

@@ -138,9 +138,26 @@ class LiveRiskManager:
         self.trades += 1
 
     def can_trade(self) -> bool:
-        """Return False when daily drawdown limit is breached."""
+        """Return False when daily drawdown limit is breached.
+
+        For a negative limit (e.g. -2.0 USD), trading stops when realized session
+        PnL is at or below that threshold, not only strictly below it.
+        """
+        if self.max_daily_loss < 0.0:
+            if self.pnl <= self.max_daily_loss:
+                logging.error(
+                    "🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).",
+                    self.pnl,
+                    self.max_daily_loss,
+                )
+                return False
+            return True
         if self.pnl < self.max_daily_loss:
-            logging.error("🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).", self.pnl, self.max_daily_loss)
+            logging.error(
+                "🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).",
+                self.pnl,
+                self.max_daily_loss,
+            )
             return False
         return True
 
@@ -1625,6 +1642,9 @@ class LiveExecutionEngine:
 
         exec_price = max(0.001, best_ask)
         usd_notional = order_size or budget_usd or self.min_order_size
+        _max_pos_usd = float(os.getenv("HFT_MAX_POSITION_USD", str(self.min_order_size)))
+        if _max_pos_usd > 0.0:
+            usd_notional = min(usd_notional, _max_pos_usd)
         shares = usd_notional / exec_price
 
         if shares < poly_min_shares:

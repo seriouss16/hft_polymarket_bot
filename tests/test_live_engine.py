@@ -28,6 +28,7 @@ from core.live_engine import (
     BUY,
     SELL_SIDE,
     LiveExecutionEngine,
+    LiveRiskManager,
     OrderStatus,
     TrackedOrder,
 )
@@ -757,3 +758,19 @@ class TestRecoverFillAfterCancel:
         assert ok is True
         assert order.status == OrderStatus.FILLED
         assert order.filled_size == pytest.approx(10.0309)
+
+
+class TestLiveRiskManager:
+    """Daily loss guard stops trading at the configured threshold."""
+
+    def test_negative_limit_stops_at_exact_threshold(self):
+        """When max_daily_loss is -2, pnl -2.0 must block further trades."""
+        rm = LiveRiskManager(max_daily_loss=-2.0, pnl=-1.5, trades=1)
+        assert rm.can_trade() is True
+        rm.pnl = -2.0
+        assert rm.can_trade() is False
+
+    def test_negative_limit_allows_above_threshold(self):
+        """PnL slightly above the limit still allows trading."""
+        rm = LiveRiskManager(max_daily_loss=-2.0, pnl=-1.99, trades=0)
+        assert rm.can_trade() is True
