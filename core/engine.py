@@ -234,13 +234,7 @@ class HFTEngine:
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
         self.trend_flip_min_age_sec = float(os.getenv("HFT_TREND_FLIP_MIN_AGE_SEC"))
-        self.entry_rsi_slope_filter_enabled = os.getenv(
-            "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED"
-        ) == "1"
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
-        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
-        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX"))
+        self._load_rsi_slope_entry_params()
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
 
@@ -827,6 +821,16 @@ class HFTEngine:
         edge *= float(extra_mult)
         return edge, edge
 
+    def _load_rsi_slope_entry_params(self) -> None:
+        """Read RSI slope entry gates from env (see entry_rsi_slope_allows). Single call site."""
+        self.entry_rsi_slope_filter_enabled = (
+            os.getenv("HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED") == "1"
+        )
+        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
+        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
+        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
+        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX"))
+
     def reload_profile_params(self) -> None:
         """Re-read session-profile-controlled env-vars into cached attributes.
 
@@ -857,10 +861,7 @@ class HFTEngine:
         self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI"))
         self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA"))
         self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD"))
-        self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
-        self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
-        self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
-        self.rsi_down_slope_max = float(os.getenv("HFT_RSI_DOWN_SLOPE_MAX"))
+        self._load_rsi_slope_entry_params()
         self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE"))
         self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE"))
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC"))
