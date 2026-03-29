@@ -1073,6 +1073,14 @@ async def main():
                                     _real_usdc, _cost_usd,
                                 )
                                 _cost_usd = _real_usdc
+                            # Polymarket CLOB has a $1 minimum order size (USD).
+                            # If the capped amount is below this, skip the trade to avoid rejection.
+                            if _cost_usd < 1.0:
+                                logging.warning(
+                                    "⚠️ [LIVE] Capped order size %.4f USD < $1.00 minimum — skipping entry.",
+                                    _cost_usd,
+                                )
+                                _live_skip_until = now + _live_skip_cooldown_sec
                             # Verify capped budget can still buy CLOB minimum shares.
                             # Use entry ask price from decision if available to estimate shares.
                             _poly_min_sh = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))

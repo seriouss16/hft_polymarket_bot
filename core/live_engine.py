@@ -1676,6 +1676,21 @@ class LiveExecutionEngine:
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
             return _SKIP
+        # Liquidity check: ensure top ask size can accommodate desired shares.
+        # Only enforce if we have valid ask_size_top > 0; skip if data missing (test mode or stale book).
+        try:
+            snap = await asyncio.to_thread(self.get_orderbook_snapshot, token_id, depth=1)
+            ask_size_top = snap.get("ask_size_top", 0.0)
+            if ask_size_top > 0.0 and ask_size_top < shares:
+                logging.warning(
+                    "⚠️ Skip %s: top ask size %.2f < desired shares %.2f (insufficient liquidity).",
+                    signal, ask_size_top, shares,
+                )
+                self._entry_stats["skip_signal"] += 1
+                self._log_entry_stats_if_due()
+                return _SKIP
+        except Exception as exc:
+            logging.warning("Liquidity check failed: %s — proceeding with caution.", exc)
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, BUY, price, shares
         )
