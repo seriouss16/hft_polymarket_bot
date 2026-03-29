@@ -16,6 +16,11 @@ Each profile overrides a subset of env-vars in-process via os.environ so that
 all downstream code reading from os.getenv() automatically picks up the new
 values.  Call strategy_hub.reload_profile_params() after every switch to push
 the new values into running engine instances.
+
+Important: switching profile only *sets* keys listed in that profile. Keys present
+in NIGHT but missing from DAY would otherwise stay at night values in os.environ
+after night→day — DAY must repeat any parameter that must differ from night
+(edge, skew, min ask, slope filter, etc.).
 """
 
 from __future__ import annotations
@@ -100,6 +105,8 @@ _NIGHT: dict[str, str] = {
     "HFT_RSI_UP_SLOPE_MIN": "0.0",
     "HFT_RSI_DOWN_ENTRY_MIN": "45.0",
     "HFT_RSI_DOWN_SLOPE_MAX": "0.0",
+    # Master switch for slope gate (must be in both profiles so switches reset it).
+    "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED": "1",
     # Regime filter: night WR is naturally lower due to random reversals in flat BTC.
     # Lower good-regime threshold (0.38) and raise bad-regime floor (0.28) so a
     # small losing streak does not lock the bot for hours.  Shorter memory window
@@ -119,6 +126,13 @@ _DAY: dict[str, str] = {
     "HFT_ENTRY_UP_SPEED_MIN": "2.0",
     "HFT_ENTRY_DOWN_SPEED_MAX": "-2.0",
     "HFT_SPEED_FLOOR": "0.02",
+    # Edge thresholds + skew + min ask: explicit day values so a prior night session
+    # does not leave HFT_BUY_EDGE=3.0 / skew=1500 / min ask=0.05 in os.environ.
+    "HFT_BUY_EDGE": "4.0",
+    "HFT_NOISE_EDGE": "0.8",
+    "HFT_ENTRY_MAX_SKEW_MS": "2000.0",
+    "HFT_ENTRY_MIN_ASK_UP": "0.08",
+    "HFT_ENTRY_MIN_ASK_DOWN": "0.08",
     # Tighter staleness gate — Poly WS is fast during business hours.
     "HFT_ENTRY_MAX_LATENCY_MS": "1350.0",
     "HFT_PHASE_SOFT_MAX_FEED_LATENCY_MS": "800.0",
@@ -174,6 +188,7 @@ _DAY: dict[str, str] = {
     "HFT_RSI_UP_SLOPE_MIN": "0.3",
     "HFT_RSI_DOWN_ENTRY_MIN": "48.0",
     "HFT_RSI_DOWN_SLOPE_MAX": "-0.3",
+    "HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED": "1",
 }
 
 _CURRENT_PROFILE: str | None = None
