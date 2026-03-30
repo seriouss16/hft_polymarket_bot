@@ -226,6 +226,11 @@ class HFTEngine:
         self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
         self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE"))
         self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD"))
+        # When trend is UP, multiply max spread limits (legacy + liquidity) so BUY_UP is not
+        # blocked as often as BUY_DOWN. 1.0 = no change. Values < 1.0 are clamped to 1.0.
+        self.spread_gate_up_relax_mult = max(
+            1.0, float(os.getenv("HFT_SPREAD_GATE_UP_RELAX_MULT", "1.0"))
+        )
         self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
 
         # --- Задержка (Latency Guard) ---
@@ -389,13 +394,15 @@ class HFTEngine:
             st.get("exit_reason_pnl_sl", 0),
         )
         logging.info(
-            "FilterDiag params: profile=%s spread_max=%.4f liq_spread_max=%.4f max_entry_ask=%.4f "
+            "FilterDiag params: profile=%s spread_max=%.4f liq_spread_max=%.4f spread_gate_up_relax=%.2f "
+            "max_entry_ask=%.4f "
             "ask_up=[%.3f,%.3f] ask_down=[%.3f,%.3f] max_latency_ms=%.0f max_skew_ms=%.0f "
             "trend_flip_min_age=%.2f strong_jump_min_age=%s no_entry_guards=%s cooldown=%.2fs "
             "post_close_reentry=%.2fs min_hold=%.2fs.",
             self.get_active_profile(),
             self.max_entry_spread,
             self.entry_liquidity_max_spread,
+            self.spread_gate_up_relax_mult,
             self.max_entry_ask,
             self.entry_min_ask_up_cap,
             self.entry_max_ask_up_cap,
@@ -1152,6 +1159,8 @@ class HFTEngine:
         if self.entry_liquidity_max_spread <= 0.0:
             return True
         mx = self.entry_liquidity_max_spread
+        if trend_dir == "UP" and self.spread_gate_up_relax_mult > 1.0:
+            mx = mx * self.spread_gate_up_relax_mult
         strong = abs(edge) >= self.wide_spread_min_edge
         if trend_dir == "UP":
             return spread_up <= mx or strong
@@ -1577,11 +1586,15 @@ class HFTEngine:
         spread_down = max(0.0, down_ask - down_bid)
         edge_mult = self._latency_expiry_edge_multiplier(latency_ms, seconds_to_expiry)
         self._record_entry_samples(trend["speed"], float(zscore))
-        spread_gate_legacy = (
-            self.max_entry_spread <= 0.0
-            or spread_up <= self.max_entry_spread
-            or abs(edge_now) >= self.wide_spread_min_edge
-        )
+        if self.max_entry_spread <= 0.0:
+            spread_gate_legacy = True
+        else:
+            _max_sp = self.max_entry_spread
+            if trend["trend"] == "UP" and self.spread_gate_up_relax_mult > 1.0:
+                _max_sp = _max_sp * self.spread_gate_up_relax_mult
+            spread_gate_legacy = (
+                spread_up <= _max_sp or abs(edge_now) >= self.wide_spread_min_edge
+            )
         liquidity_ok = self.entry_liquidity_spread_ok(
             spread_up, spread_down, edge_now, trend["trend"]
         )
