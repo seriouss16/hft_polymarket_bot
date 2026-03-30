@@ -227,6 +227,19 @@ class TestLiveOpen:
         assert t.inventory == pytest.approx(10.0)
         assert t.entry_price == pytest.approx(0.50)
 
+    def test_live_open_cash_budget_caps_recorded_cost(self):
+        """When amount_usd is below CLOB notional (budget cap), entry uses cash/sh."""
+        t = make_tracker(100.0, live=True)
+        t.live_open(
+            "BUY_DOWN",
+            filled_shares=6.7692,
+            avg_price=0.6362,
+            amount_usd=4.0,
+        )
+        assert t._buy_cost_usd == pytest.approx(4.0)
+        assert t.balance == pytest.approx(96.0)
+        assert t.entry_price == pytest.approx(4.0 / 6.7692)
+
     def test_live_open_blocks_mixed_side(self):
         """live_open must block adding on the opposite side."""
         t = make_tracker(100.0, live=True)

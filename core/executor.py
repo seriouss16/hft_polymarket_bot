@@ -143,11 +143,15 @@ class PnLTracker:
 
         Called only after CLOB confirms the fill — bypasses all sim-mode balance
         checks and uses real CLOB fill data instead of simulated exec_price.
+        ``amount_usd`` must be the **actual USDC debited** (e.g. min(budget, notional)
+        when the CLOB reports a higher ``avg_price * shares`` after fee/reprice).
         Does nothing when filled_shares is zero (order was not filled).
         """
         if filled_shares <= 0.0:
             return
         new_side = "DOWN" if side == "BUY_DOWN" else "UP"
+        # Effective cash price per share (matches Polymarket UI when spend is budget-capped).
+        _cash_px = amount_usd / filled_shares if filled_shares > 0 else avg_price
         if self.inventory > 0:
             if self.position_side and self.position_side != new_side:
                 logging.warning(
@@ -155,20 +159,20 @@ class PnLTracker:
                     self.position_side, new_side,
                 )
                 return
-            total_cost = self.entry_price * self.inventory + avg_price * filled_shares
+            total_cost = self.entry_price * self.inventory + amount_usd
             self.inventory += filled_shares
             self.entry_price = total_cost / self.inventory
         else:
             self.inventory = filled_shares
-            self.entry_price = avg_price
+            self.entry_price = _cash_px
             self.position_side = new_side
         self.balance -= amount_usd
         self._buy_cost_usd += amount_usd
         self.entry_ts = time.time()
         _tag = f"{side} {strategy_name}".strip() if strategy_name else side
         logging.info(
-            "🟢 [LIVE %s] filled=%.4f sh @ avg %.4f | cost %.2f$ (pos %.4f @ avg %.4f)",
-            _tag, filled_shares, avg_price, amount_usd, self.inventory, self.entry_price,
+            "🟢 [LIVE %s] filled=%.4f sh @ CLOB %.4f | cash %.2f$ @ eff %.4f (pos %.4f @ avg %.4f)",
+            _tag, filled_shares, avg_price, amount_usd, _cash_px, self.inventory, self.entry_price,
         )
 
     def live_close(

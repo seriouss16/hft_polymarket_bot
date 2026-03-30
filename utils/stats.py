@@ -182,7 +182,10 @@ class StatsCollector:
         """Print compact PnL summary to stdout (legacy block format)."""
         now_ts = time.time()
         win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
-        roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
+        _ib = float(self.pnl.initial_balance)
+        roi_realized = (self.pnl.total_pnl / _ib) * 100 if _ib > 0 else 0.0
+        cash_delta = self.pnl.balance - _ib
+        roi_cash = (cash_delta / _ib) * 100 if _ib > 0 else 0.0
         cooldown_until = float(getattr(self.pnl, "regime_cooldown_until", 0.0) or 0.0)
         started_at = datetime.fromtimestamp(self.started_ts).isoformat(timespec="seconds")
         report_at = datetime.fromtimestamp(now_ts).isoformat(timespec="seconds")
@@ -198,8 +201,9 @@ class StatsCollector:
             f"🧾 Время отчета:      {report_at}",
             f"⏱️ Аптайм:            {uptime_min:>10.1f} min",
             f"🗂️ Режим:             {self._session_mode_label()}",
-            f"💰 Текущий баланс:    {self.pnl.balance:>10.2f} USD",
-            f"📈 Чистая прибыль:    {self.pnl.total_pnl:>10.2f} USD ({roi:+.2f}%)",
+            f"💰 Касса (сессия):    {self.pnl.balance:>10.2f} USD  (депозит {_ib:.2f}, Δ {cash_delta:+.2f})",
+            f"📈 Реализовано:       {self.pnl.total_pnl:>10.2f} USD  (ROI {roi_realized:+.2f}% от депозита)",
+            f"📐 Δ кассы vs депозит: {roi_cash:>+9.2f}%  (внутренний учёт USDC; при открытой позиции см. риск)",
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
             f"✅ Побед / ❌ Убытков: {self.pnl.wins:>4} / {losses:<4}",
             f"🎯 Win rate:          {win_rate:>10.1f}%",
@@ -295,7 +299,10 @@ class StatsCollector:
         self.show_report()
         now_ts = time.time()
         win_rate = (self.pnl.wins / self.pnl.trades_count * 100) if self.pnl.trades_count > 0 else 0
-        roi = ((self.pnl.balance - self.pnl.initial_balance) / self.pnl.initial_balance) * 100
+        _ib = float(self.pnl.initial_balance)
+        roi_realized = (self.pnl.total_pnl / _ib) * 100 if _ib > 0 else 0.0
+        cash_delta = self.pnl.balance - _ib
+        roi_cash = (cash_delta / _ib) * 100 if _ib > 0 else 0.0
         losses = self.pnl.trades_count - self.pnl.wins
         started_at = datetime.fromtimestamp(self.started_ts).isoformat(timespec="seconds")
         report_at = datetime.fromtimestamp(now_ts).isoformat(timespec="seconds")
@@ -327,8 +334,9 @@ class StatsCollector:
             sep,
             row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
             row("Текущий баланс USD", f"{self.pnl.balance:.2f}"),
-            row("Чистая прибыль USD", f"{self.pnl.total_pnl:+.2f}"),
-            row("ROI %", f"{roi:+.2f}"),
+            row("Чистая прибыль USD (реализ.)", f"{self.pnl.total_pnl:+.2f}"),
+            row("ROI % (реализ. / депозит)", f"{roi_realized:+.2f}"),
+            row("Δ кассы vs депозит %", f"{roi_cash:+.2f}"),
             row("Макс. просадка %", f"{self.pnl.max_drawdown*100:.1f}"),
             sep,
             row("Закрытых сделок (sim)", str(self.pnl.trades_count)),

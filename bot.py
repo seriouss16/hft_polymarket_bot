@@ -464,6 +464,13 @@ async def main():
             return
         if pnl.inventory > 1e-9:
             return
+        # After a successful live_close, chain/CLOB can briefly still report the old
+        # conditional balance — adopting here would debit balance again and corrupt
+        # the session ledger (see false "inventory_reconcile" after SELL).
+        _after_close = float(os.getenv("LIVE_INVENTORY_RECONCILE_AFTER_CLOSE_SEC", "45"))
+        if _after_close > 0 and float(getattr(pnl, "last_close_ts", 0.0) or 0.0) > 0:
+            if time.time() - float(pnl.last_close_ts) < _after_close:
+                return
         _tup = token_up_id
         _tdn = token_down_id
         if not _tup:
@@ -1294,10 +1301,18 @@ async def main():
                                     )
                                     if _filled_sh > 0:
                                         # Record confirmed CLOB fill into PnL tracker.
+                                        # Cash out must match UI / wallet: budget-capped BUY spends at most
+                                        # _cost_usd even when CLOB avg×shares is higher after fee/reprice.
+                                        _live_notional = float(_filled_sh) * float(_filled_px)
+                                        _buy_cash_usd = (
+                                            min(float(_cost_usd), _live_notional)
+                                            if float(_cost_usd) > 0.0
+                                            else _live_notional
+                                        )
                                         _live_skip_until = 0.0
                                         pnl.live_open(
                                             _open_signal, _filled_sh, _filled_px,
-                                            _filled_sh * _filled_px,
+                                            _buy_cash_usd,
                                             strategy_name=decision.get("strategy_name") or "",
                                         )
                                         _hft_eng = getattr(
