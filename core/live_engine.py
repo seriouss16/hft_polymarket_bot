@@ -1885,11 +1885,13 @@ class LiveExecutionEngine:
             )
 
         if filled < poly_min_shares:
-            # Confirmed partial fill below CLOB minimum — can't use GTC to sell.
-            # FAK-sell whatever arrived and treat as skip (no open position).
+            # Fee can leave balance just below POLY_CLOB_MIN_SHARES; we try to FAK out
+            # to avoid an unsellable stub. If FAK fails or only partially clears, re-read
+            # chain — any remaining balance must still be tracked so the engine can EXIT
+            # (close_position uses FAK for sub-min SELL) instead of leaving phantom flat.
             logging.warning(
                 "⚠️ [LIVE] Confirmed balance %.4f sh < min %.0f — "
-                "FAK-selling residual, skipping. token=%s",
+                "attempting FAK residual exit. token=%s",
                 filled, poly_min_shares, token_id[:20],
             )
             fak_filled = await self._fak_sell(token_id, filled)
@@ -1898,6 +1900,21 @@ class LiveExecutionEngine:
                 fak_filled, token_id[:20],
             )
             self._active_orders.pop(tracked.order_id, None)
+            _dust = req_float("LIVE_INVENTORY_DUST_SHARES")
+            _bal_after = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+            if _bal_after is not None and _bal_after > _dust:
+                logging.warning(
+                    "⚠️ [LIVE] Wallet still holds %.4f sh after residual FAK "
+                    "(failed or partial) — syncing open position for strategy EXIT. token=%s",
+                    _bal_after, token_id[:20],
+                )
+                filled = float(_bal_after)
+                logging.info(
+                    "🟢 [LIVE] BUY confirmed (sub-min shares): %.4f @ %.4f token=%s",
+                    filled, avg_price, token_id[:20],
+                )
+                self._confirmed_buys[token_id] = filled
+                return (filled, avg_price)
             return _SKIP
 
         logging.info(

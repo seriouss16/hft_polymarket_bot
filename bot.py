@@ -1051,10 +1051,22 @@ async def main():
                             _open_signal = _raw_side
                         if _open_signal in ("BUY_UP", "BUY_DOWN"):
                             _trade_info = decision.get("trade") or {}
+                            _live_order_cap = float(os.environ["LIVE_ORDER_SIZE"])
                             _cost_usd = (
                                 float(_trade_info.get("amount_usd") or 0.0)
-                                or float(os.environ["LIVE_ORDER_SIZE"])
+                                or _live_order_cap
                             )
+                            # Engine dynamic sizing (_calc_dynamic_amount) can exceed
+                            # LIVE_ORDER_SIZE; reprice/emergency do not add USD — only this
+                            # path can overshoot if we trust amount_usd blindly.
+                            if _cost_usd > _live_order_cap:
+                                logging.info(
+                                    "[LIVE] Capping engine notional %.4f USD → "
+                                    "LIVE_ORDER_SIZE %.4f USD.",
+                                    _cost_usd,
+                                    _live_order_cap,
+                                )
+                                _cost_usd = _live_order_cap
                             _max_pos_usd = float(
                                 os.getenv(
                                     "HFT_MAX_POSITION_USD",
