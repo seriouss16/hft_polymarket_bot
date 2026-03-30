@@ -182,7 +182,7 @@ Market conditions
 
 ### LatencyArbitrageStrategy
 
-Generates live entry signals directly from the edge gap. Used as the live signal source (`HFT_LIVE_SIGNAL_STRATEGY=latency_arbitrage`) even when PhaseRouter drives the simulation engine.
+Wraps the same `HFTEngine` as paper mode. Live and paper both use `HFT_ACTIVE_STRATEGY` (e.g. `phase_router` or `latency_arbitrage`) — there is no separate live-only strategy switch.
 
 ---
 
@@ -607,6 +607,7 @@ LIVE_MAX_SESSION_LOSS=-<max_loss>
 
 | Aspect | Simulation | Live |
 |---|---|---|
+| `strategy_hub.process_tick` inputs | Same feeds, book, `meta_enabled`, `seconds_to_expiry`, anchor | **Same** — live skip cooldown does **not** disable `meta_enabled` (only suppresses CLOB placement in code) |
 | Order placement | Log only (`[SIM LIMIT]`) | Real GTC limit on Polymarket CLOB |
 | Fill tracking | Not tracked | Polled every `LIVE_ORDER_FILL_POLL_SEC` |
 | PnL recording | `log_trade()` on every tick | `live_open()` / `live_close()` only after CLOB confirmation |

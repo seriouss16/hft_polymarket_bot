@@ -362,8 +362,6 @@ async def main():
         "HFT_ACTIVE_STRATEGY",
         "phase_router" if os.getenv("HFT_ENABLE_PHASE_ROUTING") == "1" else "latency_arbitrage",
     )
-    live_signal_strategy = os.getenv("HFT_LIVE_SIGNAL_STRATEGY") or "latency_arbitrage"
-    live_signal_strategy = live_signal_strategy.strip()
     if default_strategy in strategy_hub.list_strategies():
         strategy_hub.set_active(default_strategy)
     strategy_hub.enable_parallel(os.getenv("HFT_PARALLEL_STRATEGIES") == "1")
@@ -783,8 +781,10 @@ async def main():
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
 
-                # Block engine entries during live-skip cooldown to prevent phantom
-                # sim positions from accumulating when the CLOB rejects every BUY.
+                # Live-only: after a failed/rejected CLOB BUY we suppress placing another
+                # order until _live_skip_until (see OPEN block below). Do NOT fold this
+                # into meta_enabled: that would make HFTEngine skip OPEN while paper
+                # still evaluates the same tick — keep process_tick parity with paper.
                 _skip_cooldown_active = LIVE_MODE and (now < _live_skip_until)
 
                 # Validate binary market constraint (UP + DOWN ≈ 1.0) and fix
@@ -825,7 +825,7 @@ async def main():
                     zscore=zscore,
                     latency_ms=latency_ms,
                     recent_pnl=pnl.last_realized_pnl,
-                    meta_enabled=(trade_allowed or BYPASS_META_GATE) and not _skip_cooldown_active,
+                    meta_enabled=(trade_allowed or BYPASS_META_GATE),
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                     skew_ms=skew_ms,
                     slot_anchor_price=slot_anchor_price,
