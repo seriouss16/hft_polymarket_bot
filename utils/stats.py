@@ -122,6 +122,23 @@ class _JournalStats:
         return _median_avg(self.loss_pnl_values)
 
 
+def _stats_from_realized_pnls(pnls: List[float]) -> _JournalStats:
+    """Build journal-style aggregates from in-memory session closed-trade PnL values."""
+    js = _JournalStats()
+    for pnl in pnls:
+        js.rows += 1
+        js.pnl_sum += pnl
+        if pnl > 0.0:
+            js.win_count += 1
+            js.win_pnl_sum += pnl
+            js.win_pnl_values.append(pnl)
+        else:
+            js.loss_count += 1
+            js.loss_pnl_sum += pnl
+            js.loss_pnl_values.append(pnl)
+    return js
+
+
 class StatsCollector:
     """Aggregate PnL metrics and print session / shutdown reports."""
 
@@ -198,13 +215,12 @@ class StatsCollector:
                 )
             report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
         
-        # Add median metrics from journal if available
-        journal_path_str = os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv")
-        journal_path = Path(journal_path_str)
-        if journal_path.is_file():
-            js = self._journal_aggregates(journal_path)
+        # Median metrics from this process session (not from on-disk journal CSV).
+        _pnls = getattr(self.pnl, "closed_trade_pnls", None)
+        if _pnls:
+            js = _stats_from_realized_pnls(_pnls)
             if js.rows > 0:
-                report.append("📊 Медианные показатели (журнал):")
+                report.append("📊 Медианные показатели (сессия):")
                 report.append(f"   Медианная средняя (все):     {js.median_avg_pnl:>+10.4f} USD")
                 report.append(f"   Медианная средняя (профит):  {js.median_avg_win:>+10.4f} USD")
                 report.append(f"   Медианная средняя (убыток):  {js.median_avg_loss:>10.4f} USD")
@@ -281,6 +297,7 @@ class StatsCollector:
 
         jp = Path(journal_path) if journal_path else None
         js = self._journal_aggregates(jp)
+        js_session = _stats_from_realized_pnls(getattr(self.pnl, "closed_trade_pnls", []))
 
         w_label = 32
         w_val = 22
@@ -314,6 +331,14 @@ class StatsCollector:
             sep,
         ]
 
+        if js_session.rows > 0:
+            lines += [
+                row("Медианная средняя (все, сессия)", f"{js_session.median_avg_pnl:+.4f} USD"),
+                row("Медианная средняя (профит, сессия)", f"{js_session.median_avg_win:+.4f} USD"),
+                row("Медианная средняя (убыток, сессия)", f"{js_session.median_avg_loss:+.4f} USD"),
+                sep,
+            ]
+
         if js.rows > 0:
             lines += [
                 row("--- Journal stats ---", ""),
@@ -334,10 +359,6 @@ class StatsCollector:
                 row("Средневзвешенная (все)", f"{js.weighted_avg_pnl:+.4f} USD"),
                 row("Средневзвешенная (профит)", f"{js.weighted_avg_win:+.4f} USD"),
                 row("Средневзвешенная (убыток)", f"{js.weighted_avg_loss:+.4f} USD"),
-                sep,
-                row("Медианная средняя (все)", f"{js.median_avg_pnl:+.4f} USD"),
-                row("Медианная средняя (профит)", f"{js.median_avg_win:+.4f} USD"),
-                row("Медианная средняя (убыток)", f"{js.median_avg_loss:+.4f} USD"),
                 sep,
             ]
 

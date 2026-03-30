@@ -86,6 +86,8 @@ class PnLTracker:
         self.trades_count = 0
         self.wins = 0
         self.total_pnl = 0.0
+        # Realized PnL per closed round-trip this process (sim + live); used for session median stats.
+        self.closed_trade_pnls: list[float] = []
         self.max_drawdown = 0.0
         self.peak_balance = self.initial_balance
 
@@ -209,6 +211,7 @@ class PnLTracker:
         self.last_realized_pnl = pnl
         self.last_close_ts = time.time()
         self.trades_count += 1
+        self.closed_trade_pnls.append(pnl)
         if pnl > 0:
             self.wins += 1
         self.recent_pnls.append(pnl)
@@ -392,6 +395,7 @@ class PnLTracker:
             self.last_realized_pnl = profit
             self.last_close_ts = time.time()
             self.trades_count += 1
+            self.closed_trade_pnls.append(profit)
             if profit > 0:
                 self.wins += 1
 
