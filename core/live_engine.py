@@ -1196,11 +1196,25 @@ class LiveExecutionEngine:
             "🚨 EMERGENCY EXIT: %s %.2f token=%s (min=%.0f filled=%.2f)",
             tracked.side, remaining, tracked.token_id[:20], poly_min, tracked.filled_size,
         )
-
+        
+        # Diagnostic: track intended vs actual exit price for slippage analysis
+        intended_price = tracked.price if tracked.price > 0 else 0.0
+        
         if tracked.side == SELL_SIDE:
             # FAK handles any size including sub-minimum — preferred for all SELL exits.
             fak_filled = await self._fak_sell(tracked.token_id, remaining)
             tracked.filled_size += fak_filled
+            
+            # Log emergency exit slippage
+            if fak_filled > 0:
+                actual_avg_price = tracked.filled_size / tracked.size if tracked.size > 0 else 0.0
+                slippage_pct = ((actual_avg_price - intended_price) / intended_price * 100) if intended_price > 0 else 0.0
+                logging.warning(
+                    "EMERGENCY_EXIT_SLIPPAGE: side=%s intended_price=%.4f actual_price=%.4f "
+                    "slippage_pct=%.2f%% filled=%.4f/%.4f",
+                    tracked.side, intended_price, actual_avg_price, slippage_pct,
+                    tracked.filled_size, tracked.size,
+                )
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
             price = max(0.01, min(0.99, best_ask + 0.005))

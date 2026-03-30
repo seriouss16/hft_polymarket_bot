@@ -2040,8 +2040,19 @@ class HFTEngine:
             self._update_trailing_state(unrealized)
             trailing_tp = self._trailing_tp_triggered(unrealized, hold_sec)
             trailing_sl = self._trailing_sl_triggered(unrealized, hold_sec)
-            _, sl_line = self._pnl_target_and_stop_lines()
+            tp_line, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
+            
+            # Diagnostic logging for exit conditions
+            if hold_sec >= self.min_hold_sec:
+                logging.debug(
+                    "EXIT_DIAG: hold_sec=%.2f side_move=%.4f poly_tp_move=%.4f poly_sl_move=%.4f "
+                    "unrealized=%.4f sl_line=%.4f tp_line=%.4f "
+                    "reaction_confirmed=%s protective_stop=%s pnl_sl=%s",
+                    hold_sec, side_move, self.poly_take_profit_move, self.poly_stop_move,
+                    unrealized, sl_line, tp_line,
+                    reaction_confirmed, protective_stop, pnl_sl,
+                )
             pos_side = self.pnl.position_side or "UP"
             rsi_x = self._exit_rsi(current_rsi)
             # Imbalance gate: when RSI is in extreme territory, imbalance alone
@@ -2147,6 +2158,19 @@ class HFTEngine:
                     reason = "PNL_SL"
                 else:
                     self._diag_inc("exit_reason_reaction_tp")
+                
+                # Diagnostic logging for exit reason priority
+                logging.info(
+                    "EXIT_REASON_DIAG: reason=%s hold=%.2f "
+                    "trend_flip=%s trailing_tp=%s trailing_sl=%s reaction_tp=%s "
+                    "protective_stop=%s rsi_range=%s pnl_sl=%s "
+                    "side_move=%.4f poly_sl_move=%.4f unrealized=%.4f sl_line=%.4f",
+                    reason, hold_sec,
+                    trend_flip_exit, trailing_tp, trailing_sl, reaction_tp_confirmed,
+                    protective_stop, rsi_range_exit, pnl_sl,
+                    side_move, self.poly_stop_move, unrealized, sl_line,
+                )
+                
                 _trail_info = ""
                 if self.trailing_tp_enabled or self.trailing_sl_enabled:
                     _sf = self._trailing_sl_floor
