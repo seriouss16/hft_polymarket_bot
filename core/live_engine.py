@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -440,6 +441,144 @@ class LiveExecutionEngine:
         except Exception as exc:
             logging.warning("Order fill poll failed order=%s: %s", order_id, exc)
             return "unknown", 0.0
+
+    @staticmethod
+    def _associate_trade_ids_from_order(data: dict) -> list[str]:
+        """Parse ``associate_trades`` from a CLOB order dict into trade id strings."""
+        raw = data.get("associate_trades") or data.get("associateTrades")
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s.replace("'", '"'))
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except json.JSONDecodeError:
+                    pass
+            return [s]
+        return []
+
+    def _vwap_from_trade_ids(self, trade_ids: list[str]) -> float | None:
+        """Return volume-weighted average price (0–1) for Polymarket trade ids, or None."""
+        if not trade_ids or self.test_mode or self.client is None:
+            return None
+        try:
+            from py_clob_client.clob_types import TradeParams
+        except ImportError:
+            return None
+        num = 0.0
+        den = 0.0
+        for tid in trade_ids:
+            if not tid:
+                continue
+            try:
+                rows = self.client.get_trades(TradeParams(id=str(tid)))
+            except Exception as exc:
+                logging.debug("get_trades id=%s: %s", tid[:16], exc)
+                continue
+            if not rows:
+                continue
+            for tr in rows:
+                if not isinstance(tr, dict):
+                    continue
+                sz_raw = float(tr.get("size", 0.0) or 0.0)
+                px = float(tr.get("price", 0.0) or 0.0)
+                if sz_raw > 1000:
+                    sz_raw /= 1_000_000.0
+                if sz_raw > 0 and 0.01 <= px <= 0.99:
+                    num += sz_raw * px
+                    den += sz_raw
+        if den <= 1e-12:
+            return None
+        return num / den
+
+    def _sell_fill_avg_price(self, tracked: TrackedOrder, total_filled: float) -> float:
+        """Execution VWAP for a filled SELL; ``tracked.price`` is the limit, not VWAP.
+
+        Using the limit price overstates proceeds when the book lifts shares below
+        the limit (common for GTC sells placed at bid+offset), which can flip a
+        real loss into an apparent win in ``PnLTracker.live_close``.
+        """
+        if self.test_mode or self.client is None or total_filled <= 0:
+            return tracked.price
+        try:
+            data = self.client.get_order(tracked.order_id)
+        except Exception as exc:
+            logging.debug("get_order for SELL VWAP: %s", exc)
+            return tracked.price
+        if not isinstance(data, dict):
+            return tracked.price
+        for key in (
+            "avg_fill_price",
+            "avg_price",
+            "average_price",
+            "execution_price",
+            "fill_price",
+            "average_match_price",
+        ):
+            raw = data.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                px = float(raw)
+                if 0.01 <= px <= 0.99:
+                    logging.debug(
+                        "[LIVE] SELL VWAP from order.%s=%.4f (limit was %.4f)",
+                        key, px, tracked.price,
+                    )
+                    return px
+            except (TypeError, ValueError):
+                continue
+        tids = self._associate_trade_ids_from_order(data)
+        vwap = self._vwap_from_trade_ids(tids)
+        if vwap is not None and 0.01 <= vwap <= 0.99:
+            logging.info(
+                "[LIVE] SELL VWAP from associate_trades (%d ids)=%.4f (limit was %.4f)",
+                len(tids),
+                vwap,
+                tracked.price,
+            )
+            return vwap
+        sm = float(data.get("size_matched", 0.0) or 0.0)
+        o_sz = float(data.get("original_size", 0.0) or 0.0)
+        if o_sz > 1000:
+            sm /= 1_000_000.0
+        for proceeds_key in (
+            "quote_filled",
+            "filled_amount_usd",
+            "maker_amount_usd",
+            "taker_amount_usd",
+            "collateral",
+        ):
+            pv = data.get(proceeds_key)
+            if pv is None or pv == "":
+                continue
+            try:
+                usd = float(pv)
+                if usd > 0 and sm > 1e-9:
+                    px = usd / sm
+                    if 0.01 <= px <= 0.99:
+                        logging.info(
+                            "[LIVE] SELL VWAP from %s / size_matched=%.4f",
+                            proceeds_key,
+                            px,
+                        )
+                        return px
+            except (TypeError, ValueError):
+                continue
+        logging.warning(
+            "⚠️ [LIVE] SELL VWAP fallback to limit price %.4f (order=%s). "
+            "If UI shows a different avg, associate_trades may be empty — check CLOB.",
+            tracked.price,
+            tracked.order_id[:20],
+        )
+        return tracked.price
 
     def _cancel_order(self, order_id: str) -> bool:
         """Cancel an open order; return True on success."""
@@ -1544,7 +1683,7 @@ class LiveExecutionEngine:
         total_filled = tracked.filled_size if tracked.filled_size > 0 else (
             tracked.size if tracked.status == OrderStatus.FILLED else 0.0
         )
-        avg_price = tracked.price
+        avg_price = self._sell_fill_avg_price(tracked, total_filled)
         if total_filled > 0 and not self.test_mode:
             total_filled, avg_price = await self._maybe_warn_or_fak_chain_remainder(
                 token_id, size, total_filled, avg_price
@@ -1641,14 +1780,20 @@ class LiveExecutionEngine:
         _max_pos_usd = req_float("HFT_MAX_POSITION_USD")
         if _max_pos_usd > 0.0:
             usd_notional = min(usd_notional, _max_pos_usd)
-        shares = usd_notional / exec_price
+        # Limit price must be known before sizing: shares × limit_price must not
+        # exceed budget. Previously shares = budget / best_ask while the order was
+        # placed at best_ask + offset, so worst-case spend could exceed budget; the
+        # main loop then applied min(budget, notional) and distorted entry_price.
+        _buy_offset = req_float("LIVE_BUY_PRICE_OFFSET")
+        price = max(0.01, min(0.99, exec_price + _buy_offset))
+        shares = usd_notional / price
 
         if shares < poly_min_shares:
-            min_cost = poly_min_shares * exec_price
+            min_cost = poly_min_shares * price
             logging.warning(
                 "⚠️ Skip %s: budget %.2f USD → %.2f shares < CLOB minimum %.0f shares "
-                "(need %.2f USD @ %.4f). Insufficient balance.",
-                signal, usd_notional, shares, poly_min_shares, min_cost, exec_price,
+                "(need %.2f USD @ limit %.4f). Insufficient balance.",
+                signal, usd_notional, shares, poly_min_shares, min_cost, price,
             )
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
@@ -1660,9 +1805,6 @@ class LiveExecutionEngine:
             shares = poly_min_shares
 
         # Place BUY at ask (or slightly above) for immediate fill.
-        # Negative offset means we pay ask exactly; positive would cross the spread.
-        _buy_offset = req_float("LIVE_BUY_PRICE_OFFSET")
-        price = max(0.01, min(0.99, exec_price + _buy_offset))
         shares = self._affordable_buy_shares(price, shares)
         if shares < poly_min_shares:
             logging.warning(

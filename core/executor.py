@@ -149,8 +149,8 @@ class PnLTracker:
 
         Called only after CLOB confirms the fill — bypasses all sim-mode balance
         checks and uses real CLOB fill data instead of simulated exec_price.
-        ``amount_usd`` must be the **actual USDC debited** (e.g. min(budget, notional)
-        when the CLOB reports a higher ``avg_price * shares`` after fee/reprice).
+        ``amount_usd`` must be the **actual USDC debited** (typically
+        ``filled_shares * avg_price`` from the CLOB after chain confirmation).
         Does nothing when filled_shares is zero (order was not filled).
         """
         if filled_shares <= 0.0:

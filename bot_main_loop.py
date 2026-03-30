@@ -1042,15 +1042,10 @@ async def main():
                                         **_exec_kw,
                                     )
                                     if _filled_sh > 0:
-                                        # Record confirmed CLOB fill into PnL tracker.
-                                        # Cash out must match UI / wallet: budget-capped BUY spends at most
-                                        # _cost_usd even when CLOB avg×shares is higher after fee/reprice.
-                                        _live_notional = float(_filled_sh) * float(_filled_px)
-                                        _buy_cash_usd = (
-                                            min(float(_cost_usd), _live_notional)
-                                            if float(_cost_usd) > 0.0
-                                            else _live_notional
-                                        )
+                                        # Record confirmed CLOB fill into PnL tracker. Use actual
+                                        # notional (shares × CLOB avg) so balance/entry match wallet + UI;
+                                        # execute() sizes orders so limit_price × shares ≤ budget.
+                                        _buy_cash_usd = float(_filled_sh) * float(_filled_px)
                                         _live_skip_until = 0.0
                                         pnl.live_open(
                                             _open_signal, _filled_sh, _filled_px,

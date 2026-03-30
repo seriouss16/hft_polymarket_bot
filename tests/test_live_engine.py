@@ -866,3 +866,17 @@ class TestLiveRiskManager:
         rm.pnl = -2.0
         assert rm.session_loss_breached() is True
         assert rm.can_trade() is False
+
+
+class TestSellFillAvgPriceHelpers:
+    """CLOB order helpers: associate_trades must feed VWAP, not limit price."""
+
+    def test_associate_trade_ids_list(self):
+        assert LiveExecutionEngine._associate_trade_ids_from_order(
+            {"associate_trades": ["0xabc", "0xdef"]}
+        ) == ["0xabc", "0xdef"]
+
+    def test_associate_trade_ids_json_string(self):
+        assert LiveExecutionEngine._associate_trade_ids_from_order(
+            {"associate_trades": '["tid1","tid2"]'}
+        ) == ["tid1", "tid2"]
