@@ -490,10 +490,26 @@ async def main():
                 _mem = live_exec.filled_buy_shares(_tid)
                 _ch = await asyncio.to_thread(live_exec.fetch_conditional_balance, _tid)
                 _chv = float(_ch) if _ch is not None else 0.0
-                if _mem >= _poly_min - 1e-6:
+                # Chain truth beats stale in-memory FILLED rows in _active_orders after
+                # clear_filled_buy() (mem can show 5.47 sh while chain is dust — phantom
+                # adopt; see bot_300326_* logs).
+                if (
+                    _ch is not None
+                    and _chv < _poly_min - 1e-6
+                    and _mem >= _poly_min - 1e-6
+                ):
+                    logging.debug(
+                        "[LIVE] inventory reconcile skip token=%s: mem=%.4f sh but "
+                        "chain=%.4f — stale filled_buy_shares.",
+                        _tid[:20],
+                        _mem,
+                        _chv,
+                    )
+                    continue
+                if _chv >= _poly_min - 1e-6:
+                    _sh = _chv if _mem < _poly_min - 1e-6 else min(_mem, _chv)
+                elif _mem >= _poly_min - 1e-6:
                     _sh = _mem
-                elif _chv >= _poly_min - 1e-6:
-                    _sh = _chv
                 elif _dust < _chv < _poly_min - 1e-6:
                     _sh = _chv
                 else:

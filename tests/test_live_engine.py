@@ -33,6 +33,7 @@ from core.live_engine import (
     LiveRiskManager,
     OrderStatus,
     TrackedOrder,
+    _collateral_usd_from_balance_allowance_response,
 )
 
 # _ORDER_STALE_SEC is read at module import time from the env default (3.0 s).
@@ -45,6 +46,28 @@ _STALE_AGE = 4.0  # seconds — larger than the default _ORDER_STALE_SEC of 3.0 
 
 TOKEN = "tok_abc123"
 POLY_MIN = 5.0
+
+
+# ---------------------------------------------------------------------------
+# CLOB balance-allowance parsing (COLLATERAL = UI Cash)
+# ---------------------------------------------------------------------------
+
+
+class TestCollateralUsdFromBalanceAllowanceResponse:
+    """Must not mix ERC20 allowance with free USDC when balance is 0."""
+
+    def test_zero_balance_not_replaced_by_allowance(self):
+        """balance=0 is truthy enough — never substitute huge allowance."""
+        huge = "115792089237316195423570985008687907853269984665640564039457584007913129639935"
+        r = _collateral_usd_from_balance_allowance_response(
+            {"balance": "0", "allowance": huge},
+        )
+        assert r == 0.0
+
+    def test_positive_balance_parsed(self):
+        """1e6 micro-USDC = 1.00 USD."""
+        r = _collateral_usd_from_balance_allowance_response({"balance": "7610000"})
+        assert r == pytest.approx(7.61)
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +791,35 @@ class TestRecoverFillAfterCancel:
         assert ok is True
         assert order.status == OrderStatus.FILLED
         assert order.filled_size == pytest.approx(10.0309)
+
+
+class TestVerifyUsdcDebitAfterBuy:
+    """_verify_usdc_debit_after_buy collateral check (phantom fill guard)."""
+
+    async def test_accepts_expected_drop(self, monkeypatch):
+        """USDC must drop by at least expected_spend - tolerance."""
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock):
+            with patch.object(eng, "fetch_usdc_balance", return_value=95.5):
+                ok = await eng._verify_usdc_debit_after_buy(100.0, 4.38)
+        assert ok is True
+
+    async def test_rejects_unchanged_balance(self, monkeypatch):
+        """No debit on collateral must fail verification."""
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock):
+            with patch.object(eng, "fetch_usdc_balance", return_value=100.0):
+                ok = await eng._verify_usdc_debit_after_buy(100.0, 4.38)
+        assert ok is False
+
+    async def test_skipped_when_disabled(self, monkeypatch):
+        monkeypatch.setenv("LIVE_USDC_DEBIT_VERIFY", "0")
+        eng = make_engine(monkeypatch)
+        eng.test_mode = False
+        ok = await eng._verify_usdc_debit_after_buy(100.0, 4.38)
+        assert ok is True
 
 
 class TestLiveRiskManager:

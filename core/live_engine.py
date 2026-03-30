@@ -51,6 +51,41 @@ def _parse_csv_floats(raw: str) -> list[float]:
     return out
 
 
+def _parse_usdc_verify_delays() -> list[float]:
+    """Delays (seconds) before each post-BUY USDC balance poll."""
+    raw = os.getenv("LIVE_USDC_DEBIT_VERIFY_DELAYS_SEC", "0,0.2,0.45,0.9,1.5")
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if not parts:
+        return [0.0]
+    return [float(p) for p in parts]
+
+
+def _collateral_usd_from_balance_allowance_response(resp: object) -> float | None:
+    """Parse ``GET /balance-allowance`` for ``asset_type=COLLATERAL`` (free USDC).
+
+    Polymarket returns ``balance`` (1e-6 USDC, matches UI Cash) and separately
+    ``allowance`` (ERC20 approval to the exchange — not spendable cash). Using
+    ``balance or allowance`` is wrong: when ``balance`` is ``0``, Python treats it
+    as falsy and would substitute a huge allowance — the UI would look «stuck».
+    """
+    if isinstance(resp, dict):
+        if "balance" in resp and resp["balance"] is not None:
+            return float(resp["balance"]) / 1_000_000.0
+        logging.warning(
+            "fetch_usdc_balance: COLLATERAL response missing balance key: %s",
+            resp,
+        )
+        return None
+    bal = getattr(resp, "balance", None)
+    if bal is not None:
+        return float(bal) / 1_000_000.0
+    logging.warning(
+        "fetch_usdc_balance: COLLATERAL response object has no balance attr: %s",
+        resp,
+    )
+    return None
+
+
 class OrderStatus(str, Enum):
     """Lifecycle states for a tracked live order."""
 
@@ -245,7 +280,8 @@ class LiveExecutionEngine:
       5. emergency_exit() can also be triggered externally when the engine decides
          the position must close regardless of conditions.
 
-    ``_last_buy_skip_reason`` is set on intentional BUY abort (e.g. slippage guard)
+    ``_last_buy_skip_reason`` is set on intentional BUY abort (e.g. slippage guard,
+    ``usdc_debit_mismatch`` when collateral did not decrease after a reported fill)
     so the bot can avoid a live-skip cooldown; see ``LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT``.
 
     On EXIT, ``wait_for_exit_readiness`` / ``probe_chain_shares_for_close`` reconcile
@@ -420,17 +456,98 @@ class LiveExecutionEngine:
                 signature_type=sig_type,
             )
             resp = self.client.get_balance_allowance(params=params)
-            if isinstance(resp, dict):
-                raw = resp.get("balance") or resp.get("allowance")
-            else:
-                raw = getattr(resp, "balance", None) or getattr(resp, "allowance", None)
-            if raw is None:
-                return None
-            # USDC on Polymarket CLOB is denominated in 1e-6 units (micro-USDC).
-            return float(raw) / 1_000_000.0
+            return _collateral_usd_from_balance_allowance_response(resp)
         except Exception as exc:
             logging.warning("fetch_usdc_balance failed: %s", exc)
             return None
+
+    async def _verify_usdc_debit_after_buy(
+        self,
+        usdc_before: float | None,
+        expected_spend_usd: float,
+    ) -> bool:
+        """Return True when CLOB collateral USDC dropped by ~expected spend after a BUY.
+
+        Detects phantom fills / desync: CLOB reports a match but collateral did not
+        move, so callers must not debit session PnL. Disabled in test_mode or when
+        ``LIVE_USDC_DEBIT_VERIFY=0``. When ``usdc_before`` is None, verification is
+        skipped (warn once). When all post-fetches fail, allows the fill (inconclusive).
+        """
+        if self.test_mode:
+            return True
+        if os.getenv("LIVE_USDC_DEBIT_VERIFY", "1") == "0":
+            return True
+        if expected_spend_usd <= 1e-9:
+            return True
+        if usdc_before is None:
+            logging.warning(
+                "[LIVE] USDC debit verify skipped — no pre-order balance snapshot.",
+            )
+            return True
+        tol_abs = float(os.getenv("LIVE_USDC_DEBIT_VERIFY_ABS_USD", "0.12"))
+        tol_rel = float(os.getenv("LIVE_USDC_DEBIT_VERIFY_REL", "0.025"))
+        tol = max(tol_abs, tol_rel * expected_spend_usd)
+        min_drop = max(0.0, expected_spend_usd - tol)
+        delays = _parse_usdc_verify_delays()
+        any_after = False
+        last_after: float | None = None
+        for i, delay in enumerate(delays):
+            if delay > 0:
+                await asyncio.sleep(delay)
+            after = await asyncio.to_thread(self.fetch_usdc_balance)
+            last_after = after
+            if after is None:
+                logging.warning(
+                    "[LIVE] USDC debit verify attempt %d/%d: balance fetch failed",
+                    i + 1,
+                    len(delays),
+                )
+                continue
+            any_after = True
+            delta = usdc_before - after
+            if delta < -1e-6:
+                logging.error(
+                    "[LIVE] USDC debit verify: balance rose during BUY "
+                    "(before=%.4f after=%.4f) — refusing fill.",
+                    usdc_before,
+                    after,
+                )
+                return False
+            if delta + 1e-9 >= min_drop:
+                logging.info(
+                    "[LIVE] USDC debit verify OK: before=%.4f after=%.4f Δ=%.4f "
+                    "(expected≈%.4f tol±%.4f)",
+                    usdc_before,
+                    after,
+                    delta,
+                    expected_spend_usd,
+                    tol,
+                )
+                return True
+            logging.debug(
+                "[LIVE] USDC debit verify attempt %d: Δ=%.4f < min %.4f — retry",
+                i + 1,
+                delta,
+                min_drop,
+            )
+        if not any_after:
+            logging.warning(
+                "[LIVE] USDC debit verify inconclusive (all post-order fetches failed) "
+                "— allowing fill.",
+            )
+            return True
+        delta_final = usdc_before - last_after if last_after is not None else None
+        logging.error(
+            "[LIVE] USDC debit verify FAILED: pre=%.4f post=%.4f Δ=%s "
+            "expected_spend≈%.4f (need Δ≥%.4f) — refusing BUY as filled "
+            "(phantom CLOB / API lag). Check Portfolio; reconcile if shares exist.",
+            usdc_before,
+            last_after,
+            f"{delta_final:.4f}" if delta_final is not None else "n/a",
+            expected_spend_usd,
+            min_drop,
+        )
+        return False
 
     def _affordable_buy_shares(self, price: float, desired_shares: float) -> float:
         """Return a BUY size at ``price`` that fits reported USDC collateral.
@@ -1769,6 +1886,9 @@ class LiveExecutionEngine:
                 return _SKIP
         except Exception as exc:
             logging.warning("Liquidity check failed: %s — proceeding with caution.", exc)
+        usdc_before_snapshot: float | None = None
+        if not self.test_mode:
+            usdc_before_snapshot = await asyncio.to_thread(self.fetch_usdc_balance)
         order_id, immediate = await asyncio.to_thread(
             self._place_limit_raw, token_id, BUY, price, shares
         )
@@ -1901,6 +2021,12 @@ class LiveExecutionEngine:
                 "LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=0 for strict chain-only).",
                 len(_bal_delays), filled, token_id[:20],
             )
+
+        _expected_spend = float(filled) * float(avg_price)
+        if not await self._verify_usdc_debit_after_buy(usdc_before_snapshot, _expected_spend):
+            self._last_buy_skip_reason = "usdc_debit_mismatch"
+            self._active_orders.pop(tracked.order_id, None)
+            return _SKIP
 
         if filled < poly_min_shares:
             # Fee can leave balance just below POLY_CLOB_MIN_SHARES; we try to FAK out
