@@ -172,6 +172,12 @@ class StatsCollector:
         label = "DAY ☀️" if name == "day" else "NIGHT 🌙"
         return f"{label} [авто]"
 
+    def _execution_mode_title(self) -> str:
+        """SIM = modeled book/fees; LIVE = CLOB fills (valid to compare to Polymarket UI)."""
+        if getattr(self.pnl, "live_mode", False):
+            return "HFT LIVE (CLOB)"
+        return "HFT SIM (модель ≠ UI Polymarket)"
+
     def show_report(self):
         """Print compact PnL summary to stdout (legacy block format)."""
         now_ts = time.time()
@@ -186,7 +192,7 @@ class StatsCollector:
 
         report = [
             "\n" + "=" * 45,
-            "📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ (HFT SIM)",
+            f"📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ ({self._execution_mode_title()})",
             "=" * 45,
             f"🕒 Старт сессии:      {started_at}",
             f"🧾 Время отчета:      {report_at}",
@@ -314,6 +320,7 @@ class StatsCollector:
             sep,
             row("Причина завершения", shutdown_reason),
             row("Режим", self._session_mode_label()),
+            row("Учёт PnL", self._execution_mode_title()),
             row("Старт сессии", started_at),
             row("Время отчета", report_at),
             row("Аптайм, min", f"{uptime_min:.1f}"),
