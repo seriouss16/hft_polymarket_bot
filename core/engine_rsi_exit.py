@@ -32,6 +32,7 @@ def rsi_range_exit_triggered(
 ) -> bool:
     """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin)."""
     margin = eng.rsi_range_exit_band_margin
+    fade_buf = float(getattr(eng, "rsi_range_exit_fade_buffer", 0.0) or 0.0)
     min_p = eng.rsi_range_exit_min_profit_usd
     tp_line, _ = eng._pnl_target_and_stop_lines()
     min_hold = float(eng.rsi_range_exit_min_hold_sec)
@@ -40,7 +41,7 @@ def rsi_range_exit_triggered(
     if position_side == "UP":
         if rx >= eng.rsi_entry_up_high and unrealized >= tp_line:
             return True
-        if rx <= eng.rsi_entry_up_low - margin:
+        if rx <= eng.rsi_entry_up_low - margin - fade_buf:
             if min_hold > 0.0 and hold_sec < min_hold:
                 return False
             cond = unrealized > min_p or rx <= eng.rsi_extreme_low
@@ -51,7 +52,7 @@ def rsi_range_exit_triggered(
     if position_side == "DOWN":
         if rx <= eng.rsi_entry_down_low and unrealized >= tp_line:
             return True
-        if rx >= eng.rsi_entry_down_high + margin:
+        if rx >= eng.rsi_entry_down_high + margin + fade_buf:
             if min_hold > 0.0 and hold_sec < min_hold:
                 return False
             cond = unrealized > min_p or rx >= eng.rsi_extreme_high

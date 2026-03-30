@@ -167,6 +167,8 @@ class HFTEngine:
         self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K"))
         self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC"))
         self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC"))
+        # Extra RSI points beyond margin before fade exit (reduces sensitivity; not time-based).
+        self.rsi_range_exit_fade_buffer = float(os.getenv("HFT_RSI_RANGE_EXIT_FADE_BUFFER", "0") or 0.0)
         self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
         self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
 
