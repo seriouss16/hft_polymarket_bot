@@ -441,7 +441,13 @@ if recent_winrate < HFT_BAD_REGIME_WINRATE (0.35):
 ### 4. Live skip cooldown
 
 After a failed live BUY (order not placed or rejected), entries are blocked for
-`HFT_LIVE_SKIP_COOLDOWN_SEC` (30 s) to prevent retry spam.
+`LIVE_SKIP_COOLDOWN_SEC` (30 s) to prevent retry spam.
+
+**Exceptions (no cooldown by default):** if the BUY never filled because the GTC
+order went **stale** (`LIVE_ORDER_STALE_SEC`) and/or **emergency** placement failed
+(liquidity/timing), the next tick can retry immediately so the bot does not sit idle
+for 30 s. Set `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1` to apply the same cooldown
+in those cases.
 
 ---
 
@@ -504,7 +510,7 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 |---|---|---|
 | `LIVE_ORDER_FILL_POLL_SEC` | 0.4 | Seconds between fill status polls |
 | `LIVE_ORDER_STALE_SEC` | 3.0 | Seconds before unfilled order is considered stale |
-| `LIVE_ORDER_MAX_REPRICE` | 2 | Max reprice attempts before emergency exit |
+| `LIVE_ORDER_MAX_REPRICE` | 2 | Max reprice attempts before emergency exit (`0` = no reprice chase; first stale → emergency) |
 | `LIVE_ORDER_SIZE` | 10 | Fallback order size in USD (used when budget not set) |
 | `LIVE_MAX_SPREAD` | 0.05 | Max CLOB spread to allow execution |
 | `HFT_MAX_ENTRY_ASK` | 0.99 | Global ceiling: best_ask must be **below** this (same as paper `_entry_ask_allows_open`) |
@@ -512,7 +518,9 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 | `HFT_ENTRY_MIN_ASK_DOWN` / `HFT_ENTRY_MAX_ASK_DOWN` | _(per runtime)_ | Per-outcome band for DOWN token |
 | `POLY_CLOB_MIN_SHARES` | 5 | Polymarket minimum GTC order size in shares |
 | `POLY_SIGNATURE_TYPE` | 2 | Wallet signature type (2 = EOA with proxy) |
-| `HFT_LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |
+| `LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |
+| `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL` | 0 | If `1`, also apply cooldown on stale/no-fill and emergency BUY failures |
+| `LIVE_EMERGENCY_BUY_BALANCE_MARGIN` | 0.002 | Fraction of USDC balance reserved on emergency BUY (avoids micro rounding rejections) |
 
 **Latency tuning (optional):** Lower `LIVE_ORDER_FILL_POLL_SEC` for faster fill detection (more API load). When `HFT_SLOT_POLL_SEC=0`, slot/market checks are still capped by `HFT_MIN_SLOT_POLL_SEC` (default 1 s) to avoid hammering Gamma—reduce for quicker slot-boundary reaction. `LIVE_BALANCE_CONFIRM_DELAYS_SEC` overrides the default backoff after a CLOB-reported BUY when confirming on-chain balance (comma-separated seconds; shorter = faster but higher false-abort risk if RPC lags). `LIVE_HEARTBEAT_INTERVAL_SEC` defaults to 5 s; keep ≤15 s (Polymarket requirement).
 

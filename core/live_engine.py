@@ -959,12 +959,24 @@ class LiveExecutionEngine:
                 break
 
             if tracked.reprice_count >= _ORDER_MAX_REPRICE:
-                logging.warning(
-                    "⚠️ Order stale after %d reprice attempts id=%s — emergency exit "
-                    "(filled=%.2f remaining=%.2f).",
-                    _ORDER_MAX_REPRICE, tracked.order_id,
-                    tracked.filled_size, remaining,
-                )
+                if _ORDER_MAX_REPRICE == 0:
+                    logging.warning(
+                        "⚠️ Order stale (LIVE_ORDER_MAX_REPRICE=0: no reprice chase) id=%s — "
+                        "emergency exit (filled=%.2f remaining=%.2f). "
+                        "Increase LIVE_ORDER_STALE_SEC or set LIVE_ORDER_MAX_REPRICE>0 to chase.",
+                        tracked.order_id,
+                        tracked.filled_size,
+                        remaining,
+                    )
+                else:
+                    logging.warning(
+                        "⚠️ Order stale after %d reprice attempts id=%s — emergency exit "
+                        "(filled=%.2f remaining=%.2f).",
+                        _ORDER_MAX_REPRICE,
+                        tracked.order_id,
+                        tracked.filled_size,
+                        remaining,
+                    )
                 self._cancel_order(tracked.order_id)
                 tracked.status = OrderStatus.STALE
                 await self._emergency_exit_order(tracked)
@@ -1136,12 +1148,38 @@ class LiveExecutionEngine:
                     "Emergency BUY: cannot afford %.4f sh at %.4f (got %.4f, min=%.0f).",
                     remaining, price, em_size, poly_min,
                 )
+                self._last_buy_skip_reason = "emergency_buy_failed"
                 return
             if em_size < remaining - 1e-6:
                 logging.warning(
                     "Emergency BUY: size %.4f → %.4f to fit USDC at %.4f.",
                     remaining, em_size, price,
                 )
+            # CLOB compares order cost to balance in micro-USDC; leave headroom so
+            # rounding does not trigger "not enough balance" when spend ≈ wallet.
+            _marg = float(os.getenv("LIVE_EMERGENCY_BUY_BALANCE_MARGIN", "0.002"))
+            if not self.test_mode and price > 0.0:
+                _bal = self.fetch_usdc_balance()
+                if _bal is not None and _bal > 0.0:
+                    _cap_sh = (_bal * max(0.0, 1.0 - _marg)) / price
+                    _cap_sh = float(int(_cap_sh * 100.0) / 100.0)
+                    if _cap_sh + 1e-9 < em_size:
+                        logging.info(
+                            "[LIVE] Emergency BUY cap: %.4f → %.4f sh (balance margin %.3f%%).",
+                            em_size,
+                            _cap_sh,
+                            _marg * 100.0,
+                        )
+                        em_size = _cap_sh
+            if em_size < poly_min:
+                logging.error(
+                    "Emergency BUY: after margin cap size %.4f < min %.0f at %.4f.",
+                    em_size,
+                    poly_min,
+                    price,
+                )
+                self._last_buy_skip_reason = "emergency_buy_failed"
+                return
             order_id, immediate = await asyncio.to_thread(
                 self._place_limit_raw, tracked.token_id, tracked.side, price, em_size
             )
@@ -1173,8 +1211,10 @@ class LiveExecutionEngine:
                 logging.error(
                     "🛑 Emergency BUY placement FAILED token=%s remaining=%.2f"
                     " — manual intervention required.",
-                    tracked.token_id, remaining,
+                    tracked.token_id,
+                    remaining,
                 )
+                self._last_buy_skip_reason = "emergency_buy_failed"
 
     async def emergency_exit(self, token_id: str, size: float, side: str = SELL_SIDE) -> None:
         """Externally triggered emergency close: cancel all open orders then cross the book.
@@ -1897,6 +1937,8 @@ class LiveExecutionEngine:
         # exhaust all retries, then TRUST the CLOB-reported fill so we never abandon a
         # real position.
         if filled <= 0:
+            if self._last_buy_skip_reason is None and tracked.status == OrderStatus.STALE:
+                self._last_buy_skip_reason = "stale_no_fill"
             logging.warning(
                 "⚠️ [LIVE] BUY status=%s but filled=0 — skip.", tracked.status,
             )

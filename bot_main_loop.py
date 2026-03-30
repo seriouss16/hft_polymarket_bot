@@ -1108,18 +1108,37 @@ async def main():
                                         )
                                         if _hft_eng is not None:
                                             _hft_eng.rollback_live_open_signal()
-                                        _slip_abort = (
-                                            getattr(live_exec, "_last_buy_skip_reason", None)
-                                            == "slippage_abort"
+                                        _buy_skip = getattr(
+                                            live_exec, "_last_buy_skip_reason", None
                                         )
+                                        _slip_abort = _buy_skip == "slippage_abort"
                                         _cooldown_on_slip = (
                                             os.getenv(
                                                 "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0"
                                             )
                                             == "1"
                                         )
-                                        if not (_slip_abort and not _cooldown_on_slip):
-                                            # BUY not filled — impose cooldown to avoid retry spam.
+                                        # Slippage guard: optional no-cooldown (existing behaviour).
+                                        _apply_cd = not (
+                                            _slip_abort and not _cooldown_on_slip
+                                        )
+                                        # Stale / emergency placement failure: liquidity/timing, not a
+                                        # rejected bad trade — default is no cooldown so the next tick
+                                        # can retry. Set LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1 to force.
+                                        if _apply_cd and _buy_skip in (
+                                            "stale_no_fill",
+                                            "emergency_buy_failed",
+                                        ):
+                                            if os.getenv(
+                                                "LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL", "0"
+                                            ) != "1":
+                                                _apply_cd = False
+                                                logging.info(
+                                                    "[LIVE] BUY not filled (%s) — no skip cooldown "
+                                                    "(set LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1 to force).",
+                                                    _buy_skip,
+                                                )
+                                        if _apply_cd:
                                             _live_skip_until = now + _live_skip_cooldown_sec
                                             logging.info(
                                                 "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
