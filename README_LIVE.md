@@ -514,6 +514,14 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 | `POLY_SIGNATURE_TYPE` | 2 | Wallet signature type (2 = EOA with proxy) |
 | `HFT_LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |
 
+**Latency tuning (optional):** Lower `LIVE_ORDER_FILL_POLL_SEC` for faster fill detection (more API load). When `HFT_SLOT_POLL_SEC=0`, slot/market checks are still capped by `HFT_MIN_SLOT_POLL_SEC` (default 1 s) to avoid hammering Gamma—reduce for quicker slot-boundary reaction. `LIVE_BALANCE_CONFIRM_DELAYS_SEC` overrides the default backoff after a CLOB-reported BUY when confirming on-chain balance (comma-separated seconds; shorter = faster but higher false-abort risk if RPC lags). `LIVE_HEARTBEAT_INTERVAL_SEC` defaults to 5 s; keep ≤15 s (Polymarket requirement).
+
+| Key | Default | Description |
+|---|---|---|
+| `HFT_MIN_SLOT_POLL_SEC` | 1.0 | Min seconds between slot/market resolution checks when `HFT_SLOT_POLL_SEC=0` |
+| `LIVE_BALANCE_CONFIRM_DELAYS_SEC` | `0,0.15,0.35,0.6,1,1.5` | On-chain balance retry delays after BUY (comma-separated) |
+| `LIVE_HEARTBEAT_INTERVAL_SEC` | 5.0 | CLOB heartbeat interval (must stay ≤15) |
+
 ### Risk limits
 
 | Key | Default | Description |

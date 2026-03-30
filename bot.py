@@ -5,35 +5,15 @@ import logging
 import threading
 from pathlib import Path
 
-
-def _load_env_file(path: Path, overwrite: bool = False) -> None:
-    """Merge key=value pairs from path into process environment."""
-    if not path.is_file():
-        return
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key = key.strip()
-        val = val.strip().strip('"').strip("'")
-        if not key:
-            continue
-        if overwrite or key not in os.environ:
-            os.environ[key] = val
+from utils.env_config import req_float, req_str
+from utils.env_merge import merge_env_file
 
 
 def _load_runtime_env() -> None:
     """Load layered runtime configuration files."""
     root = Path(__file__).resolve().parent
-    _load_env_file(root / "config" / "runtime.env", overwrite=False)
-    _load_env_file(root / ".env", overwrite=True)
+    merge_env_file(root / "config" / "runtime.env", overwrite=False)
+    merge_env_file(root / ".env", overwrite=True)
 
 
 _load_runtime_env()
@@ -84,7 +64,7 @@ from utils.trade_journal import TradeJournal
 
 def _silence_http_client_loggers() -> None:
     """Lower noise from urllib3/requests (used by MarketSelector and HTTP helpers)."""
-    raw = os.getenv("HFT_HTTP_CLIENT_LOG_LEVEL") or "WARNING"
+    raw = req_str("HFT_HTTP_CLIENT_LOG_LEVEL")
     level = getattr(logging, raw.upper(), logging.WARNING)
     for name in (
         "urllib3",
@@ -338,15 +318,16 @@ async def main():
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.environ["STATS_INTERVAL_SEC"])
     # PULSE_INTERVAL_SEC>0: at most one Fast: line per N seconds. When 0, use HFT_FAST_LOG_MIN_SEC.
-    PULSE_INTERVAL = float(os.getenv("PULSE_INTERVAL_SEC") or "0")
-    FAST_LOG_MIN_SEC = float(os.getenv("HFT_FAST_LOG_MIN_SEC") or "0.25")
+    PULSE_INTERVAL = req_float("PULSE_INTERVAL_SEC")
+    FAST_LOG_MIN_SEC = req_float("HFT_FAST_LOG_MIN_SEC")
     pulse_log_period = PULSE_INTERVAL if PULSE_INTERVAL > 0.0 else FAST_LOG_MIN_SEC
-    MAIN_LOOP_SLEEP = float(os.getenv("HFT_LOOP_SLEEP_SEC") or "0")
-    CLOB_PULL_INTERVAL = float(os.getenv("CLOB_BOOK_PULL_SEC") or "0")
-    LSTM_MIN_INTERVAL = float(os.getenv("LSTM_INFERENCE_SEC") or "0")
+    MAIN_LOOP_SLEEP = req_float("HFT_LOOP_SLEEP_SEC")
+    CLOB_PULL_INTERVAL = req_float("CLOB_BOOK_PULL_SEC")
+    LSTM_MIN_INTERVAL = req_float("LSTM_INFERENCE_SEC")
     ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM") == "1"
-    SLOT_POLL_SEC = float(os.getenv("HFT_SLOT_POLL_SEC") or "0")
-    MIN_SLOT_POLL_SEC = 1.0
+    SLOT_POLL_SEC = req_float("HFT_SLOT_POLL_SEC")
+    # When HFT_SLOT_POLL_SEC=0, slot/market checks still run at most once per this interval.
+    MIN_SLOT_POLL_SEC = req_float("HFT_MIN_SLOT_POLL_SEC")
 
     # --- Инициализация компонентов ---
     selector = MarketSelector(asset=SYMBOL)
@@ -379,7 +360,7 @@ async def main():
         max_position_pct=float(os.environ["MAX_POSITION_PCT"]),
         loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
-    journal = TradeJournal(path=os.getenv("TRADE_JOURNAL_PATH") or "reports/trade_journal.csv")
+    journal = TradeJournal(path=req_str("TRADE_JOURNAL_PATH"))
 
     # Validate session deposit against real account balance in live mode.
     _session_deposit = float(os.environ["HFT_DEPOSIT_USD"])
@@ -387,7 +368,7 @@ async def main():
         # Refresh USDC and CTF conditional token allowances so SELL orders are accepted.
         # Without CTF allowance the CLOB rejects every SELL with "not enough balance".
         await asyncio.to_thread(live_exec.ensure_allowances)
-        _live_account_balance_limit = float(os.getenv("LIVE_ACCOUNT_BALANCE") or "0")
+        _live_account_balance_limit = req_float("LIVE_ACCOUNT_BALANCE")
         _account_balance = live_exec.fetch_usdc_balance()
         _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit
         if _effective_account > 0.0 and _session_deposit > _effective_account:
@@ -428,11 +409,14 @@ async def main():
     _heartbeat_task: asyncio.Task | None = None
 
     if LIVE_MODE and live_exec.client is not None:
+        _heartbeat_interval_sec = req_float("LIVE_HEARTBEAT_INTERVAL_SEC")
+
         async def _run_heartbeat() -> None:
-            """Send Polymarket CLOB heartbeat every 5 s to keep open orders alive.
+            """Send Polymarket CLOB heartbeat periodically to keep open orders alive.
 
             Without a valid heartbeat every ≤15 s the CLOB cancels all open orders.
-            Errors are logged but do not stop the loop.
+            Interval is ``LIVE_HEARTBEAT_INTERVAL_SEC`` (default 5 s). Errors are logged
+            but do not stop the loop.
             """
             _hb_id = ""
             while True:
@@ -441,7 +425,7 @@ async def main():
                     _hb_id = resp.get("heartbeat_id", "") if isinstance(resp, dict) else getattr(resp, "heartbeat_id", "")
                 except Exception as _hb_exc:
                     logging.debug("[LIVE] Heartbeat failed: %s", _hb_exc)
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(_heartbeat_interval_sec)
 
         _heartbeat_task = asyncio.create_task(_run_heartbeat())
 
@@ -457,7 +441,7 @@ async def main():
     # Prevents the engine from accumulating phantom sim positions when the CLOB
     # rejects every entry due to insufficient balance for the minimum share count.
     _live_skip_until: float = 0.0
-    _live_skip_cooldown_sec = float(os.getenv("LIVE_SKIP_COOLDOWN_SEC"))
+    _live_skip_cooldown_sec = req_float("LIVE_SKIP_COOLDOWN_SEC")
     last_lstm_time = 0
     last_book_pull_time = 0
     last_book_mismatch_warn_time = 0.0

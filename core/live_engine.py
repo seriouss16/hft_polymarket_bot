@@ -8,19 +8,40 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 import requests
 
-CLOB_BOOK_HTTP = os.getenv("CLOB_BOOK_HTTP")
-_CLOB_BOOK_HTTP_TIMEOUT = float(os.getenv("LIVE_CLOB_BOOK_HTTP_TIMEOUT"))
+from utils.env_config import req_float, req_int, req_str
+from utils.env_merge import merge_env_file
 
-_ORDER_FILL_POLL_SEC = float(os.getenv("LIVE_ORDER_FILL_POLL_SEC"))
-_ORDER_STALE_SEC = float(os.getenv("LIVE_ORDER_STALE_SEC"))
-_ORDER_MAX_REPRICE = int(os.getenv("LIVE_ORDER_MAX_REPRICE"))
-_ORDER_EMERGENCY_TICKS = int(os.getenv("LIVE_ORDER_EMERGENCY_TICKS"))
-_REPRICE_POST_CANCEL_SLEEP_SEC = float(os.getenv("LIVE_REPRICE_POST_CANCEL_SLEEP_SEC"))
-_REPRICE_POST_CANCEL_FILL_POLLS = max(1, int(os.getenv("LIVE_REPRICE_POST_CANCEL_FILL_POLLS")))
-_REPRICE_POST_CANCEL_POLL_SEC = float(os.getenv("LIVE_REPRICE_POST_CANCEL_POLL_SEC"))
+# Ensure config/runtime.env is merged before reading LIVE_* (tests import this module
+# without loading bot.py first).
+_ROOT = Path(__file__).resolve().parent.parent
+merge_env_file(_ROOT / "config" / "runtime.env", overwrite=False)
+
+CLOB_BOOK_HTTP = req_str("CLOB_BOOK_HTTP")
+_CLOB_BOOK_HTTP_TIMEOUT = req_float("LIVE_CLOB_BOOK_HTTP_TIMEOUT")
+
+_ORDER_FILL_POLL_SEC = req_float("LIVE_ORDER_FILL_POLL_SEC")
+_ORDER_STALE_SEC = req_float("LIVE_ORDER_STALE_SEC")
+_ORDER_MAX_REPRICE = req_int("LIVE_ORDER_MAX_REPRICE")
+_ORDER_EMERGENCY_TICKS = req_int("LIVE_ORDER_EMERGENCY_TICKS")
+_REPRICE_POST_CANCEL_SLEEP_SEC = req_float("LIVE_REPRICE_POST_CANCEL_SLEEP_SEC")
+_REPRICE_POST_CANCEL_FILL_POLLS = max(1, req_int("LIVE_REPRICE_POST_CANCEL_FILL_POLLS"))
+_REPRICE_POST_CANCEL_POLL_SEC = req_float("LIVE_REPRICE_POST_CANCEL_POLL_SEC")
+
+
+def _parse_csv_floats(raw: str) -> list[float]:
+    """Parse comma-separated floats (``LIVE_BALANCE_CONFIRM_DELAYS_SEC``)."""
+    out: list[float] = []
+    for part in str(raw).split(","):
+        p = part.strip()
+        if p:
+            out.append(float(p))
+    if not out:
+        raise RuntimeError("Comma-separated float list is empty.")
+    return out
 
 
 class OrderStatus(str, Enum):
@@ -207,7 +228,7 @@ class LiveExecutionEngine:
 
     Order lifecycle:
       1. execute() / close_position() places a GTC limit and tracks it as PENDING.
-      2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC seconds (default 0.15).
+      2. _poll_order() polls fill status every LIVE_ORDER_FILL_POLL_SEC (see ``config/runtime.env``).
       3. If unfilled after LIVE_ORDER_STALE_SEC the order is repriced up to
          LIVE_ORDER_MAX_REPRICE times toward best market price.  For BUY, if
          LIVE_MAX_BUY_REPRICE_SLIPPAGE is set and the new limit would exceed that
@@ -237,8 +258,8 @@ class LiveExecutionEngine:
         self.test_mode = test_mode
         self.min_order_size = min_order_size
         self.max_spread = max_spread
-        self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK"))
-        self.skip_stats_log_sec = float(os.getenv("HFT_LIVE_SKIP_STATS_LOG_SEC"))
+        self.max_entry_ask = req_float("HFT_MAX_ENTRY_ASK")
+        self.skip_stats_log_sec = req_float("HFT_LIVE_SKIP_STATS_LOG_SEC")
         self._last_skip_stats_log_ts = time.time()
         self._entry_stats: dict[str, int] = {
             "attempts": 0,
@@ -263,7 +284,7 @@ class LiveExecutionEngine:
                 raise RuntimeError("py_clob_client is not installed.")
             return
 
-        sig_type = int(os.getenv("POLY_SIGNATURE_TYPE"))
+        sig_type = req_int("POLY_SIGNATURE_TYPE")
         self.client = ClobClient(
             "https://clob.polymarket.com",
             key=private_key or "",
@@ -296,7 +317,7 @@ class LiveExecutionEngine:
             return
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE"))
+            sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
                 signature_type=sig_type,
@@ -319,7 +340,7 @@ class LiveExecutionEngine:
             return
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE"))
+            sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
                 token_id=token_id,
@@ -351,7 +372,7 @@ class LiveExecutionEngine:
             return None
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE"))
+            sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
                 token_id=token_id,
@@ -386,7 +407,7 @@ class LiveExecutionEngine:
             return None
         try:
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-            sig_type = int(os.getenv("POLY_SIGNATURE_TYPE"))
+            sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
                 signature_type=sig_type,
@@ -416,7 +437,7 @@ class LiveExecutionEngine:
         bal = self.fetch_usdc_balance()
         if bal is None or bal <= 0.0:
             return desired_shares
-        safety = float(os.getenv("LIVE_BUY_COLLATERAL_SAFETY"))
+        safety = req_float("LIVE_BUY_COLLATERAL_SAFETY")
         max_notional = bal * safety
         max_shares = max_notional / price
         capped = min(desired_shares, max_shares)
@@ -472,7 +493,7 @@ class LiveExecutionEngine:
         """
         if self.client is None:
             return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
-        max_attempts = max(1, int(os.getenv("CLOB_ORDERBOOK_RETRIES")))
+        max_attempts = max(1, req_int("CLOB_ORDERBOOK_RETRIES"))
         last_exc: Exception | None = None
         for attempt in range(max_attempts):
             try:
@@ -556,7 +577,7 @@ class LiveExecutionEngine:
         Returns False when a new limit order should be placed for
         ``tracked.remaining`` (or when nothing matched after polling).
         """
-        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
         if self.test_mode:
             return False
         if not skip_initial_sleep:
@@ -688,7 +709,8 @@ class LiveExecutionEngine:
         try:
             from py_clob_client.clob_types import MarketOrderArgs
             best_bid, _ = self.get_best_prices(token_id)
-            worst_price = max(0.01, round(best_bid * 0.90, 4))
+            _fak_worst_mult = max(0.01, min(1.0, req_float("LIVE_FAK_SELL_WORST_BID_MULT")))
+            worst_price = max(0.01, round(best_bid * _fak_worst_mult, 4))
             order_args = MarketOrderArgs(
                 token_id=token_id,
                 side=SELL_SIDE,
@@ -823,7 +845,7 @@ class LiveExecutionEngine:
           - If remaining < min_shares: use FAK SELL instead of a sub-minimum GTC
             (CLOB rejects GTC below the minimum).
         """
-        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
 
         while tracked.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
             await asyncio.sleep(_ORDER_FILL_POLL_SEC)
@@ -915,7 +937,7 @@ class LiveExecutionEngine:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
             if tracked.side == BUY:
                 new_price_probe = max(0.01, min(0.99, best_ask + 0.001))
-                max_slip = float(os.getenv("LIVE_MAX_BUY_REPRICE_SLIPPAGE"))
+                max_slip = req_float("LIVE_MAX_BUY_REPRICE_SLIPPAGE")
                 if (
                     max_slip > 0.0
                     and tracked.entry_best_ask is not None
@@ -1039,7 +1061,7 @@ class LiveExecutionEngine:
         Updates ``tracked.filled_size`` with any additional fills.
         """
         self._entry_stats["emergency_exits"] += 1
-        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
         remaining = tracked.remaining if tracked.status in (
             OrderStatus.PARTIAL, OrderStatus.STALE
         ) else tracked.size
@@ -1130,7 +1152,7 @@ class LiveExecutionEngine:
                     size, place_sz, price,
                 )
 
-        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
         if side == SELL_SIDE and 0.0 < place_sz < poly_min:
             logging.warning(
                 "⚠️ EMERGENCY SELL size=%.4f < CLOB min %.0f — FAK market sell.",
@@ -1259,7 +1281,7 @@ class LiveExecutionEngine:
         if self.test_mode:
             return
         if timeout_sec is None:
-            timeout_sec = float(os.getenv("LIVE_CLOSE_WAIT_PENDING_SEC"))
+            timeout_sec = req_float("LIVE_CLOSE_WAIT_PENDING_SEC")
         deadline = time.monotonic() + max(0.1, timeout_sec)
         while time.monotonic() < deadline:
             if self.has_pending_buy(token_id) or self.has_pending_sell(token_id):
@@ -1285,16 +1307,13 @@ class LiveExecutionEngine:
         """
         if self.test_mode:
             return 0.0
-        dust = float(
-            os.getenv(
-                "LIVE_CHAIN_EXIT_DUST_SHARES",
-                os.getenv("LIVE_SELL_CHAIN_DUST_SHARES"),
-            )
+        _dust_raw = os.getenv("LIVE_CHAIN_EXIT_DUST_SHARES") or os.getenv("LIVE_SELL_CHAIN_DUST_SHARES")
+        dust = (
+            float(_dust_raw.strip())
+            if _dust_raw and str(_dust_raw).strip()
+            else req_float("LIVE_SELL_CHAIN_DUST_SHARES")
         )
-        raw_delays = os.getenv("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC")
-        delays = [float(x.strip()) for x in raw_delays.split(",") if x.strip()]
-        if not delays:
-            delays = [0.0, 0.15, 0.35, 0.6, 1.0, 1.5]
+        delays = _parse_csv_floats(req_str("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC"))
         best: float | None = None
         for d in delays:
             if d > 0:
@@ -1322,16 +1341,13 @@ class LiveExecutionEngine:
         """
         if self.test_mode:
             return None
-        dust = float(
-            os.getenv(
-                "LIVE_CHAIN_EXIT_DUST_SHARES",
-                os.getenv("LIVE_SELL_CHAIN_DUST_SHARES"),
-            )
+        _dust_raw = os.getenv("LIVE_CHAIN_EXIT_DUST_SHARES") or os.getenv("LIVE_SELL_CHAIN_DUST_SHARES")
+        dust = (
+            float(_dust_raw.strip())
+            if _dust_raw and str(_dust_raw).strip()
+            else req_float("LIVE_SELL_CHAIN_DUST_SHARES")
         )
-        raw = os.getenv("LIVE_SELL_BALANCE_WAIT_DELAYS_SEC")
-        delays = [float(x.strip()) for x in raw.split(",") if x.strip()]
-        if not delays:
-            delays = [0.0, 0.25, 0.5, 1.0, 1.5, 2.0]
+        delays = _parse_csv_floats(req_str("LIVE_SELL_BALANCE_WAIT_DELAYS_SEC"))
         for d in delays:
             if d > 0:
                 await asyncio.sleep(d)
@@ -1366,11 +1382,11 @@ class LiveExecutionEngine:
         avg_price: float,
     ) -> tuple[float, float]:
         """Compare on-chain balance to CLOB fill; warn or optionally FAK the gap."""
-        delay = float(os.getenv("LIVE_POST_SELL_CHAIN_DELAY_SEC"))
+        delay = req_float("LIVE_POST_SELL_CHAIN_DELAY_SEC")
         if delay > 0:
             await asyncio.sleep(delay)
         bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
-        dust = float(os.getenv("LIVE_SELL_CHAIN_DUST_SHARES"))
+        dust = req_float("LIVE_SELL_CHAIN_DUST_SHARES")
         gap = max(0.0, requested_size - total_filled)
         if bal is None or bal <= dust:
             return (total_filled, avg_price)
@@ -1439,7 +1455,7 @@ class LiveExecutionEngine:
             if cb > 0.0:
                 size = cb
 
-        poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
         skip_presell = os.getenv("LIVE_SKIP_PRESELL_BALANCE", "0") == "1"
 
         # Verify actual on-chain CTF balance before placing any SELL.  Polymarket
@@ -1517,7 +1533,7 @@ class LiveExecutionEngine:
         else:
             best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
         price = max(0.01, min(0.99, best_bid + 0.002))
-        sell_attempts = max(1, int(os.getenv("LIVE_SELL_PLACE_ATTEMPTS")))
+        sell_attempts = max(1, req_int("LIVE_SELL_PLACE_ATTEMPTS"))
         order_id: str | None = None
         immediate = False
         for _att in range(sell_attempts):
@@ -1534,18 +1550,18 @@ class LiveExecutionEngine:
                 )
                 await self._await_sellable_balance(token_id, size)
                 await asyncio.sleep(
-                    float(os.getenv("LIVE_SELL_PLACE_RETRY_SLEEP_SEC"))
+                    req_float("LIVE_SELL_PLACE_RETRY_SLEEP_SEC")
                 )
         if not order_id:
             logging.warning("⚠️ [LIVE] SELL GTC failed, trying FAK token=%s.", token_id[:20])
-            fak_attempts = max(1, int(os.getenv("LIVE_SELL_FAK_ATTEMPTS")))
+            fak_attempts = max(1, req_int("LIVE_SELL_FAK_ATTEMPTS"))
             filled, fak_price = 0.0, 0.0
             for _fa in range(fak_attempts):
                 await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
                 if _fa > 0:
                     await self._await_sellable_balance(token_id, size)
                     await asyncio.sleep(
-                        float(os.getenv("LIVE_SELL_FAK_RETRY_SLEEP_SEC"))
+                        req_float("LIVE_SELL_FAK_RETRY_SLEEP_SEC")
                     )
                 filled, fak_price = await asyncio.to_thread(
                     self._place_fak_sell, token_id, size
@@ -1671,11 +1687,11 @@ class LiveExecutionEngine:
             self._log_entry_stats_if_due()
             return _SKIP
 
-        poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min_shares = req_float("POLY_CLOB_MIN_SHARES")
 
         exec_price = max(0.001, best_ask)
         usd_notional = order_size or budget_usd or self.min_order_size
-        _max_pos_usd = float(os.getenv("HFT_MAX_POSITION_USD", str(self.min_order_size)))
+        _max_pos_usd = req_float("HFT_MAX_POSITION_USD")
         if _max_pos_usd > 0.0:
             usd_notional = min(usd_notional, _max_pos_usd)
         shares = usd_notional / exec_price
@@ -1698,7 +1714,7 @@ class LiveExecutionEngine:
 
         # Place BUY at ask (or slightly above) for immediate fill.
         # Negative offset means we pay ask exactly; positive would cross the spread.
-        _buy_offset = float(os.getenv("LIVE_BUY_PRICE_OFFSET"))
+        _buy_offset = req_float("LIVE_BUY_PRICE_OFFSET")
         price = max(0.01, min(0.99, exec_price + _buy_offset))
         shares = self._affordable_buy_shares(price, shares)
         if shares < poly_min_shares:
@@ -1767,7 +1783,7 @@ class LiveExecutionEngine:
         # treating this as a skip to avoid phantom positions.
         if tracked.status in (OrderStatus.CANCELLED, OrderStatus.FAILED):
             _rescue_bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
-            if _rescue_bal and _rescue_bal >= float(os.getenv("POLY_CLOB_MIN_SHARES")):
+            if _rescue_bal and _rescue_bal >= req_float("POLY_CLOB_MIN_SHARES"):
                 logging.warning(
                     "⚠️ [LIVE] BUY order %s status=%s but on-chain balance=%.4f sh — "
                     "treating as partial fill to avoid phantom position.",
@@ -1794,14 +1810,14 @@ class LiveExecutionEngine:
             )
             return _SKIP
 
-        poly_min_shares = float(os.getenv("POLY_CLOB_MIN_SHARES"))
+        poly_min_shares = req_float("POLY_CLOB_MIN_SHARES")
         # Minimum fraction of the CLOB-reported fill that is accepted as a
         # "real" on-chain balance snapshot (not a partial ledger update).
         # If the on-chain read is < 10% of what CLOB reported, the ledger
         # has not settled yet and we continue polling rather than treating
         # the tiny value as the real post-fee balance.
-        _bal_min_frac = float(os.getenv("LIVE_BALANCE_MIN_FRAC"))
-        _bal_delays = [0.0, 0.15, 0.35, 0.6, 1.0, 1.5]
+        _bal_min_frac = req_float("LIVE_BALANCE_MIN_FRAC")
+        _bal_delays = _parse_csv_floats(req_str("LIVE_BALANCE_CONFIRM_DELAYS_SEC"))
         actual_bal: float | None = None
         for _i, _delay in enumerate(_bal_delays):
             await asyncio.sleep(_delay)

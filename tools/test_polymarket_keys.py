@@ -10,28 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
-def _load_env_file(path: Path, overwrite: bool = False) -> None:
-    """Merge key=value pairs from path into process environment."""
-    if not path.is_file():
-        return
-    text = path.read_text(encoding="utf-8")
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key = key.strip()
-        val = val.strip().strip('"').strip("'")
-        if key and (overwrite or key not in os.environ):
-            os.environ[key] = val
+from utils.env_merge import merge_env_file
 
 
 def _load_runtime_env() -> None:
     """Load runtime env from hft_bot config and local .env files."""
     root = Path(__file__).resolve().parents[1]
-    _load_env_file(root / "config" / "runtime.env", overwrite=False)
-    _load_env_file(root / ".env", overwrite=True)
+    merge_env_file(root / "config" / "runtime.env", overwrite=False)
+    merge_env_file(root / ".env", overwrite=True)
 
 
 @dataclass
