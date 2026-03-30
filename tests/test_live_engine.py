@@ -53,6 +53,27 @@ POLY_MIN = 5.0
 # ---------------------------------------------------------------------------
 
 
+class TestPurgeBuyOrdersForToken:
+    """_purge_buy_orders_for_token clears emergency + primary BUY rows."""
+
+    def test_removes_all_buy_orders_and_confirmed(self, monkeypatch):
+        eng = make_engine(monkeypatch)
+        t = "tok_purge_12345678901234567890"
+        o1 = TrackedOrder(
+            order_id="ord-a", token_id=t, side=BUY, price=0.5, size=10.0,
+            status=OrderStatus.FILLED, filled_size=10.0,
+        )
+        o2 = TrackedOrder(
+            order_id="ord-b", token_id=t, side=BUY, price=0.6, size=10.0,
+            status=OrderStatus.FILLED, filled_size=10.0,
+        )
+        eng._active_orders = {"ord-a": o1, "ord-b": o2}
+        eng._confirmed_buys[t] = 10.0
+        eng._purge_buy_orders_for_token(t)
+        assert eng._active_orders == {}
+        assert t not in eng._confirmed_buys
+
+
 class TestCollateralUsdFromBalanceAllowanceResponse:
     """Must not mix ERC20 allowance with free USDC when balance is 0."""
 

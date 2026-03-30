@@ -1331,6 +1331,20 @@ class LiveExecutionEngine:
                 "🛑 Emergency close FAILED token=%s — manual intervention required.", token_id
             )
 
+    def _purge_buy_orders_for_token(self, token_id: str) -> None:
+        """Drop all in-memory BUY trackers and confirmed keys for this outcome token.
+
+        ``_emergency_exit_order`` can place a second BUY with a new ``order_id`` while
+        ``execute`` still references the first ``TrackedOrder``.  If ``execute``
+        returns SKIP (strict chain / USDC verify), ``pop(tracked.order_id)`` alone
+        leaves the emergency FILLED row in ``_active_orders``, so
+        ``filled_buy_shares`` keeps summing ghost size (e.g. 10.63) and OPEN is blocked.
+        """
+        for oid, o in list(self._active_orders.items()):
+            if o.token_id == token_id and o.side == BUY:
+                self._active_orders.pop(oid, None)
+        self._confirmed_buys.pop(token_id, None)
+
     def filled_buy_shares(self, token_id: str) -> float:
         """Return total filled BUY shares currently tracked for token_id.
 
@@ -2013,7 +2027,7 @@ class LiveExecutionEngine:
                     "Unset LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE or set to 1 to trust CLOB.",
                     len(_bal_delays), filled, token_id[:20],
                 )
-                self._active_orders.pop(tracked.order_id, None)
+                self._purge_buy_orders_for_token(token_id)
                 return _SKIP
             logging.warning(
                 "⚠️ [LIVE] On-chain balance not confirmed after %d retries "
@@ -2025,7 +2039,7 @@ class LiveExecutionEngine:
         _expected_spend = float(filled) * float(avg_price)
         if not await self._verify_usdc_debit_after_buy(usdc_before_snapshot, _expected_spend):
             self._last_buy_skip_reason = "usdc_debit_mismatch"
-            self._active_orders.pop(tracked.order_id, None)
+            self._purge_buy_orders_for_token(token_id)
             return _SKIP
 
         if filled < poly_min_shares:
