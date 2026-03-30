@@ -31,6 +31,13 @@ _REPRICE_POST_CANCEL_SLEEP_SEC = req_float("LIVE_REPRICE_POST_CANCEL_SLEEP_SEC")
 _REPRICE_POST_CANCEL_FILL_POLLS = max(1, req_int("LIVE_REPRICE_POST_CANCEL_FILL_POLLS"))
 _REPRICE_POST_CANCEL_POLL_SEC = req_float("LIVE_REPRICE_POST_CANCEL_POLL_SEC")
 
+if _ORDER_MAX_REPRICE == 0:
+    logging.warning(
+        "LIVE_ORDER_MAX_REPRICE=0: stale orders are not repriced; the first stale hit "
+        "becomes emergency after LIVE_ORDER_STALE_SEC (~%.1fs). Set >0 to allow chase.",
+        _ORDER_STALE_SEC,
+    )
+
 
 def _parse_csv_floats(raw: str) -> list[float]:
     """Parse comma-separated floats (``LIVE_BALANCE_CONFIRM_DELAYS_SEC``)."""
@@ -1241,6 +1248,13 @@ class LiveExecutionEngine:
         """Remove the confirmed-buy entry for token_id after a SELL completes."""
         self._confirmed_buys.pop(token_id, None)
 
+    def sync_confirmed_fill(self, token_id: str, shares: float) -> None:
+        """Set confirmed BUY shares after bot-side reconcile (chain vs PnL desync)."""
+        if shares <= 1e-12:
+            self._confirmed_buys.pop(token_id, None)
+            return
+        self._confirmed_buys[token_id] = float(shares)
+
     def has_pending_buy(self, token_id: str) -> bool:
         """Return True when there is at least one non-terminal BUY order for token_id.
 
@@ -1659,7 +1673,9 @@ class LiveExecutionEngine:
 
         After a reported fill, ``fetch_conditional_balance`` must confirm at least
         ``LIVE_BALANCE_MIN_FRAC`` of the fill before returning success; otherwise the
-        run returns (0,0) unless ``LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1``.
+        run returns (0,0) unless ``LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE`` is unset or
+        non-zero (default: trust CLOB). Set ``LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=0``
+        for strict mode (no position until chain confirms).
         """
         _SKIP = (0.0, 0.0)
         self._last_buy_skip_reason = None
@@ -1868,19 +1884,21 @@ class LiveExecutionEngine:
                 # Fewer shares credited than CLOB fill — same USD spent → higher $/sh for PnL.
                 avg_price = avg_price * filled_clob / filled
         else:
-            if os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE") != "1":
+            _trust_clob = os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE", "1") != "0"
+            if not _trust_clob:
                 logging.warning(
                     "⚠️ [LIVE] On-chain balance never matched CLOB fill after %d retries "
-                    "— not opening position (no shares debited / API desync). "
+                    "— not opening position (strict mode). "
                     "CLOB reported %.4f sh token=%s. "
-                    "Set LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1 to trust CLOB only.",
+                    "Unset LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE or set to 1 to trust CLOB.",
                     len(_bal_delays), filled, token_id[:20],
                 )
                 self._active_orders.pop(tracked.order_id, None)
                 return _SKIP
             logging.warning(
                 "⚠️ [LIVE] On-chain balance not confirmed after %d retries "
-                "— trusting CLOB fill=%.4f token=%s (LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1).",
+                "— trusting CLOB fill=%.4f token=%s (trust CLOB; set "
+                "LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=0 for strict chain-only).",
                 len(_bal_delays), filled, token_id[:20],
             )
 

@@ -442,6 +442,8 @@ async def main():
     # rejects every entry due to insufficient balance for the minimum share count.
     _live_skip_until: float = 0.0
     _live_skip_cooldown_sec = req_float("LIVE_SKIP_COOLDOWN_SEC")
+    _live_inventory_reconcile_sec = float(os.getenv("LIVE_INVENTORY_RECONCILE_SEC", "5"))
+    _last_live_reconcile_ts = 0.0
     last_lstm_time = 0
     last_book_pull_time = 0
     last_book_mismatch_warn_time = 0.0
@@ -455,6 +457,109 @@ async def main():
     # The market resolves "Up" if BTC-end >= BTC-start, so this price acts as
     # the natural target/anchor for trader position bias within the slot.
     slot_anchor_price: float = 0.0
+
+    async def _reconcile_live_inventory_maybe(poly_book_obj) -> None:
+        """If chain or CLOB shows outcome shares but PnL is flat, sync live_open for EXIT."""
+        if not LIVE_MODE or poly_book_obj is None:
+            return
+        if pnl.inventory > 1e-9:
+            return
+        _tup = token_up_id
+        _tdn = token_down_id
+        if not _tup:
+            return
+        _poly_min = float(os.getenv("POLY_CLOB_MIN_SHARES", "5"))
+        _dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES", "0.02"))
+        _floor = max(_dust, 0.01)
+        _cands: list[tuple[str, str, float]] = []
+        try:
+            for _tid, _sig in ((_tup, "BUY_UP"), (_tdn or "", "BUY_DOWN")):
+                if not _tid:
+                    continue
+                if _sig == "BUY_DOWN" and not _tdn:
+                    continue
+                if live_exec.has_pending_buy(_tid) or live_exec.has_pending_sell(_tid):
+                    continue
+                _mem = live_exec.filled_buy_shares(_tid)
+                _ch = await asyncio.to_thread(live_exec.fetch_conditional_balance, _tid)
+                _chv = float(_ch) if _ch is not None else 0.0
+                if _mem >= _poly_min - 1e-6:
+                    _sh = _mem
+                elif _chv >= _poly_min - 1e-6:
+                    _sh = _chv
+                elif _dust < _chv < _poly_min - 1e-6:
+                    _sh = _chv
+                else:
+                    continue
+                if _sh < _floor:
+                    continue
+                _cands.append((_tid, _sig, _sh))
+        except Exception as exc:
+            logging.warning("[LIVE] inventory reconcile probe failed: %s", exc)
+            return
+        if len(_cands) >= 2:
+            logging.warning(
+                "🛟 [LIVE] INVENTORY RECONCILE: balance on both outcome tokens — "
+                "using larger position.",
+            )
+            _cands.sort(key=lambda x: -x[2])
+        if not _cands:
+            return
+        _tid, _sig, _sh = _cands[0]
+        _book = poly_book_obj.book
+        if _sig == "BUY_UP":
+            _px = float(_book.get("ask", 0.0) or 0.0)
+        else:
+            _px = float(_book.get("down_ask", 0.0) or 0.0)
+        if _px <= 0.0:
+            _px = 0.5
+        logging.warning(
+            "🛟 [LIVE] INVENTORY RECONCILE: chain/CLOB vs PnL desync — "
+            "adopting %.4f sh @ ~%.4f (token=%s). Bot EXIT can run.",
+            _sh,
+            _px,
+            _tid[:20],
+        )
+        live_exec.sync_confirmed_fill(_tid, _sh)
+        pnl.live_open(
+            _sig,
+            _sh,
+            _px,
+            _sh * _px,
+            strategy_name="inventory_reconcile",
+        )
+        _hft_eng = getattr(
+            strategy_hub.get_active_strategy(),
+            "_engine",
+            None,
+        )
+        if _hft_eng is not None and getattr(
+            _hft_eng, "_live_entry_sync_pending", False
+        ):
+            _apply_fast = fast_price
+            if USE_SMART_FAST:
+                _nf = aggregator.get_weighted_price()
+            else:
+                _nf = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
+            if _nf is not None:
+                _apply_fast = float(_nf)
+            _book_px = float(
+                _book.get("down_ask", 0.0)
+                if _sig == "BUY_DOWN"
+                else _book.get("ask", 0.0)
+            )
+            _hft_eng.apply_live_entry_after_fill(
+                _book,
+                _apply_fast,
+                _book_px,
+                float(_px),
+                float(_sh),
+                float(_sh * _px),
+            )
+        try:
+            await asyncio.to_thread(live_exec.ensure_conditional_allowance, _tid)
+        except Exception as _ea_exc:
+            logging.debug("[LIVE] reconcile ensure_conditional_allowance: %s", _ea_exc)
 
     logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
     if ENABLE_LSTM:
@@ -764,6 +869,15 @@ async def main():
                     equity = pnl.balance
                 risk.update_equity(equity)
                 trade_allowed = risk.can_trade(time.time(), equity)
+
+                if (
+                    LIVE_MODE
+                    and token_up_id
+                    and poly_book is not None
+                    and (now - _last_live_reconcile_ts) >= _live_inventory_reconcile_sec
+                ):
+                    _last_live_reconcile_ts = now
+                    await _reconcile_live_inventory_maybe(poly_book)
 
                 # Live-only: after a failed/rejected CLOB BUY we suppress placing another
                 # order until _live_skip_until (see OPEN block below). Do NOT fold this
@@ -1138,11 +1252,19 @@ async def main():
                                         pnl.inventory,
                                     )
                                 elif _pending_buy > 1e-9:
-                                    logging.warning(
-                                        "⚠️ [LIVE] Skip OPEN: BUY already pending or "
-                                        "confirmed on token (%.4f sh).",
-                                        _pending_buy,
-                                    )
+                                    # CLOB can confirm shares while PnL stayed flat (chain/API desync).
+                                    await _reconcile_live_inventory_maybe(poly_book)
+                                    if pnl.inventory > 1e-9:
+                                        logging.info(
+                                            "[LIVE] Orphan fill adopted before OPEN — "
+                                            "position tracked for EXIT.",
+                                        )
+                                    else:
+                                        logging.warning(
+                                            "⚠️ [LIVE] Skip OPEN: BUY already pending or "
+                                            "confirmed on token (%.4f sh).",
+                                            _pending_buy,
+                                        )
                                 else:
                                     _live_bb = 0.0
                                     _live_ba = 0.0
