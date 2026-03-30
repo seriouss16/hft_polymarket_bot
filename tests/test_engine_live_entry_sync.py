@@ -25,7 +25,7 @@ class TestLiveEntrySync:
     def test_apply_live_entry_after_fill_sets_clock_and_clears_pending(self):
         """apply_live_entry_after_fill should set entry_time and clear pending flag."""
         pnl = PnLTracker(initial_balance=100.0, live_mode=True)
-        eng = HFTEngine(pnl, is_test_mode=True)
+        eng = HFTEngine(pnl)
         eng._live_entry_sync_pending = True
         eng.entry_context = {"strategy_name": "latency_arbitrage"}
         pnl.live_open("BUY_UP", 5.0, 0.5, 2.5)
@@ -48,7 +48,7 @@ class TestLiveEntrySync:
     def test_rollback_live_open_signal_clears_pending(self):
         """rollback_live_open_signal should clear deferred OPEN state."""
         pnl = PnLTracker(initial_balance=100.0, live_mode=True)
-        eng = HFTEngine(pnl, is_test_mode=True)
+        eng = HFTEngine(pnl)
         eng._live_entry_sync_pending = True
         eng.entry_context = {"entry_edge": 1.0}
         eng.rollback_live_open_signal()
@@ -59,7 +59,7 @@ class TestLiveEntrySync:
     def test_apply_is_noop_without_pending(self):
         """apply_live_entry_after_fill should not mutate state when not pending."""
         pnl = PnLTracker(initial_balance=100.0, live_mode=True)
-        eng = HFTEngine(pnl, is_test_mode=True)
+        eng = HFTEngine(pnl)
         eng._live_entry_sync_pending = False
         eng.entry_time = 0.0
         pnl.live_open("BUY_UP", 5.0, 0.5, 2.5)

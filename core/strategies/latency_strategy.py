@@ -13,13 +13,9 @@ class LatencyArbitrageStrategy(BaseStrategy):
 
     name = "latency_arbitrage"
 
-    def __init__(self, pnl_tracker: Any, is_test_mode: bool = True) -> None:
+    def __init__(self, pnl_tracker: Any) -> None:
         """Initialize wrapped legacy engine."""
-        self._engine = HFTEngine(
-            pnl_tracker,
-            is_test_mode=is_test_mode,
-            strategy_label=self.name,
-        )
+        self._engine = HFTEngine(pnl_tracker, strategy_label=self.name)
 
     @property
     def entry_max_latency_ms(self) -> float:
@@ -81,6 +77,9 @@ class LatencyArbitrageStrategy(BaseStrategy):
         price_history: list[float] | None = None,
         recent_pnl: float = 0.0,
         latency_ms: float = 0.0,
+        *,
+        poly_orderbook: dict[str, Any] | None = None,
+        seconds_to_expiry: float | None = None,
     ) -> str | None:
         """Forward live signal generation to wrapped strategy engine."""
         return self._engine.generate_live_signal(
@@ -90,4 +89,6 @@ class LatencyArbitrageStrategy(BaseStrategy):
             price_history=price_history,
             recent_pnl=recent_pnl,
             latency_ms=latency_ms,
+            poly_orderbook=poly_orderbook,
+            seconds_to_expiry=seconds_to_expiry,
         )

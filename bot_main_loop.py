@@ -61,7 +61,6 @@ async def main():
     apply_profile(force=True)
 
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
-    TEST_MODE = not LIVE_MODE
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.environ["STATS_INTERVAL_SEC"])
@@ -78,15 +77,18 @@ async def main():
     MIN_SLOT_POLL_SEC = req_float("HFT_MIN_SLOT_POLL_SEC")
 
     # --- Инициализация компонентов ---
+    # Signal path: identical to SIM (process_tick + execute → log_trade). LIVE only
+    # changes (1) PnLTracker.live_mode so log_trade suppresses ledger updates until
+    # live_open/live_close, and (2) the block below that sends real CLOB orders.
     selector = MarketSelector(asset=SYMBOL)
     aggregator = FastPriceAggregator()
     pnl = PnLTracker(live_mode=LIVE_MODE)
     stats = StatsCollector(pnl)
     regime_detector = MarketRegimeDetector()
     strategy_hub = StrategyHub()
-    strategy_hub.register(LatencyArbitrageStrategy(pnl, is_test_mode=TEST_MODE))
+    strategy_hub.register(LatencyArbitrageStrategy(pnl))
     if os.getenv("HFT_ENABLE_PHASE_ROUTING") == "1":
-        strategy_hub.register(PhaseRouterStrategy(pnl, is_test_mode=TEST_MODE))
+        strategy_hub.register(PhaseRouterStrategy(pnl))
     default_strategy = os.getenv(
         "HFT_ACTIVE_STRATEGY",
         "phase_router" if os.getenv("HFT_ENABLE_PHASE_ROUTING") == "1" else "latency_arbitrage",

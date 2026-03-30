@@ -17,13 +17,9 @@ class PhaseRouterStrategy(BaseStrategy):
 
     name = "phase_router"
 
-    def __init__(self, pnl_tracker: Any, is_test_mode: bool = True) -> None:
+    def __init__(self, pnl_tracker: Any) -> None:
         """Build engine and cache max latency for feed warnings."""
-        self._engine = HFTEngine(
-            pnl_tracker,
-            is_test_mode=is_test_mode,
-            strategy_label=self.name,
-        )
+        self._engine = HFTEngine(pnl_tracker, strategy_label=self.name)
         self._max_entry_latency_ms = float(self._engine.max_entry_latency_ms_all_profiles())
         self._last_applied: str | None = None
         self._last_switch_log_ts = 0.0
@@ -155,6 +151,9 @@ class PhaseRouterStrategy(BaseStrategy):
         price_history: list[float] | None = None,
         recent_pnl: float = 0.0,
         latency_ms: float = 0.0,
+        *,
+        poly_orderbook: dict[str, Any] | None = None,
+        seconds_to_expiry: float | None = None,
     ) -> str | None:
         """Match live signal path to the same phase selection as process_tick."""
         self._apply_phase(latency_ms)
@@ -165,4 +164,6 @@ class PhaseRouterStrategy(BaseStrategy):
             price_history=price_history,
             recent_pnl=recent_pnl,
             latency_ms=latency_ms,
+            poly_orderbook=poly_orderbook,
+            seconds_to_expiry=seconds_to_expiry,
         )

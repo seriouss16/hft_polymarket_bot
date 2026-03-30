@@ -150,6 +150,9 @@ class StrategyHub:
         price_history: list[float] | None = None,
         recent_pnl: float = 0.0,
         latency_ms: float = 0.0,
+        *,
+        poly_orderbook: dict[str, Any] | None = None,
+        seconds_to_expiry: float | None = None,
     ) -> str | None:
         """Return first non-empty signal from active or all strategies."""
         if not self._parallel_enabled:
@@ -160,6 +163,8 @@ class StrategyHub:
                 price_history=price_history,
                 recent_pnl=recent_pnl,
                 latency_ms=latency_ms,
+                poly_orderbook=poly_orderbook,
+                seconds_to_expiry=seconds_to_expiry,
             )
         for strategy in self._strategies.values():
             signal = strategy.generate_live_signal(
@@ -169,6 +174,8 @@ class StrategyHub:
                 price_history=price_history,
                 recent_pnl=recent_pnl,
                 latency_ms=latency_ms,
+                poly_orderbook=poly_orderbook,
+                seconds_to_expiry=seconds_to_expiry,
             )
             if signal:
                 return signal

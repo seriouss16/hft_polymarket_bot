@@ -59,5 +59,8 @@ class BaseStrategy(ABC):
         price_history: list[float] | None = None,
         recent_pnl: float = 0.0,
         latency_ms: float = 0.0,
+        *,
+        poly_orderbook: dict[str, Any] | None = None,
+        seconds_to_expiry: float | None = None,
     ) -> str | None:
         """Return live signal name or None."""

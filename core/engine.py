@@ -84,12 +84,40 @@ def _env_float_default(key: str, default: float) -> float:
 _DEFAULT_NO_ENTRY_LAST_SEC = 1.3 * 60.0
 
 
-class HFTEngine:
-    """Signal, risk, and execution engine for Polymarket latency strategy."""
+def poly_book_outcome_quotes(poly_orderbook: dict) -> tuple[float, float, float, float, float, float]:
+    """Return UP/DOWN bids, asks, and mids from a Polymarket binary book dict.
 
-    def __init__(self, pnl_tracker, is_test_mode=True, strategy_label="latency_arbitrage"):
+    Mirrors the outcome-side math in ``HFTEngine.process_tick`` so callers
+    (including ``generate_live_signal``) stay aligned with entry_candidate_from_state
+    extreme-price and edge_mult handling.
+    """
+    up_ask = float(poly_orderbook["ask"])
+    up_bid = float(poly_orderbook["bid"])
+    up_mid = (up_bid + up_ask) * 0.5
+    down_bid_raw = float(poly_orderbook.get("down_bid", 0.0))
+    down_ask_raw = float(poly_orderbook.get("down_ask", 0.0))
+    if 0.0 < down_bid_raw < down_ask_raw <= 1.0:
+        down_bid = down_bid_raw
+        down_ask = down_ask_raw
+    else:
+        down_ask = max(0.01, min(0.99, 1.0 - up_bid))
+        down_bid = max(0.01, min(0.99, 1.0 - up_ask))
+    down_mid = (down_bid + down_ask) * 0.5
+    return up_bid, up_ask, down_bid, down_ask, up_mid, down_mid
+
+
+class HFTEngine:
+    """Signal, risk, and simulated execution for Polymarket latency strategy.
+
+    The same ``process_tick`` / ``execute`` path runs for SIM and LIVE. Whether
+    balances and inventory update inside ``PnLTracker.log_trade`` is controlled
+    only by ``PnLTracker.live_mode`` (LIVE suppresses BUY/SELL ledger writes so
+    the main loop can apply fills from the CLOB). Strategy logic does not branch
+    on SIM vs LIVE.
+    """
+
+    def __init__(self, pnl_tracker, strategy_label="latency_arbitrage"):
         self.pnl = pnl_tracker
-        self.is_test_mode = is_test_mode
         self._strategy_label = str(strategy_label)
         
         # --- Базовый Edge (в пунктах цены) ---
@@ -1101,8 +1129,27 @@ class HFTEngine:
             aligned = move <= 0.0
         return abs_move, aligned
 
-    def generate_live_signal(self, fast_price, poly_mid, zscore, price_history=None, recent_pnl=0.0, latency_ms=0.0):
-        """Return entry side for live orders; call after process_tick in the same loop (trend already updated)."""
+    def generate_live_signal(
+        self,
+        fast_price,
+        poly_mid,
+        zscore,
+        price_history=None,
+        recent_pnl=0.0,
+        latency_ms=0.0,
+        *,
+        poly_orderbook: dict | None = None,
+        seconds_to_expiry: float | None = None,
+    ):
+        """Return raw entry candidate (BUY_UP/BUY_DOWN/None) from trend state.
+
+        Call after ``process_tick`` in the same loop iteration so ``update_trend`` has run.
+
+        When ``poly_orderbook`` is passed, uses the same ``up_mid`` / ``down_mid`` /
+        ``edge_mult`` as ``process_tick`` (extreme-price gate + expiry edge scaling).
+        When omitted, mids default to 0 and ``edge_mult`` to 1.0 — stricter parity with
+        ``process_tick`` requires passing the current book.
+        """
         _ = fast_price
         _ = poly_mid
         _ = zscore
@@ -1112,6 +1159,13 @@ class HFTEngine:
         if now - self.last_trade_time < self.cooldown:
             return None
         tr = self.get_trend_state()
+        if poly_orderbook is not None:
+            *_, up_mid, down_mid = poly_book_outcome_quotes(poly_orderbook)
+            edge_mult = self._latency_expiry_edge_multiplier(latency_ms, seconds_to_expiry)
+        else:
+            up_mid = 0.0
+            down_mid = 0.0
+            edge_mult = 1.0
         return self._entry_candidate_from_state(
             tr["edge"],
             tr["age"],
@@ -1120,9 +1174,9 @@ class HFTEngine:
             price_history,
             recent_pnl=recent_pnl,
             latency_ms=latency_ms,
-            up_mid=0.0,
-            down_mid=0.0,
-            edge_mult=1.0,
+            up_mid=up_mid,
+            down_mid=down_mid,
+            edge_mult=edge_mult,
         )
 
     def get_trend_state(self):
@@ -1236,18 +1290,9 @@ class HFTEngine:
         else:
             imbalance = bid_size / (bid_size + ask_size + 1e-9)
 
-        up_ask = float(poly_orderbook["ask"])
-        up_bid = float(poly_orderbook["bid"])
-        up_mid = (up_bid + up_ask) * 0.5
-        down_bid_raw = float(poly_orderbook.get("down_bid", 0.0))
-        down_ask_raw = float(poly_orderbook.get("down_ask", 0.0))
-        if 0.0 < down_bid_raw < down_ask_raw <= 1.0:
-            down_bid = down_bid_raw
-            down_ask = down_ask_raw
-        else:
-            down_ask = max(0.01, min(0.99, 1.0 - up_bid))
-            down_bid = max(0.01, min(0.99, 1.0 - up_ask))
-        down_mid = (down_bid + down_ask) * 0.5
+        up_bid, up_ask, down_bid, down_ask, up_mid, down_mid = poly_book_outcome_quotes(
+            poly_orderbook
+        )
 
         self.update_trend(fast_price, poly_mid)
         trend = self.get_trend_state()

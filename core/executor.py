@@ -62,7 +62,13 @@ def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
 
 
 class PnLTracker:
-    """Track position state and realized/unrealized PnL on Polymarket shares."""
+    """Track position state and realized/unrealized PnL on Polymarket shares.
+
+    ``live_mode`` is the SIM/LIVE boundary for *execution* only: when True,
+    ``log_trade`` does not mutate balance/inventory on BUY/SELL (the main loop
+    records fills via ``live_open`` / ``live_close``). Strategy ``process_tick``
+    logic is unchanged.
+    """
 
     def __init__(self, initial_balance=None, live_mode: bool = False):
         """Initialize balance from HFT_DEPOSIT_USD when initial_balance is omitted."""
