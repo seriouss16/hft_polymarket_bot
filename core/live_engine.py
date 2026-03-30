@@ -1108,7 +1108,17 @@ class LiveExecutionEngine:
                 self._active_orders[order_id] = emergency
                 if not immediate:
                     await self._poll_order(emergency)
-                tracked.filled_size += emergency.filled_size
+                _add = float(emergency.filled_size)
+                _prev_f = float(tracked.filled_size)
+                _em_px = float(emergency.price)
+                tracked.filled_size += _add
+                if _add > 0.0 and tracked.filled_size > 0.0:
+                    if _prev_f <= 0.0:
+                        tracked.price = _em_px
+                    else:
+                        tracked.price = (
+                            _prev_f * float(tracked.price) + _add * _em_px
+                        ) / tracked.filled_size
             else:
                 logging.error(
                     "🛑 Emergency BUY placement FAILED token=%s remaining=%.2f"
@@ -1846,13 +1856,17 @@ class LiveExecutionEngine:
             actual_bal = filled
 
         if actual_bal is not None:
+            filled_clob = float(filled)
             if abs(actual_bal - filled) > 0.005:
                 logging.warning(
                     "⚠️ [LIVE] BUY adjusted for protocol fee: reported=%.4f actual=%.4f "
                     "(fee=%.4f sh) token=%s",
                     filled, actual_bal, filled - actual_bal, token_id[:20],
                 )
-            filled = actual_bal
+            filled = float(actual_bal)
+            if filled > 0.0 and filled_clob > filled + 1e-9:
+                # Fewer shares credited than CLOB fill — same USD spent → higher $/sh for PnL.
+                avg_price = avg_price * filled_clob / filled
         else:
             if os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE") != "1":
                 logging.warning(

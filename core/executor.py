@@ -183,14 +183,20 @@ class PnLTracker:
         """
         if self.inventory <= 0.0 or filled_shares <= 0.0:
             return 0.0
+        inv_before = self.inventory
         proceeds = filled_shares * avg_price
         cost_basis = self.entry_price * filled_shares
-        pnl = proceeds - cost_basis
-        # Net PnL accounts for the actual USD debited at buy time (includes
-        # protocol fee on BUY); cleaner than entry_price * shares.
-        net_pnl = proceeds - self._buy_cost_usd if self._buy_cost_usd > 0 else pnl
+        # Prefer cash PnL vs proportional buy cost so realized PnL matches Polymarket
+        # when amount_usd reflects actual debits (emergency fills, protocol fee in shares).
+        alloc_buy_usd = 0.0
+        if self._buy_cost_usd > 0.0 and inv_before > 0.0:
+            alloc_buy_usd = self._buy_cost_usd * (filled_shares / inv_before)
+            pnl = proceeds - alloc_buy_usd
+        else:
+            pnl = proceeds - cost_basis
+        net_pnl = pnl
         self.balance += proceeds
-        self._buy_cost_usd = 0.0
+        self._buy_cost_usd = max(0.0, self._buy_cost_usd - alloc_buy_usd)
         self.inventory = max(0.0, self.inventory - filled_shares)
         _dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES"))
         if self.inventory <= _dust:
