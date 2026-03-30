@@ -593,6 +593,15 @@ async def main():
 
             # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
             if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
+                if LIVE_MODE:
+                    try:
+                        _st_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                        stats.set_live_wallet_usdc(_st_usdc)
+                    except Exception as _st_exc:
+                        logging.debug("fetch_usdc_balance for stats: %s", _st_exc)
+                        stats.set_live_wallet_usdc(None)
+                else:
+                    stats.set_live_wallet_usdc(None)
                 stats.show_report()
                 logging.info(
                     "Intermediate stats (STATS_INTERVAL_SEC=%s, loop.now=%.3f).",
@@ -1045,6 +1054,17 @@ async def main():
                                     _close_tid[:20],
                                 )
                                 _live_filled = _probe
+                        # PnL inventory is authoritative for how much is left to sell; filled_buy_shares
+                        # can still sum stale FILLED rows in _active_orders after clear_filled_buy().
+                        if _live_filled > 0 and pnl.inventory > 1e-9:
+                            if _live_filled > pnl.inventory + 1e-6:
+                                logging.warning(
+                                    "[LIVE] Close size cap: engine/CLOB track %.4f sh > PnL "
+                                    "inventory %.4f sh — selling remainder only.",
+                                    _live_filled,
+                                    pnl.inventory,
+                                )
+                            _live_filled = min(_live_filled, float(pnl.inventory))
                         if _live_filled > 0:
                             logging.info(
                                 "[LIVE] Close: selling %.4f live-filled shares token=%s",
@@ -1440,6 +1460,15 @@ async def main():
                     "Shutdown timeout while cancelling background tasks; exiting anyway."
                 )
         try:
+            if LIVE_MODE:
+                try:
+                    _fin_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                    stats.set_live_wallet_usdc(_fin_usdc)
+                except Exception as _fin_exc:
+                    logging.debug("fetch_usdc_balance for final report: %s", _fin_exc)
+                    stats.set_live_wallet_usdc(None)
+            else:
+                stats.set_live_wallet_usdc(None)
             stats.show_final_report(
                 journal_path=journal.path,
                 shutdown_reason=shutdown_reason,

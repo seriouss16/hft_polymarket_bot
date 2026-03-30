@@ -146,6 +146,22 @@ class StatsCollector:
         """Initialize with a PnLTracker instance."""
         self.pnl = pnl_tracker
         self.started_ts = time.time()
+        # Last Polymarket CLOB free USDC (from API), set by bot in LIVE before each report.
+        self._live_wallet_usdc: float | None = None
+
+    def set_live_wallet_usdc(self, value: float | None) -> None:
+        """Cache fetch_usdc_balance() for the next show_report / final table (LIVE only)."""
+        self._live_wallet_usdc = value
+
+    def _inventory_line(self) -> str:
+        """Human-readable open position for stats (incl. dust)."""
+        inv = float(getattr(self.pnl, "inventory", 0.0) or 0.0)
+        dust = float(os.getenv("LIVE_INVENTORY_DUST_SHARES", "0.02"))
+        if inv <= 1e-12:
+            return "NO"
+        if inv <= max(dust, 1e-6):
+            return f"пыль (~{inv:.4f} sh)"
+        return f"YES ({inv:.4f} sh)"
 
     @staticmethod
     def _format_regime_cooldown(cooldown_until: float, now_ts: float) -> str:
@@ -203,13 +219,23 @@ class StatsCollector:
             f"🗂️ Режим:             {self._session_mode_label()}",
             f"💰 Касса (сессия):    {self.pnl.balance:>10.2f} USD  (депозит {_ib:.2f}, Δ {cash_delta:+.2f})",
             f"📈 Реализовано:       {self.pnl.total_pnl:>10.2f} USD  (ROI {roi_realized:+.2f}% от депозита)",
-            f"📐 Δ кассы vs депозит: {roi_cash:>+9.2f}%  (внутренний учёт USDC; при открытой позиции см. риск)",
+            f"📐 Δ кассы vs депозит: {roi_cash:>+9.2f}%  (модель по fills; при открытой позиции см. риск)",
+        ]
+        if self._live_wallet_usdc is not None:
+            report.append(
+                f"💵 USDC (CLOB API):   {self._live_wallet_usdc:>10.2f} USD  (свободный баланс на бирже, как в UI)",
+            )
+        elif getattr(self.pnl, "live_mode", False):
+            report.append(
+                "💵 USDC (CLOB API):        —  (не удалось прочитать)",
+            )
+        report += [
             f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
             f"✅ Побед / ❌ Убытков: {self.pnl.wins:>4} / {losses:<4}",
             f"🎯 Win rate:          {win_rate:>10.1f}%",
             f"📊 Средняя на сделку: {avg_pnl:>+10.4f} USD",
             f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
-            f"📦 В позиции:         {'YES' if self.pnl.inventory > 0 else 'NO'}",
+            f"📦 В позиции:         {self._inventory_line()}",
             f"⏸️ Regime cooldown:   {self._format_regime_cooldown(cooldown_until, now_ts)}",
         ]
         sp = getattr(self.pnl, "strategy_performance", None)
@@ -239,15 +265,20 @@ class StatsCollector:
 
         text = "\n".join(report)
         logging.info(text)
-        logging.info(
-            "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s",
-            self.pnl.balance,
-            self.pnl.total_pnl,
-            self.pnl.trades_count,
-            win_rate,
-            self.pnl.max_drawdown * 100.0,
-            "yes" if self.pnl.inventory > 0 else "no",
+        _snap = (
+            "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s"
+            % (
+                self.pnl.balance,
+                self.pnl.total_pnl,
+                self.pnl.trades_count,
+                win_rate,
+                self.pnl.max_drawdown * 100.0,
+                self._inventory_line(),
+            )
         )
+        if self._live_wallet_usdc is not None:
+            _snap += " wallet_usdc=%.2f" % (self._live_wallet_usdc,)
+        logging.info(_snap)
 
     def _journal_aggregates(self, journal_path: Path | None) -> _JournalStats:
         """Return detailed statistics parsed from journal CSV."""
@@ -333,16 +364,20 @@ class StatsCollector:
             row("Аптайм, min", f"{uptime_min:.1f}"),
             sep,
             row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
-            row("Текущий баланс USD", f"{self.pnl.balance:.2f}"),
+            row("Текущий баланс USD (сессия)", f"{self.pnl.balance:.2f}"),
             row("Чистая прибыль USD (реализ.)", f"{self.pnl.total_pnl:+.2f}"),
             row("ROI % (реализ. / депозит)", f"{roi_realized:+.2f}"),
             row("Δ кассы vs депозит %", f"{roi_cash:+.2f}"),
+            row(
+                "USDC CLOB (API)",
+                f"{self._live_wallet_usdc:.2f}" if self._live_wallet_usdc is not None else "—",
+            ),
             row("Макс. просадка %", f"{self.pnl.max_drawdown*100:.1f}"),
             sep,
             row("Закрытых сделок (sim)", str(self.pnl.trades_count)),
             row("Побед / Убытков", f"{self.pnl.wins} / {losses}"),
             row("Win rate %", f"{win_rate:.1f}"),
-            row("Открытая позиция", "да" if self.pnl.inventory > 0 else "нет"),
+            row("Позиция (PnL)", self._inventory_line()),
             sep,
         ]
 
