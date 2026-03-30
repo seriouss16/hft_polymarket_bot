@@ -126,9 +126,9 @@ except Exception:  # pragma: no cover - optional runtime dependency
 
 @dataclass
 class LiveRiskManager:
-    """Keep simple daily loss guard and trade counter."""
+    """Session realized-PnL guard and trade counter (bot process lifetime)."""
 
-    max_daily_loss: float = -50.0
+    max_session_loss: float = -50.0
     pnl: float = 0.0
     trades: int = 0
 
@@ -137,35 +137,24 @@ class LiveRiskManager:
         self.pnl += pnl_change
         self.trades += 1
 
-    def can_trade(self) -> bool:
-        """Return False when daily drawdown limit is breached.
+    def session_loss_breached(self) -> bool:
+        """True when realized session PnL is at or beyond the configured loss cap.
 
-        For a negative limit (e.g. -2.0 USD), trading stops when realized session
-        PnL is at or below that threshold, not only strictly below it.
+        For a negative limit (e.g. -50 USD), this is True when ``pnl <= limit``.
         """
-        if self.max_daily_loss < 0.0:
-            if self.pnl <= self.max_daily_loss:
-                logging.error(
-                    "🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).",
-                    self.pnl,
-                    self.max_daily_loss,
-                )
-                return False
-            return True
-        if self.pnl < self.max_daily_loss:
-            logging.error(
-                "🛑 STOP: daily loss limit reached (pnl=%.4f limit=%.4f).",
-                self.pnl,
-                self.max_daily_loss,
-            )
-            return False
-        return True
+        if self.max_session_loss < 0.0:
+            return self.pnl <= self.max_session_loss
+        return self.pnl < self.max_session_loss
+
+    def can_trade(self) -> bool:
+        """Return False when session loss limit is breached (no new entries)."""
+        return not self.session_loss_breached()
 
     def log_status(self) -> None:
         """Log current risk state for diagnostics."""
         logging.info(
-            "[LIVE RISK] session_pnl=%.4f max_daily_loss=%.4f trades=%d can_trade=%s",
-            self.pnl, self.max_daily_loss, self.trades, self.can_trade(),
+            "[LIVE RISK] session_pnl=%.4f max_session_loss=%.4f trades=%d can_trade=%s",
+            self.pnl, self.max_session_loss, self.trades, self.can_trade(),
         )
 
 

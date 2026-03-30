@@ -35,7 +35,7 @@ The core idea is **latency arbitrage**: Polymarket's oracle price (PolyRTDS) lag
 | Deposit | $100 |
 | Trade size | $10 per position |
 | Target win rate | ≥ 60 % |
-| Max daily loss (live) | configured via `LIVE_MAX_DAILY_LOSS` |
+| Max session loss (live) | configured via `LIVE_MAX_SESSION_LOSS` |
 | Max drawdown | configured via `MAX_DRAWDOWN_PCT` |
 
 ---
@@ -226,7 +226,7 @@ Tracks the last `HFT_RECENT_TRADES_FOR_REGIME` (8) closed trades. If win rate fa
 
 ### 6. Timing guards
 
-- No entry in first `HFT_NO_ENTRY_FIRST_SEC` (5 s) or last `HFT_NO_ENTRY_LAST_SEC` (45 s) of a slot.
+- No entry in first `HFT_NO_ENTRY_FIRST_SEC` (e.g. 5 s) or last `HFT_NO_ENTRY_LAST_SEC` of a slot. If unset, the last window defaults to **78 s (1.3 min)** before slot end — unstable near resolution; at startup, starting inside this window means no entries until the next slot boundary.
 - Cooldown between entries: `HFT_COOLDOWN_SEC` (0.5 s).
 - Re-entry after close: `HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC` (2 s).
 
@@ -412,12 +412,14 @@ and prevent automatic order cancellation.
 
 Three independent layers:
 
-### 1. LiveRiskManager (daily loss)
+### 1. LiveRiskManager (session realized PnL cap)
 
 ```python
-if live_pnl < LIVE_MAX_DAILY_LOSS:
+if live_pnl <= LIVE_MAX_SESSION_LOSS:  # limit is negative, e.g. -50 USD
     block all new entries
 ```
+
+When the limit is reached, the main loop exits with shutdown reason `session_loss_limit`; the `finally` block runs `show_final_report` (same as normal shutdown).
 
 ### 2. RiskEngine (session drawdown)
 
@@ -515,7 +517,7 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 
 | Key | Default | Description |
 |---|---|---|
-| `LIVE_MAX_DAILY_LOSS` | -1.0 | Stop trading when daily PnL < this (set to ~50% of deposit) |
+| `LIVE_MAX_SESSION_LOSS` | -1.0 | Stop trading when session realized PnL ≤ this (negative USD; set ~50% of deposit) |
 | `LIVE_ACCOUNT_BALANCE` | _(required)_ | Actual Polymarket USDC balance; must match `HFT_DEPOSIT_USD` |
 | `MAX_DRAWDOWN_PCT` | 0.15 | Stop trading when session drawdown > 15% |
 | `MAX_POSITION_PCT` | 0.10 | Max notional as fraction of equity |
@@ -580,7 +582,7 @@ LIVE_ACCOUNT_BALANCE=<your_balance>
 HFT_DEFAULT_TRADE_USD=<trade_size>
 LIVE_ORDER_SIZE=<trade_size>
 HFT_MAX_POSITION_USD=<max_position>
-LIVE_MAX_DAILY_LOSS=-<max_loss>
+LIVE_MAX_SESSION_LOSS=-<max_loss>
 ```
 
 `.env` overrides `config/runtime.env` — any key set in `.env` takes precedence.
@@ -594,7 +596,7 @@ LIVE_MAX_DAILY_LOSS=-<max_loss>
 - [ ] `PRIVATE_KEY` and `POLY_FUNDER_ADDRESS` set and confirmed on Polygon mainnet (chain_id=137)
 - [ ] `POLY_SIGNATURE_TYPE=2` matches wallet type
 - [ ] `HFT_DEPOSIT_USD` equals `LIVE_ACCOUNT_BALANCE` equals your actual Polymarket USDC balance
-- [ ] `LIVE_MAX_DAILY_LOSS` set to an amount you can afford to lose in a session (e.g. 50% of deposit)
+- [ ] `LIVE_MAX_SESSION_LOSS` set to an amount you can afford to lose in a session (e.g. 50% of deposit). Legacy alias: `LIVE_MAX_DAILY_LOSS`.
 - [ ] `LIVE_ORDER_SIZE` and `HFT_DEFAULT_TRADE_USD` set consistently
 - [ ] `HFT_MAX_POSITION_USD` ≥ `LIVE_ORDER_SIZE` (otherwise bot will never trade)
 - [ ] `py_clob_client` installed: included in `uv sync`

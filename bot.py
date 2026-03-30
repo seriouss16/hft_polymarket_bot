@@ -143,7 +143,7 @@ def _format_config_value(key: str, value: str | None) -> str:
 
 
 _LIVE_REQUIRED_KEYS: tuple[str, ...] = (
-    "LIVE_MAX_DAILY_LOSS",
+    "LIVE_MAX_SESSION_LOSS",
     "MAX_DRAWDOWN_PCT",
     "MAX_POSITION_PCT",
     "LOSS_COOLDOWN_SEC",
@@ -170,6 +170,15 @@ _SIM_REQUIRED_KEYS: tuple[str, ...] = (
 )
 
 
+def _migrate_legacy_live_max_session_loss() -> None:
+    """If LIVE_MAX_SESSION_LOSS is unset, copy from deprecated LIVE_MAX_DAILY_LOSS."""
+    if os.environ.get("LIVE_MAX_SESSION_LOSS", "").strip():
+        return
+    legacy = os.environ.get("LIVE_MAX_DAILY_LOSS", "").strip()
+    if legacy:
+        os.environ["LIVE_MAX_SESSION_LOSS"] = legacy
+
+
 def _validate_required_config(live_mode: bool) -> None:
     """Abort startup if required parameters are missing from the environment.
 
@@ -177,6 +186,8 @@ def _validate_required_config(live_mode: bool) -> None:
     when live_mode is True. Raises SystemExit listing every missing key so the
     operator can fix them all at once.
     """
+    if live_mode:
+        _migrate_legacy_live_max_session_loss()
     missing: list[str] = []
     for key in _SIM_REQUIRED_KEYS:
         if not os.environ.get(key, "").strip():
@@ -364,7 +375,7 @@ async def main():
         min_order_size=float(os.environ["LIVE_ORDER_SIZE"]),
         max_spread=float(os.environ["LIVE_MAX_SPREAD"]),
     )
-    live_risk = LiveRiskManager(max_daily_loss=float(os.environ["LIVE_MAX_DAILY_LOSS"]))
+    live_risk = LiveRiskManager(max_session_loss=float(os.environ["LIVE_MAX_SESSION_LOSS"]))
     risk = RiskEngine(
         max_drawdown_pct=float(os.environ["MAX_DRAWDOWN_PCT"]),
         max_position_pct=float(os.environ["MAX_POSITION_PCT"]),
@@ -475,6 +486,16 @@ async def main():
     try:
         while True:
             now = asyncio.get_event_loop().time()
+
+            if LIVE_MODE and live_risk.session_loss_breached():
+                logging.error(
+                    "🛑 Session loss limit reached — stopping bot "
+                    "(session_pnl=%.4f, LIVE_MAX_SESSION_LOSS=%.4f).",
+                    live_risk.pnl,
+                    live_risk.max_session_loss,
+                )
+                shutdown_reason = "session_loss_limit"
+                break
 
             # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
             if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):

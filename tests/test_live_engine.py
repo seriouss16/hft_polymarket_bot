@@ -761,16 +761,25 @@ class TestRecoverFillAfterCancel:
 
 
 class TestLiveRiskManager:
-    """Daily loss guard stops trading at the configured threshold."""
+    """Session loss guard stops trading at the configured threshold."""
 
     def test_negative_limit_stops_at_exact_threshold(self):
-        """When max_daily_loss is -2, pnl -2.0 must block further trades."""
-        rm = LiveRiskManager(max_daily_loss=-2.0, pnl=-1.5, trades=1)
+        """When max_session_loss is -2, pnl -2.0 must block further trades."""
+        rm = LiveRiskManager(max_session_loss=-2.0, pnl=-1.5, trades=1)
         assert rm.can_trade() is True
         rm.pnl = -2.0
         assert rm.can_trade() is False
 
     def test_negative_limit_allows_above_threshold(self):
         """PnL slightly above the limit still allows trading."""
-        rm = LiveRiskManager(max_daily_loss=-2.0, pnl=-1.99, trades=0)
+        rm = LiveRiskManager(max_session_loss=-2.0, pnl=-1.99, trades=0)
         assert rm.can_trade() is True
+
+    def test_session_loss_breached_matches_can_trade(self):
+        """session_loss_breached is the inverse of can_trade for negative caps."""
+        rm = LiveRiskManager(max_session_loss=-2.0, pnl=-1.0, trades=0)
+        assert rm.session_loss_breached() is False
+        assert rm.can_trade() is True
+        rm.pnl = -2.0
+        assert rm.session_loss_breached() is True
+        assert rm.can_trade() is False

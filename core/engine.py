@@ -34,6 +34,18 @@ def _append_debug_log(payload: dict) -> None:
         pass
 
 
+def _env_float_default(key: str, default: float) -> float:
+    """Read float from env; use ``default`` when unset or empty. Explicit ``0`` is kept."""
+    v = os.getenv(key)
+    if v is None or not str(v).strip():
+        return default
+    return float(v)
+
+
+# Default last-window no-entry: 1.3 min before 5m slot end (unstable near resolution).
+_DEFAULT_NO_ENTRY_LAST_SEC = 1.3 * 60.0
+
+
 def _price_array_for_rsi(price_history, max_len: int) -> np.ndarray:
     """Build a compact float array for RSI without copying unbounded history."""
     if not price_history:
@@ -229,7 +241,9 @@ class HFTEngine:
         self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT"))
         self.slot_interval_sec = float(os.getenv("HFT_SLOT_INTERVAL_SEC"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
-        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC"))
+        self.no_entry_last_sec = _env_float_default(
+            "HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC
+        )
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -846,7 +860,9 @@ class HFTEngine:
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
-        self.no_entry_last_sec = float(os.getenv("HFT_NO_ENTRY_LAST_SEC"))
+        self.no_entry_last_sec = _env_float_default(
+            "HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC
+        )
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -948,7 +964,14 @@ class HFTEngine:
         return m
 
     def _entry_slot_window_allows(self, seconds_to_expiry: float | None) -> bool:
-        """Allow entries only outside first and last slot guard windows."""
+        """Allow entries only outside first and last slot guard windows.
+
+        When ``seconds_to_expiry`` is within ``no_entry_last_sec`` of the slot
+        end (default 78 s ≈ 1.3 min on a 5m slot), entries are blocked — near
+        resolution the book is often unstable. At startup, if the bot is
+        started in this window, no new entries occur until the next slot
+        (effectively skipping the remainder of that slot).
+        """
         if seconds_to_expiry is None:
             return True
         sec_to_end = max(0.0, float(seconds_to_expiry))

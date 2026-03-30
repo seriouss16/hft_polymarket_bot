@@ -8,6 +8,34 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import List
+
+
+def _median_avg(values: List[float]) -> float:
+    """Calculate median average: for odd n take 3 central values, for even n take 4 central values.
+    
+    For odd count: take 3 central values and average them.
+    For even count: take 4 central values and average them.
+    If n < 3 (odd) or n < 4 (even), return arithmetic mean of all values.
+    
+    Example: [1,2,3,4,5,6,7] (n=7, odd) -> (3+4+5)/3 = 4.0
+    """
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    if n % 2 == 1:  # odd
+        if n < 3:
+            return sum(sorted_vals) / n
+        mid = n // 2
+        central = sorted_vals[mid-1:mid+2]  # 3 values: mid-1, mid, mid+1
+    else:  # even
+        if n < 4:
+            return sum(sorted_vals) / n
+        mid = n // 2
+        # For even, take 4 central: mid-2, mid-1, mid, mid+1 (indices)
+        central = sorted_vals[mid-2:mid+2]
+    return sum(central) / len(central)
 
 
 @dataclass
@@ -76,6 +104,22 @@ class _JournalStats:
     def win_rate_pct(self) -> float:
         """Return win rate as a percentage."""
         return self.win_count / self.rows * 100.0 if self.rows else 0.0
+
+    @property
+    def median_avg_pnl(self) -> float:
+        """Return median average of all PnL values."""
+        all_values = self.win_pnl_values + self.loss_pnl_values
+        return _median_avg(all_values)
+
+    @property
+    def median_avg_win(self) -> float:
+        """Return median average of winning trades."""
+        return _median_avg(self.win_pnl_values)
+
+    @property
+    def median_avg_loss(self) -> float:
+        """Return median average of losing trades."""
+        return _median_avg(self.loss_pnl_values)
 
 
 class StatsCollector:
@@ -153,6 +197,18 @@ class StatsCollector:
                     f"PnL={sl.pnl_sum:>+9.2f} USD  avg={sl_avg:>+7.4f}"
                 )
             report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
+        
+        # Add median metrics from journal if available
+        journal_path_str = os.getenv("TRADE_JOURNAL_PATH", "reports/trade_journal.csv")
+        journal_path = Path(journal_path_str)
+        if journal_path.is_file():
+            js = self._journal_aggregates(journal_path)
+            if js.rows > 0:
+                report.append("📊 Медианные показатели (журнал):")
+                report.append(f"   Медианная средняя (все):     {js.median_avg_pnl:>+10.4f} USD")
+                report.append(f"   Медианная средняя (профит):  {js.median_avg_win:>+10.4f} USD")
+                report.append(f"   Медианная средняя (убыток):  {js.median_avg_loss:>10.4f} USD")
+        
         report.append("=" * 45 + "\n")
 
         text = "\n".join(report)
@@ -278,6 +334,10 @@ class StatsCollector:
                 row("Средневзвешенная (все)", f"{js.weighted_avg_pnl:+.4f} USD"),
                 row("Средневзвешенная (профит)", f"{js.weighted_avg_win:+.4f} USD"),
                 row("Средневзвешенная (убыток)", f"{js.weighted_avg_loss:+.4f} USD"),
+                sep,
+                row("Медианная средняя (все)", f"{js.median_avg_pnl:+.4f} USD"),
+                row("Медианная средняя (профит)", f"{js.median_avg_win:+.4f} USD"),
+                row("Медианная средняя (убыток)", f"{js.median_avg_loss:+.4f} USD"),
                 sep,
             ]
 
