@@ -18,8 +18,11 @@ This section records what was re-checked against the repository. **Not all gaps 
 | 4 | Allowance before SELL | **Earlier doc was wrong** | `close_position` calls `ensure_conditional_allowance` before **each** GTC attempt and FAK retries; startup `ensure_allowances` for USDC. **Remaining risk**: ledger lag / pre-SELL balance 0, not missing allowance call. |
 | 5 | Runtime parity | **Improved** | Shared keys live in `config/runtime.env` (merged by `bot.py` and on import by `core/live_engine.py` via `utils.env_merge`). `LIVE_ORDER_SIZE`, `LIVE_*` live settings should be set there explicitly. |
 | 6 | Stale CLOB book | **Still applies** | Depends on `CLOB_BOOK_PULL_SEC`, failures, and backoff. No automatic “skip if book age > N s” unless added. |
+| 7 | Live suppressed `log_trade(BUY)` metadata | **Fixed** | Live used to return only `{suppressed, side}` — **no** balance gates vs paper and **no** `book_px`/`exec_px`/`amount_usd`. Now `PnLTracker.log_trade` applies the **same** balance checks as SIM and returns **paper-equivalent** pricing fields (no balance mutation until `live_open()`). |
 
-**Conclusion**: The structural paper/live execution gap **remains** for items 1 and 6 until you add simulation (e.g. paper slippage model) or operational guards (e.g. max book age). Items 2–5 are **better documented** and **partly addressed** in code/config.
+**Conclusion**: The structural paper/live execution gap **remains** for items 1 and 6 until you add simulation (e.g. paper slippage model) or operational guards (e.g. max book age). Items 2–5 are **better documented** and **partly addressed** in code/config. Item 7 removes a real skew in OPEN **metadata** between paper and live.
+
+**Wall-clock**: The main loop still **`await`s** `live_exec.execute()` after OPEN, so fewer `process_tick` calls per second than paper while an order is in flight; only a non-blocking order pipeline would match paper’s tick rate (larger refactor).
 
 ---
 

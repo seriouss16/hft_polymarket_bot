@@ -342,7 +342,7 @@ close_position(token_id, size)
         │       └── 🔴 FAK market SELL (no minimum size restriction)
         │
         └── size ≥ POLY_CLOB_MIN_SHARES
-                └── GTC limit just above best_bid (+0.002)
+                └── GTC limit at ``best_bid + LIVE_SELL_GTC_OFFSET_FROM_BID`` (default **−0.002**, i.e. slightly below top bid for a marketable sell)
                         │
                         ├── placement OK → _poll_order(SELL)
                         │       └── partial remainder < min → FAK for remainder
@@ -521,6 +521,9 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 | `HFT_MIN_SLOT_POLL_SEC` | 1.0 | Min seconds between slot/market resolution checks when `HFT_SLOT_POLL_SEC=0` |
 | `LIVE_BALANCE_CONFIRM_DELAYS_SEC` | `0,0.15,0.35,0.6,1,1.5` | On-chain balance retry delays after BUY (comma-separated) |
 | `LIVE_HEARTBEAT_INTERVAL_SEC` | 5.0 | CLOB heartbeat interval (must stay ≤15) |
+| `LIVE_BUY_PRICE_OFFSET` | 0 | Added to best ask for BUY limit (0 = at ask; positive crosses spread) |
+| `LIVE_SELL_GTC_OFFSET_FROM_BID` | −0.002 | GTC SELL limit = `best_bid + this` (negative = below bid, more marketable) |
+| `LIVE_FAK_SELL_WORST_BID_MULT` | 0.995 | FAK SELL worst acceptable price ≈ `best_bid × mult` (was 0.90; higher = less haircut) |
 
 ### Risk limits
 

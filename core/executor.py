@@ -250,8 +250,52 @@ class PnLTracker:
         if amount_usd is None:
             amount_usd = self.trade_amount_usd
         if side in ("BUY", "BUY_UP", "BUY_DOWN") and getattr(self, "_suppress_buy", False):
-            logging.debug("[LIVE] log_trade(BUY) suppressed — will record via live_open() after fill.")
-            return {"suppressed": True, "side": side}
+            # Mirror paper BUY gates and pricing math so HFTEngine + bot live path see the
+            # same book/exec/shares metadata as SIM, without mutating balance/inventory
+            # (those are updated in live_open() after CLOB fill).
+            if self.balance <= 0.0:
+                logging.error(
+                    "🛑 HALT: session balance is zero or negative (%.4f USD). "
+                    "All entries blocked until manual restart.",
+                    self.balance,
+                )
+                return None
+            if self.balance < amount_usd:
+                logging.warning(
+                    "Balance %.2f USD is below trade notional %.2f USD — skipping entry.",
+                    self.balance,
+                    amount_usd,
+                )
+                return None
+            if self.inventory > 0.0:
+                logging.warning(
+                    "[LIVE] log_trade(BUY) suppressed with open inventory=%.4f — "
+                    "blocked for parity (engine OPEN expects flat).",
+                    self.inventory,
+                )
+                return None
+            book_px = float(price)
+            exec_price = book_px * (1 + self.fee_rate)
+            new_shares = amount_usd / exec_price if exec_price > 0 else 0.0
+            logging.debug(
+                "[LIVE] log_trade(BUY) suppressed — will record via live_open(); "
+                "paper-equivalent book=%.4f exec=%.4f sh=%.4f $=%.2f.",
+                book_px,
+                exec_price,
+                new_shares,
+                amount_usd,
+            )
+            return {
+                "suppressed": True,
+                "side": side,
+                "book_px": book_px,
+                "exec_px": exec_price,
+                "amount_usd": amount_usd,
+                "shares_filled": new_shares,
+                "shares_position": new_shares,
+                "price": exec_price,
+                "shares": new_shares,
+            }
         if side == "SELL" and getattr(self, "_suppress_buy", False):
             logging.debug("[LIVE] log_trade(SELL) suppressed — will record via live_close() after fill.")
             return {"suppressed": True, "side": side}

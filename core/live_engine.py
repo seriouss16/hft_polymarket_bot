@@ -1532,7 +1532,10 @@ class LiveExecutionEngine:
             best_bid = bb_pre
         else:
             best_bid, _ = await asyncio.to_thread(self.get_best_prices, token_id)
-        price = max(0.01, min(0.99, best_bid + 0.002))
+        # GTC SELL: limit at best_bid + offset (negative offset = below bid, more marketable).
+        # Previous best_bid+0.002 sat above top bid and could rest unfilled vs paper's bid exit.
+        _sell_off = req_float("LIVE_SELL_GTC_OFFSET_FROM_BID")
+        price = max(0.01, min(0.99, best_bid + _sell_off))
         sell_attempts = max(1, req_int("LIVE_SELL_PLACE_ATTEMPTS"))
         order_id: str | None = None
         immediate = False

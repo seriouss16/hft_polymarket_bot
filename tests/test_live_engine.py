@@ -13,8 +13,10 @@ Covers:
 - _recover_fill_after_cancel: test_mode noop, matched/canceled+fill sync.
 
 Note: _ORDER_STALE_SEC and _ORDER_MAX_REPRICE are module-level constants read at
-import time.  Tests that need to override them use ``patch`` against
-``core.live_engine._ORDER_STALE_SEC`` / ``_ORDER_MAX_REPRICE`` directly.
+import time from ``config/runtime.env`` (e.g. ``LIVE_ORDER_MAX_REPRICE=0``).
+Tests that exercise stale/reprice/FAK paths must ``patch`` ``_ORDER_STALE_SEC``
+and ``_ORDER_MAX_REPRICE`` when the runtime default would short-circuit before
+the branch under test.
 """
 
 from __future__ import annotations
@@ -336,11 +338,13 @@ class TestPollOrderSellSubMinRemainder:
             return size
 
         with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
-            with patch.object(eng, "_get_order_fill",
-                              return_value=("partially_matched", 4.0)):
-                with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
-                    with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
-                        await eng._poll_order(order)
+            with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
+                with patch.object(eng, "_get_order_fill",
+                                  return_value=("partially_matched", 4.0)):
+                    with patch.object(eng, "get_best_prices",
+                                      return_value=(0.45, 0.55)):
+                        with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
+                            await eng._poll_order(order)
 
         assert len(fak_called_with) == 1
         assert fak_called_with[0] == pytest.approx(4.0)
@@ -421,14 +425,17 @@ class TestPollOrderReprice:
             return "new-id", True
 
         with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
-            with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
-                with patch.object(
-                    eng,
-                    "get_best_prices",
-                    return_value=(0.40, 0.53),
-                ):
-                    with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
-                        await eng._poll_order(order)
+            with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
+                with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
+                    with patch.object(
+                        eng,
+                        "get_best_prices",
+                        return_value=(0.40, 0.53),
+                    ):
+                        with patch.object(
+                            eng, "_place_limit_raw", side_effect=fake_place
+                        ):
+                            await eng._poll_order(order)
 
         assert order.status == OrderStatus.CANCELLED
         assert order.filled_size == pytest.approx(0.0)

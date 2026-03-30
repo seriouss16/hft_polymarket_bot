@@ -159,13 +159,21 @@ class TestLiveModeSuppression:
     """In live mode log_trade BUY/SELL must be suppressed."""
 
     def test_buy_suppressed_in_live_mode(self):
-        """log_trade(BUY) in live mode returns a suppressed sentinel dict."""
+        """log_trade(BUY) in live mode returns a suppressed dict with paper-equivalent fields."""
         t = make_tracker(100.0, live=True)
         result = t.log_trade("BUY", 0.50, amount_usd=10.0)
         assert isinstance(result, dict)
         assert result.get("suppressed") is True
+        assert result.get("book_px") == pytest.approx(0.50)
+        assert result.get("amount_usd") == pytest.approx(10.0)
+        assert result.get("exec_px") == pytest.approx(0.50 * (1.0 + t.fee_rate))
         assert t.inventory == 0.0
         assert t.balance == pytest.approx(100.0)
+
+    def test_buy_suppressed_none_when_insufficient_balance(self):
+        """Live suppressed path must match SIM: skip entry when balance < notional."""
+        t = make_tracker(5.0, live=True)
+        assert t.log_trade("BUY", 0.50, amount_usd=10.0) is None
 
     def test_sell_suppressed_in_live_mode(self):
         """log_trade(SELL) in live mode also returns a suppressed sentinel."""
