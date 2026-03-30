@@ -199,11 +199,6 @@ class MarketSelector:
             logging.error("Selector error for slug=%s: %s", slug, e)
             return None, None, slug
 
-    async def fetch_token_id(self, slug):
-        """Return the UP outcome token id and question (backward compatible)."""
-        up_id, _, question = await self.fetch_up_down_token_ids(slug)
-        return up_id, question
-
     async def fetch_up_down_quotes(self, slug: str, up_id: str | None, down_id: str | None) -> dict:
         """Return UP/DOWN bid/ask quotes from Gamma payload for a market slug."""
         url = f"https://gamma-api.polymarket.com/markets?slug={slug}"

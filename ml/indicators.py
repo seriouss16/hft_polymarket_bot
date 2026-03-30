@@ -15,7 +15,8 @@ def compute_rsi(prices, period=14):
     seed = deltas[:period]
     up = seed[seed >= 0].sum() / period
     down = -seed[seed < 0].sum() / period
-    if down == 0: return 100.0
+    if down == 0:
+        return 100.0
     rs = up / down
     rsi = np.zeros_like(prices)
     rsi[:period] = 100. - 100. / (1. + rs)
@@ -53,13 +54,6 @@ def dynamic_rsi_bands(
     upper = min(95.0, base_upper + shift)
     lower = max(5.0, base_lower - shift)
     return upper, lower
-
-
-def compute_ma(prices, period):
-    """Return simple moving average at the series end."""
-    if len(prices) < period:
-        return prices[-1]
-    return np.mean(prices[-period:])
 
 
 def ema_series(prices, period: int) -> np.ndarray:

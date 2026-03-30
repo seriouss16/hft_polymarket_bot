@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 
 
@@ -47,10 +46,6 @@ class RiskEngine:
         if self.drawdown_pct(equity) >= self.max_drawdown_pct:
             return False
         return True
-
-    def allowed_notional(self, equity: float) -> float:
-        """Return max notional size allowed for next position."""
-        return max(0.0, equity * self.max_position_pct)
 
     def on_trade_closed(self, pnl: float, now_ts: float) -> None:
         """Apply post-trade cooldown after a losing trade."""

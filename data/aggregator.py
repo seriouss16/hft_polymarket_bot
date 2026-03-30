@@ -141,10 +141,6 @@ class FastPriceAggregator:
             return b
         return deque()
 
-    def is_ready(self):
-        """Return True when enough primary ticks exist for LSTM-length indicators."""
-        return len(self.get_primary_history()) >= 100
-
     def feed_timing(self, poly_ts: float, now_loop: float | None = None) -> dict[str, Any]:
         """Return receive-time ages and cross-feed skew using one monotonic clock.
 
@@ -183,7 +179,3 @@ class FastPriceAggregator:
             "skew_ms": skew_ms,
             "staleness_ms": staleness_ms,
         }
-
-    def get_latency_ms(self, poly_ts: float) -> float:
-        """Return max receive-age across feeds in ms (staleness); API name kept for callers."""
-        return float(self.feed_timing(poly_ts)["staleness_ms"])

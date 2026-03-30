@@ -1,8 +1,8 @@
-"""Tests for live CLOSE token routing in bot.py."""
+"""Tests for live CLOSE token routing in bot_main_loop."""
 
 from __future__ import annotations
 
-from bot import _conditional_token_for_position_side
+from bot_main_loop import _conditional_token_for_position_side
 
 
 def test_position_side_up_maps_to_token_up():

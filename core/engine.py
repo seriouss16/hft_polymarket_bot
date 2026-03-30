@@ -1,6 +1,5 @@
 """Signal, risk, and simulated execution for Polymarket latency strategy."""
 
-import itertools
 import json
 import logging
 import os
@@ -17,6 +16,45 @@ from ml.indicators import (
     compute_rsi,
     dynamic_rsi_bands,
 )
+
+from core.engine_entry_candidates import entry_candidate_from_state, entry_momentum_alt_signal
+from core.engine_entry_gates import (
+    anchor_gate,
+    entry_aggressive_trend_age_ok,
+    entry_ask_allows_open,
+    entry_edge_jump_ok,
+    entry_latency_allows_entry,
+    entry_liquidity_spread_ok,
+    entry_outcome_price_allows,
+    entry_rsi_slope_allows,
+    entry_skew_allows_entry,
+    entry_slot_window_allows,
+    entry_speed_acceleration_ok,
+    entry_trend_flip_settled_ok,
+    entry_zscore_trend_ok,
+    latency_expiry_edge_multiplier,
+    low_speed_edge_multiplier,
+    max_entry_latency_ms_all_profiles,
+    record_entry_samples,
+    zscore_monotonic_for_direction,
+)
+from core.engine_price import price_array_for_rsi
+from core.engine_rsi_exit import exit_rsi as clamp_exit_rsi
+from core.engine_rsi_exit import rsi_range_exit_triggered, rsi_slope_per_tick
+from core.engine_sizing import (
+    calc_dynamic_amount,
+    deposit_trade_notional,
+    hold_met,
+    pnl_target_and_stop_lines,
+    position_notional_usd,
+    reset_trailing_state,
+    tier_dynamic_amount,
+    trailing_sl_triggered,
+    trailing_tp_triggered,
+    update_trailing_state,
+)
+from core.engine_trend import dynamic_edge_threshold as compute_dynamic_edge_threshold
+from core.engine_trend import update_trend as apply_update_trend
 
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 DEBUG_SESSION_ID = os.getenv("DEBUG_SESSION_ID")
@@ -44,19 +82,6 @@ def _env_float_default(key: str, default: float) -> float:
 
 # Default last-window no-entry: 1.3 min before 5m slot end (unstable near resolution).
 _DEFAULT_NO_ENTRY_LAST_SEC = 1.3 * 60.0
-
-
-def _price_array_for_rsi(price_history, max_len: int) -> np.ndarray:
-    """Build a compact float array for RSI without copying unbounded history."""
-    if not price_history:
-        return np.empty(0, dtype=np.float64)
-    n = len(price_history)
-    if n <= max_len:
-        return np.asarray(price_history, dtype=np.float64)
-    return np.asarray(
-        list(itertools.islice(price_history, n - max_len, None)),
-        dtype=np.float64,
-    )
 
 
 class HFTEngine:
@@ -460,73 +485,35 @@ class HFTEngine:
 
     def max_entry_latency_ms_all_profiles(self) -> float:
         """Return the largest entry_max_latency_ms across profiles for feed warnings."""
-        lat = self._profile_snapshots["latency"]["entry_max_latency_ms"]
-        soft = self._profile_snapshots["soft_flow"]["entry_max_latency_ms"]
-        return max(float(lat), float(soft))
+        return max_entry_latency_ms_all_profiles(self._profile_snapshots)
 
     def _entry_ask_allows_open(self, ask_px: float) -> bool:
         """Return False when best ask is at or above max entry price (no buys at 99¢+)."""
-        return float(ask_px) < self.max_entry_ask
+        return entry_ask_allows_open(ask_px, self.max_entry_ask)
 
     def _entry_outcome_price_allows(self, side: str, up_ask: float, down_ask: float) -> bool:
         """Return True only when outcome ask is inside configured entry bounds."""
-        def _ask_within_bounds(ask: float, min_cap: float, max_cap: float) -> bool:
-            """Return True when ask passes optional min/max entry guards."""
-            ask_val = float(ask)
-            min_active = 0.0 < float(min_cap) < 1.0
-            max_active = 0.0 < float(max_cap) < 1.0
-            if min_active and ask_val < float(min_cap):
-                return False
-            if max_active and ask_val > float(max_cap):
-                return False
-            return True
-
-        if side == "UP":
-            return _ask_within_bounds(
-                ask=up_ask,
-                min_cap=self.entry_min_ask_up_cap,
-                max_cap=self.entry_max_ask_up_cap,
-            )
-        if side == "DOWN":
-            return _ask_within_bounds(
-                ask=down_ask,
-                min_cap=self.entry_min_ask_down_cap,
-                max_cap=self.entry_max_ask_down_cap,
-            )
-        return True
+        return entry_outcome_price_allows(
+            side,
+            up_ask,
+            down_ask,
+            entry_min_ask_up_cap=self.entry_min_ask_up_cap,
+            entry_max_ask_up_cap=self.entry_max_ask_up_cap,
+            entry_min_ask_down_cap=self.entry_min_ask_down_cap,
+            entry_max_ask_down_cap=self.entry_max_ask_down_cap,
+        )
 
     def _hold_met(self, hold_sec: float) -> bool:
         """Return True when min-hold delay does not apply or is satisfied."""
-        return self.min_hold_sec <= 0.0 or hold_sec >= self.min_hold_sec
+        return hold_met(self.min_hold_sec, hold_sec)
 
     def _update_trailing_state(self, unrealized: float) -> None:
         """Track peak unrealized PnL and ratchet the trailing SL floor upward."""
-        if unrealized > self._peak_unrealized:
-            self._peak_unrealized = unrealized
-        if not self.trailing_sl_enabled:
-            return
-        if self._peak_unrealized >= self.trailing_sl_breakeven_at_usd:
-            new_floor = 0.0
-            if self.trailing_sl_step_usd > 0.0:
-                steps_above = (self._peak_unrealized - self.trailing_sl_breakeven_at_usd) / self.trailing_sl_step_usd
-                new_floor = int(steps_above) * self.trailing_sl_step_usd * self.trailing_sl_step_lock_pct
-            if self._trailing_sl_floor is None or new_floor > self._trailing_sl_floor:
-                self._trailing_sl_floor = new_floor
+        update_trailing_state(self, unrealized)
 
     def _trailing_tp_triggered(self, unrealized: float, hold_sec: float) -> bool:
         """Return True when profit has pulled back from peak beyond the trailing threshold."""
-        if not self.trailing_tp_enabled:
-            return False
-        if not self._hold_met(hold_sec):
-            return False
-        if self._peak_unrealized < self.trailing_tp_activate_usd:
-            return False
-        pullback = self._peak_unrealized - unrealized
-        threshold = max(
-            self._peak_unrealized * self.trailing_tp_pullback_pct,
-            self.trailing_tp_min_pullback_usd,
-        )
-        return pullback >= threshold
+        return trailing_tp_triggered(self, unrealized, hold_sec)
 
     def _trailing_sl_triggered(self, unrealized: float, hold_sec: float) -> bool:
         """Return True when unrealized PnL drops below the ratcheted trailing SL floor.
@@ -534,18 +521,11 @@ class HFTEngine:
         Floor is always >= 0: at breakeven_at activation it equals 0 (breakeven),
         then ratchets up by step_usd * lock_pct for each additional step_usd of peak profit.
         """
-        if not self.trailing_sl_enabled:
-            return False
-        if not self._hold_met(hold_sec):
-            return False
-        if self._trailing_sl_floor is None:
-            return False
-        return unrealized < self._trailing_sl_floor
+        return trailing_sl_triggered(self, unrealized, hold_sec)
 
     def _reset_trailing_state(self) -> None:
         """Clear trailing tracking on position close or new entry."""
-        self._peak_unrealized = 0.0
-        self._trailing_sl_floor = None
+        reset_trailing_state(self)
 
     def _snapshot_orderbook_mids(self, poly_orderbook: dict[str, Any]) -> tuple[float, float, float]:
         """Return poly oracle mid, UP outcome mid, and DOWN outcome mid from one book snapshot."""
@@ -641,13 +621,6 @@ class HFTEngine:
             return False
         return True
 
-    def _pnl_tp_hold_allows(self, hold_sec: float) -> bool:
-        """Return True when position was held long enough for percent-based PNL take profit."""
-        if self.min_hold_sec <= 0.0 and self.pnl_tp_min_hold_sec <= 0.0:
-            return True
-        req = max(self.min_hold_sec, self.pnl_tp_min_hold_sec)
-        return hold_sec >= req
-
     def _deposit_trade_notional(self) -> float:
         """Return target trade USD based on current live balance and sizing mode.
 
@@ -666,56 +639,46 @@ class HFTEngine:
           balance=3.00 → 2.00 + 0.10 = 2.10
           balance=1.80 → min(2.00, 1.80) = 1.80
         """
-        current_balance = max(0.0, self.pnl.balance)
-        if current_balance <= 0.0:
-            return 0.0
-        fixed = max(0.0, self.fixed_trade_usd)
-        pct = self.trade_pct_of_deposit
-        if pct <= 0.0:
-            return min(fixed, current_balance)
-        profit_above_start = max(0.0, current_balance - self.deposit_usd)
-        bonus = profit_above_start * (pct / 100.0)
-        size = fixed + bonus
-        return max(0.0, min(size, current_balance))
+        return deposit_trade_notional(
+            self.pnl,
+            self.deposit_usd,
+            self.fixed_trade_usd,
+            self.trade_pct_of_deposit,
+        )
 
     def _tier_dynamic_amount(self, exec_price: float) -> float:
         """Compute notional from price tier and risk-per-tick before deposit cap."""
-        px = float(exec_price)
-        if px < self.dynamic_min_exec_price:
-            return self.dynamic_floor_notional_usd
-        if px < self.dynamic_cheap_price_below:
-            return min(
-                self.dynamic_amount_max_usd,
-                max(self.dynamic_amount_min_usd, self.dynamic_amount_cheap_usd),
-            )
-        if px > self.dynamic_rich_price_above:
-            return min(
-                self.dynamic_amount_max_usd,
-                max(self.dynamic_amount_min_usd, self.dynamic_amount_rich_usd),
-            )
-        tick = 0.01
-        shares = self.dynamic_risk_per_tick_usd / tick
-        amount = shares * px
-        return min(
-            self.dynamic_amount_max_usd,
-            max(self.dynamic_amount_min_usd, amount),
+        return tier_dynamic_amount(
+            exec_price,
+            dynamic_min_exec_price=self.dynamic_min_exec_price,
+            dynamic_floor_notional_usd=self.dynamic_floor_notional_usd,
+            dynamic_cheap_price_below=self.dynamic_cheap_price_below,
+            dynamic_rich_price_above=self.dynamic_rich_price_above,
+            dynamic_amount_min_usd=self.dynamic_amount_min_usd,
+            dynamic_amount_max_usd=self.dynamic_amount_max_usd,
+            dynamic_amount_cheap_usd=self.dynamic_amount_cheap_usd,
+            dynamic_amount_rich_usd=self.dynamic_amount_rich_usd,
+            dynamic_risk_per_tick_usd=self.dynamic_risk_per_tick_usd,
         )
 
     def _calc_dynamic_amount(self, exec_price: float) -> float:
         """Size notional USD: tier estimate capped by deposit rules and dynamic min/max."""
-        base = self._deposit_trade_notional()
-        tier = self._tier_dynamic_amount(exec_price)
-        amount = min(base, tier)
-        amount = min(amount, self.dynamic_amount_max_usd)
-        if base < self.dynamic_amount_min_usd:
-            floor = base
-        else:
-            floor = self.dynamic_amount_min_usd
-        return max(floor, amount)
-
-    def get_last_rsi(self):
-        """Return RSI of the last tick (fast price series)."""
-        return self._last_rsi
+        return calc_dynamic_amount(
+            exec_price,
+            self.pnl,
+            deposit_usd=self.deposit_usd,
+            fixed_trade_usd=self.fixed_trade_usd,
+            trade_pct_of_deposit=self.trade_pct_of_deposit,
+            dynamic_amount_max_usd=self.dynamic_amount_max_usd,
+            dynamic_amount_min_usd=self.dynamic_amount_min_usd,
+            dynamic_min_exec_price=self.dynamic_min_exec_price,
+            dynamic_floor_notional_usd=self.dynamic_floor_notional_usd,
+            dynamic_cheap_price_below=self.dynamic_cheap_price_below,
+            dynamic_rich_price_above=self.dynamic_rich_price_above,
+            dynamic_amount_cheap_usd=self.dynamic_amount_cheap_usd,
+            dynamic_amount_rich_usd=self.dynamic_amount_rich_usd,
+            dynamic_risk_per_tick_usd=self.dynamic_risk_per_tick_usd,
+        )
 
     def get_rsi_v5_state(self):
         """Return RSI (or blended reaction score), bands, slope, and MA/MACD extras."""
@@ -732,26 +695,11 @@ class HFTEngine:
 
     def _rsi_slope_per_tick(self):
         """Approximate RSI slope over the last few engine ticks."""
-        if len(self._rsi_tick_history) < 3:
-            return 0.0
-        r = list(self._rsi_tick_history)
-        return (r[-1] - r[-3]) / 2.0
-
-    def _rsi_suppresses_soft_exit(self, position_side, rsi):
-        """Block trend/speed/imbalance exits while RSI still matches the held thesis."""
-        if position_side == "UP":
-            return rsi >= self.rsi_hold_up_floor
-        if position_side == "DOWN":
-            return rsi <= self.rsi_hold_down_ceiling
-        return False
+        return rsi_slope_per_tick(self._rsi_tick_history)
 
     def _exit_rsi(self, rsi: float) -> float:
         """Clamp RSI for exit logic to limit spurious 100/0 from short price history."""
-        hi = float(self.rsi_exit_clamp_high)
-        lo = float(self.rsi_exit_clamp_low)
-        if hi > lo:
-            return min(max(float(rsi), lo), hi)
-        return float(rsi)
+        return clamp_exit_rsi(rsi, self.rsi_exit_clamp_high, self.rsi_exit_clamp_low)
 
     def _rsi_range_exit_triggered(
         self, position_side, current_rsi, unrealized, hold_sec: float = 0.0
@@ -761,35 +709,9 @@ class HFTEngine:
         Fade exits (RSI past band against the position) respect ``rsi_range_exit_min_hold_sec``
         to avoid immediate churn when RSI spikes on a short lookback. TP-at-band exits are unchanged.
         """
-        margin = self.rsi_range_exit_band_margin
-        min_p = self.rsi_range_exit_min_profit_usd
-        tp_line, _ = self._pnl_target_and_stop_lines()
-        min_hold = float(self.rsi_range_exit_min_hold_sec)
-        fade_need_pos = os.getenv("HFT_RSI_RANGE_EXIT_FADE_REQUIRE_POSITIVE") == "1"
-        rx = self._exit_rsi(current_rsi)
-        if position_side == "UP":
-            if rx >= self.rsi_entry_up_high and unrealized >= tp_line:
-                return True
-            if rx <= self.rsi_entry_up_low - margin:
-                if min_hold > 0.0 and hold_sec < min_hold:
-                    return False
-                cond = unrealized > min_p or rx <= self.rsi_extreme_low
-                if fade_need_pos and unrealized <= 0.0:
-                    return unrealized > min_p
-                return cond
-            return False
-        if position_side == "DOWN":
-            if rx <= self.rsi_entry_down_low and unrealized >= tp_line:
-                return True
-            if rx >= self.rsi_entry_down_high + margin:
-                if min_hold > 0.0 and hold_sec < min_hold:
-                    return False
-                cond = unrealized > min_p or rx >= self.rsi_extreme_high
-                if fade_need_pos and unrealized <= 0.0:
-                    return unrealized > min_p
-                return cond
-            return False
-        return False
+        return rsi_range_exit_triggered(
+            self, position_side, current_rsi, unrealized, hold_sec
+        )
 
     def can_trade(self):
         """Return True when risk limits allow new trade."""
@@ -798,49 +720,13 @@ class HFTEngine:
 
     def update_trend(self, fast_price, poly_mid):
         """Track crossing of target price and estimate trend speed/depth."""
-        now = time.time()
-        edge = fast_price - poly_mid
-        self.edge_window.append((now, edge))
-
-        sign = 1 if edge > 0 else -1 if edge < 0 else 0
-        crossed = sign != 0 and self.last_edge_sign != 0 and sign != self.last_edge_sign
-        if crossed:
-            self.trend_since_ts = now
-            self.trend_depth = abs(edge)
-            self.trend_dir = "UP" if sign > 0 else "DOWN"
-            logging.info("🔁 Trend cross: %s edge=%.2f", self.trend_dir, edge)
-        elif sign != 0:
-            if self.trend_since_ts == 0.0:
-                self.trend_since_ts = now
-                self.trend_dir = "UP" if sign > 0 else "DOWN"
-            self.trend_depth = max(self.trend_depth, abs(edge))
-        else:
-            self.trend_dir = "FLAT"
-
-        if sign != 0:
-            self.last_edge_sign = sign
-
-        speed = 0.0
-        if len(self.edge_window) >= 2:
-            t0, e0 = self.edge_window[-2]
-            t1, e1 = self.edge_window[-1]
-            dt = max(t1 - t0, 1e-6)
-            speed = (e1 - e0) / dt
-        age = now - self.trend_since_ts if self.trend_since_ts else 0.0
-        return edge, speed, self.trend_depth, age, self.trend_dir
+        return apply_update_trend(self, fast_price, poly_mid)
 
     def dynamic_edge_threshold(self, price_history, recent_pnl=0.0, latency_ms=0.0, extra_mult=1.0):
         """Return adaptive edge threshold in price units from recent volatility."""
-        if not price_history or len(price_history) < 30:
-            be, se = self.buy_edge, abs(self.sell_edge)
-            return be * extra_mult, se * extra_mult
-        arr = _price_array_for_rsi(price_history, 50)
-        vol = float(np.std(arr))
-        pnl_penalty = 1.15 if recent_pnl < 0 else 1.0
-        lo = 0.0 if self.no_entry_guards else 2.0
-        edge = max(lo, min(20.0, vol * 0.6 * pnl_penalty))
-        edge *= float(extra_mult)
-        return edge, edge
+        return compute_dynamic_edge_threshold(
+            self, price_history, recent_pnl, latency_ms, extra_mult
+        )
 
     def _load_rsi_slope_entry_params(self) -> None:
         """Read RSI slope entry gates from env (see entry_rsi_slope_allows). Single call site."""
@@ -928,22 +814,17 @@ class HFTEngine:
 
     def _position_notional_usd(self):
         """Return absolute position notional in USD for percent-based TP/SL."""
-        inv = float(self.pnl.inventory or 0.0)
-        ep = float(self.pnl.entry_price or 0.0)
-        return abs(inv * ep)
+        return position_notional_usd(self.pnl)
 
     def _pnl_target_and_stop_lines(self):
         """Return (take_profit_usd, stop_loss_usd) thresholds from percent or fixed env."""
-        n = self._position_notional_usd()
-        if self.pnl_tp_pct > 0.0:
-            tp = n * self.pnl_tp_pct
-        else:
-            tp = self.target_profit_usd
-        if self.pnl_sl_pct > 0.0:
-            sl = n * self.pnl_sl_pct
-        else:
-            sl = self.stop_loss_usd
-        return tp, sl
+        return pnl_target_and_stop_lines(
+            self.pnl,
+            pnl_tp_pct=self.pnl_tp_pct,
+            target_profit_usd=self.target_profit_usd,
+            pnl_sl_pct=self.pnl_sl_pct,
+            stop_loss_usd=self.stop_loss_usd,
+        )
 
     def _is_strong_oracle_edge(self, edge: float) -> bool:
         """Return True when abs(fast-oracle edge) exceeds buy_edge * strong multiplier."""
@@ -955,20 +836,7 @@ class HFTEngine:
 
     def _latency_expiry_edge_multiplier(self, latency_ms: float, seconds_to_expiry: float | None) -> float:
         """Raise required edge when feed staleness_ms is high or the market slot is near expiry."""
-        if self.no_entry_guards:
-            return 1.0
-        m = 1.0
-        if latency_ms > self.latency_high_ms:
-            m *= self.latency_high_edge_mult
-        elif latency_ms > 250.0:
-            m *= 1.10
-        if (
-            seconds_to_expiry is not None
-            and seconds_to_expiry >= 0.0
-            and seconds_to_expiry < self.expiry_tight_sec
-        ):
-            m *= self.expiry_edge_mult
-        return m
+        return latency_expiry_edge_multiplier(self, latency_ms, seconds_to_expiry)
 
     def _entry_slot_window_allows(self, seconds_to_expiry: float | None) -> bool:
         """Allow entries only outside first and last slot guard windows.
@@ -979,16 +847,7 @@ class HFTEngine:
         started in this window, no new entries occur until the next slot
         (effectively skipping the remainder of that slot).
         """
-        if seconds_to_expiry is None:
-            return True
-        sec_to_end = max(0.0, float(seconds_to_expiry))
-        if self.no_entry_last_sec > 0.0 and sec_to_end <= self.no_entry_last_sec:
-            return False
-        interval = max(1.0, float(self.slot_interval_sec))
-        sec_from_start = max(0.0, interval - sec_to_end)
-        if self.no_entry_first_sec > 0.0 and sec_from_start <= self.no_entry_first_sec:
-            return False
-        return True
+        return entry_slot_window_allows(self, seconds_to_expiry)
 
     async def _close_position_slot_edge(
         self,
@@ -1063,42 +922,21 @@ class HFTEngine:
         allowed.  Trades aligned with the anchor direction are always allowed.
         When the filter is disabled or anchor is unknown, both gates are True.
         """
-        enabled = os.getenv("HFT_ANCHOR_FILTER_ENABLED") == "1"
-        if not enabled or slot_anchor_price <= 0.0 or fast_price <= 0.0:
-            return True, True
-        delta_pct = (fast_price - slot_anchor_price) / slot_anchor_price
-        min_delta = float(os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT"))
-        # BUY_UP is aligned when price > anchor; BUY_DOWN is aligned when price < anchor.
-        # Counter-direction entries require the price to have moved min_delta away from
-        # anchor on the opposite side, suggesting a sustained reversal.
-        if delta_pct > 0.0:
-            anchor_ok_up = True
-            anchor_ok_down = abs(delta_pct) >= min_delta
-        elif delta_pct < 0.0:
-            anchor_ok_up = abs(delta_pct) >= min_delta
-            anchor_ok_down = True
-        else:
-            anchor_ok_up = True
-            anchor_ok_down = True
-        return anchor_ok_up, anchor_ok_down
+        return anchor_gate(fast_price, slot_anchor_price)
 
     def _low_speed_edge_multiplier(self, speed: float) -> float:
         """Raise required oracle edge when edge speed is low (fade / chop risk)."""
-        if abs(float(speed)) < self.entry_low_speed_abs:
-            return self.entry_low_speed_edge_mult
-        return 1.0
+        return low_speed_edge_multiplier(
+            speed, self.entry_low_speed_abs, self.entry_low_speed_edge_mult
+        )
 
     def entry_latency_allows_entry(self, latency_ms: float) -> bool:
         """Block entries when max feed staleness_ms exceeds entry_max_latency_ms."""
-        if self.entry_max_latency_ms <= 0.0:
-            return True
-        return float(latency_ms) <= self.entry_max_latency_ms
+        return entry_latency_allows_entry(self.entry_max_latency_ms, latency_ms)
 
     def entry_skew_allows_entry(self, skew_ms: float) -> bool:
         """Block entries when cross-feed skew is larger than the limit (0 disables the gate)."""
-        if self.entry_max_skew_ms <= 0.0:
-            return True
-        return abs(float(skew_ms)) <= self.entry_max_skew_ms
+        return entry_skew_allows_entry(self.entry_max_skew_ms, skew_ms)
 
     def entry_edge_jump_ok(self, edge_now: float, edge_speed: float = 0.0) -> bool:
         """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly).
@@ -1106,47 +944,44 @@ class HFTEngine:
         When ``HFT_ENTRY_EDGE_JUMP_BYPASS_ABS_SPEED`` > 0 and ``abs(edge_speed)`` meets or
         exceeds it, allow the jump so entries are not blocked during sharp moves.
         """
-        if (
-            self.entry_edge_jump_bypass_abs_speed > 0.0
-            and abs(float(edge_speed)) >= self.entry_edge_jump_bypass_abs_speed
-        ):
-            return True
-        if self.entry_max_edge_jump_pts <= 0.0:
-            return True
-        if len(self.edge_window) < 2:
-            return True
-        prev_edge = float(self.edge_window[-2][1])
-        return abs(float(edge_now) - prev_edge) <= self.entry_max_edge_jump_pts
+        return entry_edge_jump_ok(
+            edge_now,
+            edge_speed,
+            entry_max_edge_jump_pts=self.entry_max_edge_jump_pts,
+            entry_edge_jump_bypass_abs_speed=self.entry_edge_jump_bypass_abs_speed,
+            edge_window=self.edge_window,
+        )
 
     def entry_aggressive_trend_age_ok(self, edge_now: float, trend_age: float) -> bool:
         """Require extra seconds after trend start when edge is in aggressive magnitude."""
-        if self.entry_aggressive_min_trend_age_sec <= 0.0:
-            return True
-        if abs(edge_now) < self.buy_edge * self.aggressive_edge_mult:
-            return True
-        return float(trend_age) >= self.entry_aggressive_min_trend_age_sec
+        return entry_aggressive_trend_age_ok(
+            edge_now,
+            trend_age,
+            buy_edge=self.buy_edge,
+            aggressive_edge_mult=self.aggressive_edge_mult,
+            entry_aggressive_min_trend_age_sec=self.entry_aggressive_min_trend_age_sec,
+        )
 
     def entry_trend_flip_settled_ok(self, trend_age: float) -> bool:
         """Avoid entries right after a trend cross (chop / saw)."""
-        if self.trend_flip_min_age_sec <= 0.0:
-            return True
-        return float(trend_age) >= self.trend_flip_min_age_sec
+        return entry_trend_flip_settled_ok(trend_age, self.trend_flip_min_age_sec)
 
     def entry_rsi_slope_allows(self, side: str, current_rsi: float) -> bool:
         """Require RSI oversold/overbought with favorable slope for UP/DOWN entries."""
-        if not self.entry_rsi_slope_filter_enabled:
-            return True
-        slope = float(self._last_rsi_slope)
-        if side == "UP":
-            return current_rsi < self.rsi_up_entry_max and slope > self.rsi_up_slope_min
-        if side == "DOWN":
-            return current_rsi > self.rsi_down_entry_min and slope < self.rsi_down_slope_max
-        return True
+        return entry_rsi_slope_allows(
+            side,
+            current_rsi,
+            self._last_rsi_slope,
+            entry_rsi_slope_filter_enabled=self.entry_rsi_slope_filter_enabled,
+            rsi_up_entry_max=self.rsi_up_entry_max,
+            rsi_up_slope_min=self.rsi_up_slope_min,
+            rsi_down_entry_min=self.rsi_down_entry_min,
+            rsi_down_slope_max=self.rsi_down_slope_max,
+        )
 
     def _record_entry_samples(self, speed: float, zscore: float) -> None:
         """Append latest trend speed and z-score for acceleration and z-trend filters."""
-        self._speed_samples.append(float(speed))
-        self._zscore_samples.append(float(zscore))
+        record_entry_samples(self, speed, zscore)
 
     def entry_liquidity_spread_ok(
         self,
@@ -1156,31 +991,25 @@ class HFTEngine:
         trend_dir: str,
     ) -> bool:
         """Return False when UP/DOWN book spread is too wide unless oracle edge is very large."""
-        if self.entry_liquidity_max_spread <= 0.0:
-            return True
-        mx = self.entry_liquidity_max_spread
-        if trend_dir == "UP" and self.spread_gate_up_relax_mult > 1.0:
-            mx = mx * self.spread_gate_up_relax_mult
-        strong = abs(edge) >= self.wide_spread_min_edge
-        if trend_dir == "UP":
-            return spread_up <= mx or strong
-        if trend_dir == "DOWN":
-            return spread_down <= mx or strong
-        return True
+        return entry_liquidity_spread_ok(
+            spread_up,
+            spread_down,
+            edge,
+            trend_dir,
+            entry_liquidity_max_spread=self.entry_liquidity_max_spread,
+            spread_gate_up_relax_mult=self.spread_gate_up_relax_mult,
+            wide_spread_min_edge=self.wide_spread_min_edge,
+        )
 
     def entry_speed_acceleration_ok(self, trend_dir: str, speed: float) -> bool:
         """Require edge-speed acceleration in the trade direction when enabled."""
-        if not self.entry_accel_enabled:
-            return True
-        if len(self._speed_samples) < 4:
-            return True
-        prev = list(self._speed_samples)[-4:-1]
-        acc = float(speed) - float(np.mean(prev))
-        if trend_dir == "UP":
-            return acc >= self.entry_accel_min
-        if trend_dir == "DOWN":
-            return acc <= -self.entry_accel_min
-        return True
+        return entry_speed_acceleration_ok(
+            trend_dir,
+            speed,
+            self._speed_samples,
+            entry_accel_enabled=self.entry_accel_enabled,
+            entry_accel_min=self.entry_accel_min,
+        )
 
     def entry_zscore_trend_ok(self, trend_dir: str, edge_speed: float = 0.0) -> bool:
         """Require z-score to move monotonically with the intended side for several ticks.
@@ -1188,53 +1017,20 @@ class HFTEngine:
         When ``HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED`` > 0 and ``abs(edge_speed)`` meets or exceeds
         it, skip the monotonic z-score requirement so fast price breaks are not delayed.
         """
-        if (
-            self.entry_zscore_bypass_abs_speed > 0.0
-            and abs(float(edge_speed)) >= self.entry_zscore_bypass_abs_speed
-        ):
-            return True
-        if not self.entry_zscore_trend_enabled:
-            return True
-        k = max(1, self.entry_zscore_strict_ticks)
-        if len(self._zscore_samples) < 2:
-            return True
-        zs = list(self._zscore_samples)
-        if k == 1:
-            # Single-tick check: last z-score must have moved in the right direction.
-            if trend_dir == "UP":
-                return zs[-1] > zs[-2]
-            if trend_dir == "DOWN":
-                return zs[-1] < zs[-2]
-            return True
-        recent = zs[-(k + 1):]
-        if len(recent) < 2:
-            return True
-        if trend_dir == "UP":
-            return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
-        if trend_dir == "DOWN":
-            return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
-        return True
+        return entry_zscore_trend_ok(
+            trend_dir,
+            edge_speed,
+            self._zscore_samples,
+            entry_zscore_trend_enabled=self.entry_zscore_trend_enabled,
+            entry_zscore_strict_ticks=self.entry_zscore_strict_ticks,
+            entry_zscore_bypass_abs_speed=self.entry_zscore_bypass_abs_speed,
+        )
 
     def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
         """Return True if recent z-score ticks are strictly monotone in the trade direction."""
-        k = max(1, self.entry_zscore_strict_ticks)
-        if len(self._zscore_samples) < 2:
-            return False
-        zs = list(self._zscore_samples)
-        if k == 1:
-            if trend_dir == "UP":
-                return zs[-1] > zs[-2]
-            if trend_dir == "DOWN":
-                return zs[-1] < zs[-2]
-            return False
-        recent = zs[-(k + 1):]
-        if len(recent) < 2:
-            return False
-        if trend_dir == "UP":
-            return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
-        if trend_dir == "DOWN":
-            return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
-        return False
+        return zscore_monotonic_for_direction(
+            self._zscore_samples, self.entry_zscore_strict_ticks, trend_dir
+        )
 
     def _entry_momentum_alt_signal(
         self,
@@ -1247,30 +1043,16 @@ class HFTEngine:
         edge_mult: float,
     ):
         """Secondary entry path: momentum + monotone z-score + acceleration without full trend age."""
-        if not self._regime_allows_new_entries():
-            return None
-        if not self.entry_momentum_alt_enabled:
-            return None
-        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
-            price_history=price_history,
-            recent_pnl=recent_pnl,
-            latency_ms=latency_ms,
-            extra_mult=edge_mult,
+        return entry_momentum_alt_signal(
+            self,
+            edge,
+            trend,
+            speed,
+            price_history,
+            recent_pnl,
+            latency_ms,
+            edge_mult,
         )
-        lsm = self._low_speed_edge_multiplier(speed)
-        buy_edge_dyn *= lsm
-        sell_edge_dyn *= lsm
-        if abs(edge) < self.noise_edge * 2.0:
-            return None
-        if not self._zscore_monotonic_for_direction(trend):
-            return None
-        if not self.entry_speed_acceleration_ok(trend, speed):
-            return None
-        if trend == "UP" and edge >= buy_edge_dyn * 0.85 and speed >= self.speed_floor:
-            return "BUY_UP"
-        if trend == "DOWN" and edge <= -sell_edge_dyn * 0.85 and speed <= -self.speed_floor:
-            return "BUY_DOWN"
-        return None
 
     def _entry_candidate_from_state(
         self,
@@ -1286,121 +1068,19 @@ class HFTEngine:
         edge_mult=1.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
-        if not self._regime_allows_new_entries():
-            return None
-        buy_edge_dyn, sell_edge_dyn = self.dynamic_edge_threshold(
-            price_history=price_history,
-            recent_pnl=recent_pnl,
-            latency_ms=latency_ms,
-            extra_mult=edge_mult,
+        return entry_candidate_from_state(
+            self,
+            edge,
+            age,
+            trend,
+            speed,
+            price_history,
+            recent_pnl,
+            latency_ms,
+            up_mid,
+            down_mid,
+            edge_mult,
         )
-        lsm = self._low_speed_edge_multiplier(speed)
-        buy_edge_dyn *= lsm
-        sell_edge_dyn *= lsm
-        if abs(edge) < self.noise_edge:
-            return None
-        strong = self._is_strong_oracle_edge(edge)
-        aggressive = self._is_aggressive_oracle_edge(edge)
-        if aggressive:
-            now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC"))
-            if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
-                logging.info(
-                    "🔥 AGGRESSIVE ENTRY candidate: edge=%.2f (>= %.1fx buy_edge=%.2f)",
-                    edge,
-                    self.aggressive_edge_mult,
-                    self.buy_edge,
-                )
-                self._last_entry_noise_log_ts = now_ts
-        age_need = self.entry_confirm_age_strong if strong else self.entry_confirm_age
-        up_speed_ok = speed >= self.entry_up_speed_min or (
-            strong and speed >= self.speed_floor
-        )
-        down_speed_ok = speed <= self.entry_down_speed_max or (
-            strong and speed <= -self.speed_floor
-        )
-        if aggressive and trend == "UP" and edge >= buy_edge_dyn:
-            up_speed_ok = up_speed_ok or speed >= self.aggressive_entry_relax_speed
-        if aggressive and trend == "DOWN" and edge <= -sell_edge_dyn:
-            down_speed_ok = down_speed_ok or speed >= -self.aggressive_entry_relax_speed_down
-        low = self.entry_extreme_price_low
-        high = self.entry_extreme_price_high
-        if (
-            abs(edge) < self.entry_extreme_min_edge
-            and not strong
-            and (
-                (up_mid > 0.0 and (up_mid < low or up_mid > high))
-                or (down_mid > 0.0 and (down_mid < low or down_mid > high))
-            )
-        ):
-            return None
-        depth = self.trend_depth
-        dm = self.entry_depth_mult
-        if (
-            trend == "UP"
-            and age >= age_need
-            and depth >= buy_edge_dyn * dm
-            and edge >= buy_edge_dyn
-            and speed >= self.speed_floor
-            and up_speed_ok
-        ):
-            if len(self.edge_window) >= 2:
-                last_edges = [e for _, e in list(self.edge_window)[-2:]]
-                if not all(e > 0 for e in last_edges):
-                    return None
-            return "BUY_UP"
-        speed_ok_down = speed <= -self.speed_floor or (
-            aggressive
-            and trend == "DOWN"
-            and edge <= -sell_edge_dyn
-            and speed >= -self.aggressive_entry_relax_speed_down
-        )
-        if (
-            trend == "DOWN"
-            and age >= age_need
-            and depth >= sell_edge_dyn * dm
-            and edge <= -sell_edge_dyn
-            and speed_ok_down
-            and down_speed_ok
-        ):
-            if len(self.edge_window) >= 2:
-                last_edges = [e for _, e in list(self.edge_window)[-2:]]
-                if not all(e < 0 for e in last_edges):
-                    return None
-            return "BUY_DOWN"
-        if abs(edge) >= self.buy_edge * self.aggressive_edge_mult * 1.2:
-            sj_min_age = float(os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC"))
-            if sj_min_age > 0.0 and age < sj_min_age:
-                return None
-            now_ts = time.time()
-            noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC"))
-            if noise_min <= 0.0 or now_ts - self._last_entry_noise_log_ts >= noise_min:
-                logging.info(
-                    "🚀 STRONG JUMP detected edge=%.2f -> forcing early entry",
-                    edge,
-                )
-                self._last_entry_noise_log_ts = now_ts
-            if trend == "UP" and edge > 0:
-                return "BUY_UP"
-            if trend == "DOWN" and edge < 0:
-                return "BUY_DOWN"
-        return None
-
-    def _is_reversal_confirmed(self, side, trend):
-        """Return True when trend has clearly flipped against open position."""
-        if side == "UP":
-            return (
-                trend["trend"] == "DOWN"
-                and trend["age"] >= self.reversal_confirm_age
-                and trend["speed"] <= -self.reversal_speed_floor
-            )
-        if side == "DOWN":
-            return (
-                trend["trend"] == "UP"
-                and trend["age"] >= self.reversal_confirm_age
-                and trend["speed"] >= self.reversal_speed_floor
-            )
-        return False
 
     def _book_move_for_outcome(self, token_mid, prev_key, want_up):
         """Return move size and whether it aligns with the trade direction."""
@@ -1418,18 +1098,6 @@ class HFTEngine:
         else:
             aligned = move <= 0.0
         return abs_move, aligned
-
-    def _book_move_while_holding(self, token_mid, prev_key):
-        """Track mid while in position; return absolute tick move (for stall detection)."""
-        if token_mid <= 0.0:
-            return 0.0, False
-        prev = getattr(self, prev_key)
-        if prev is None:
-            setattr(self, prev_key, token_mid)
-            return 0.0, True
-        move = token_mid - prev
-        setattr(self, prev_key, token_mid)
-        return abs(move), True
 
     def generate_live_signal(self, fast_price, poly_mid, zscore, price_history=None, recent_pnl=0.0, latency_ms=0.0):
         """Return entry side for live orders; call after process_tick in the same loop (trend already updated)."""
@@ -1508,7 +1176,7 @@ class HFTEngine:
                 self._last_regime_skip_log_ts = _now
             return None
 
-        px = _price_array_for_rsi(price_history, self.rsi_price_len)
+        px = price_array_for_rsi(price_history, self.rsi_price_len)
         raw_rsi = float(compute_rsi(px, period=self.rsi_period))
         self._last_rsi_raw = raw_rsi
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
@@ -2290,6 +1958,3 @@ class HFTEngine:
                 settlement_fill=settlement_fill,
                 performance_key=perf_key,
             )
-
-
-LegacyLatencyEngine = HFTEngine

@@ -473,13 +473,3 @@ class PnLTracker:
             )
             return 0.0
         return (mark - self.entry_price) * self.inventory
-
-class RealExecutor:
-    """Заглушка для реального API Polymarket."""
-
-    def __init__(self, private_key):
-        self.private_key = private_key
-
-    async def place_order(self, side, token_id, price, amount):
-        logging.info(f"🚀 [REAL TRADE] Sending {side} for {token_id} at {price}")
-        return True

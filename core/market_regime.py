@@ -145,20 +145,6 @@ class MarketRegimeDetector:
         """Return the current regime label."""
         return self.state.regime
 
-    def diagnostics(self) -> dict[str, object]:
-        """Return a dict of current metrics for logging."""
-        return {
-            "regime": self.state.regime,
-            "speed_rms": round(self.state.speed_rms, 3),
-            "stale_median_ms": round(self.state.stale_median_ms, 0),
-            "samples": self.state.samples,
-            "thresholds": {
-                "calm_speed": self._calm_speed,
-                "active_speed": self._active_speed,
-                "calm_stale_ms": self._calm_stale,
-            },
-        }
-
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
