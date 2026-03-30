@@ -301,14 +301,18 @@ class StatsCollector:
                     f,
                     fieldnames=None if has_header else _TJ_FIELDS,
                 )
-                for js.rows, row in enumerate(reader, start=1):
+                for line_no, row in enumerate(reader, start=1):
+                    _rk = str(row.get("row_kind") or "").strip().lower()
+                    if _rk == "open":
+                        continue
                     try:
                         pnl = float(row.get("pnl") or 0.0)
                     except (TypeError, ValueError):
                         logging.warning(
-                            "Bad pnl value in journal row %d: %r", js.rows, row.get("pnl"),
+                            "Bad pnl value in journal row %d: %r", line_no, row.get("pnl"),
                         )
                         pnl = 0.0
+                    js.rows += 1
                     js.pnl_sum += pnl
                     if pnl > 0.0:
                         js.win_count += 1

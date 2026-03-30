@@ -175,6 +175,89 @@ def _snapshot_from_levels(
     }
 
 
+def reconcile_binary_outcome_books(
+    book: dict,
+    *,
+    tol: float = 0.05,
+    min_spread: float = 0.002,
+) -> bool:
+    """Align UP and DOWN top-of-book so implied mids sum to ~1 (complementary tokens).
+
+    Two independent CLOB snapshots can disagree; the old logic always overwrote DOWN
+    from UP, which is wrong when UP is stale (~0.76) and DOWN already reflects late-slot
+    resolution (~0.99). We trust the side whose mid is farther from 0.5; on tie, the
+    tighter spread wins.
+
+    Returns True if any field was changed.
+    """
+    _ub = float(book.get("bid") or 0.0)
+    _ua = float(book.get("ask") or 0.0)
+    _db = float(book.get("down_bid") or 0.0)
+    _da = float(book.get("down_ask") or 0.0)
+
+    up_valid = 0.0 < _ub < _ua <= 1.0
+    down_valid = 0.0 < _db < _da <= 1.0
+
+    def _clip(px: float) -> float:
+        return max(0.01, min(0.99, float(px)))
+
+    def _pair_from_up() -> tuple[float, float]:
+        b = _clip(1.0 - _ua)
+        a = _clip(1.0 - _ub)
+        if a <= b:
+            a = min(0.99, b + min_spread)
+        return b, a
+
+    def _pair_from_down() -> tuple[float, float]:
+        b = _clip(1.0 - _da)
+        a = _clip(1.0 - _db)
+        if a <= b:
+            a = min(0.99, b + min_spread)
+        return b, a
+
+    if up_valid and not down_valid:
+        nb, na = _pair_from_up()
+        book["down_bid"], book["down_ask"] = nb, na
+        return True
+    if down_valid and not up_valid:
+        nb, na = _pair_from_down()
+        book["bid"], book["ask"] = nb, na
+        return True
+    if not up_valid or not down_valid:
+        return False
+
+    mid_up = (_ub + _ua) / 2.0
+    mid_down = (_db + _da) / 2.0
+    if abs(mid_up + mid_down - 1.0) <= tol:
+        return False
+
+    ext_up = abs(mid_up - 0.5)
+    ext_dn = abs(mid_down - 0.5)
+    up_spread = _ua - _ub
+    dn_spread = _da - _db
+    trust_up = ext_up > ext_dn or (
+        abs(ext_up - ext_dn) < 1e-9 and up_spread <= dn_spread
+    )
+
+    if trust_up:
+        nb, na = _pair_from_up()
+        book["down_bid"], book["down_ask"] = nb, na
+        logging.debug(
+            "Binary book: trusted UP (reconcile DOWN) mid_up=%.4f mid_down=%.4f",
+            mid_up,
+            mid_down,
+        )
+        return True
+    nb, na = _pair_from_down()
+    book["bid"], book["ask"] = nb, na
+    logging.debug(
+        "Binary book: trusted DOWN (reconcile UP) mid_up=%.4f mid_down=%.4f",
+        mid_up,
+        mid_down,
+    )
+    return True
+
+
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import OrderArgs, OrderType

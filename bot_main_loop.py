@@ -11,6 +11,7 @@ import traceback
 from bot_config_log import validate_required_config
 from bot_runtime import UVLOOP_ACTIVE
 from core.executor import PnLTracker, mark_price_for_side
+from core.live_common import reconcile_binary_outcome_books
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
 from core.market_regime import MarketRegimeDetector
 from core.risk_engine import RiskEngine
@@ -684,15 +685,7 @@ async def main():
                             "Book mismatch corrected (suppressed repeat): UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f",
                             _ub, _ua, _db, _da, _up_mid_chk + _dn_mid_chk,
                         )
-                    if 0.0 < _ub < _ua <= 1.0:
-                        poly_book.book["down_bid"] = max(0.01, min(0.99, 1.0 - _ua))
-                        poly_book.book["down_ask"] = max(0.01, min(0.99, 1.0 - _ub))
-                    elif 0.0 < _db < _da <= 1.0:
-                        poly_book.book["bid"] = max(0.01, min(0.99, 1.0 - _da))
-                        poly_book.book["ask"] = max(0.01, min(0.99, 1.0 - _db))
-                    else:
-                        poly_book.book["down_bid"] = max(0.01, min(0.99, 1.0 - _ua))
-                        poly_book.book["down_ask"] = max(0.01, min(0.99, 1.0 - _ub))
+                reconcile_binary_outcome_books(poly_book.book)
 
                 decision = await strategy_hub.process_tick(
                     fast_price=fast_price,
@@ -901,46 +894,10 @@ async def main():
                         if _sc:
                             logging.info("📊 session_slices: %s", _sc)
                     # Journal uses real CLOB PnL in live mode, sim PnL in paper mode.
-                    journal.append(
-                        {
-                            "ts": time.time(),
-                            "side": decision.get("side"),
-                            "entry_edge": decision.get("entry_edge"),
-                            "exit_edge": decision.get("exit_edge"),
-                            "duration_sec": decision.get("duration_sec"),
-                            "entry_trend": decision.get("entry_trend"),
-                            "entry_speed": decision.get("entry_speed"),
-                            "entry_depth": decision.get("entry_depth"),
-                            "entry_imbalance": decision.get("entry_imbalance"),
-                            "latency_ms": decision.get("latency_ms"),
-                            "pnl": _live_pnl,
-                            "exit_reason": decision.get("reason"),
-                            "exit_rsi": _rs.get("rsi"),
-                            "exit_rsi_raw": _rs.get("rsi_raw"),
-                            "rsi_band_lower": _rs.get("lower"),
-                            "rsi_band_upper": _rs.get("upper"),
-                            "rsi_slope": _rs.get("slope"),
-                            "entry_book_px": decision.get("entry_book_px"),
-                            "entry_exec_px": decision.get("entry_exec_px"),
-                            "exit_book_px": decision.get("exit_book_px"),
-                            "exit_exec_px": decision.get("exit_exec_px"),
-                            "shares_bought": decision.get("shares_bought"),
-                            "shares_sold": decision.get("shares_sold"),
-                            "cost_usd": decision.get("cost_usd"),
-                            "cost_basis_usd": decision.get("cost_basis_usd"),
-                            "proceeds_usd": decision.get("proceeds_usd"),
-                            "entry_up_bid": decision.get("entry_up_bid"),
-                            "entry_up_ask": decision.get("entry_up_ask"),
-                            "entry_down_bid": decision.get("entry_down_bid"),
-                            "entry_down_ask": decision.get("entry_down_ask"),
-                            "exit_up_bid": decision.get("exit_up_bid"),
-                            "exit_up_ask": decision.get("exit_up_ask"),
-                            "exit_down_bid": decision.get("exit_down_bid"),
-                            "exit_down_ask": decision.get("exit_down_ask"),
-                            "strategy_name": decision.get("strategy_name"),
-                            "entry_profile": decision.get("entry_profile"),
-                            "performance_key": decision.get("performance_key"),
-                        }
+                    journal.record_close(
+                        decision=decision,
+                        live_pnl=_live_pnl,
+                        rsi_state=_rs,
                     )
                 if LIVE_MODE and token_up_id and live_risk.can_trade():
                     # Engine signals OPEN intent — place real CLOB BUY and record
@@ -1135,6 +1092,16 @@ async def main():
                                         # Refresh CTF allowance so the subsequent SELL is accepted.
                                         await asyncio.to_thread(
                                             live_exec.ensure_conditional_allowance, _live_tid
+                                        )
+                                        journal.record_open(
+                                            decision=decision,
+                                            filled_shares=float(_filled_sh),
+                                            avg_price=float(_filled_px),
+                                            amount_usd=float(_buy_cash_usd),
+                                            rsi_state=strategy_hub.get_rsi_v5_state(),
+                                            book_snapshot=poly_book.book
+                                            if poly_book is not None
+                                            else None,
                                         )
                                     else:
                                         _hft_eng = getattr(
