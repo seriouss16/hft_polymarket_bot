@@ -141,7 +141,7 @@ _PROFILE_EMOJI: dict[str, str] = {
 }
 
 _PROFILE_DESC: dict[str, str] = {
-    "night": "speed=0 SL=1.5% TP=0.4% latency=3000ms cooldown=3s (weekends all day)",
+    "night": "speed=0 SL/TP/RSI/reaction=DAY baseline latency=2800ms skew=2000ms (weekends all day)",
     "day": "speed=±2 z-score=ON SL=1.0% TP=0.3% latency=1350ms cooldown=5s",
 }
 
