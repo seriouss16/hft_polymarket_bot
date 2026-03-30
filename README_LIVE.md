@@ -287,7 +287,7 @@ In live mode, simulation is fully suppressed. `PnLTracker` records only confirme
 ```
 execute(signal, token_id, budget_usd)
         │
-        ├── ask price check: min_entry_ask ≤ best_ask ≤ max_entry_ask
+        ├── ask price check: same as paper — best_ask < HFT_MAX_ENTRY_ASK and HFT_ENTRY_MIN/MAX_ASK_* for UP vs DOWN
         ├── spread check: best_ask - best_bid ≤ max_spread
         ├── signal check: must be BUY_UP or BUY_DOWN
         ├── budget check: budget_usd / best_ask ≥ POLY_CLOB_MIN_SHARES
@@ -507,8 +507,9 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 | `LIVE_ORDER_MAX_REPRICE` | 2 | Max reprice attempts before emergency exit |
 | `LIVE_ORDER_SIZE` | 10 | Fallback order size in USD (used when budget not set) |
 | `LIVE_MAX_SPREAD` | 0.05 | Max CLOB spread to allow execution |
-| `HFT_MIN_ENTRY_ASK` | 0.08 | Minimum ask price to enter (rejects anomalous 0.01 prices) |
-| `HFT_MAX_ENTRY_ASK` | 0.99 | Maximum ask price to enter |
+| `HFT_MAX_ENTRY_ASK` | 0.99 | Global ceiling: best_ask must be **below** this (same as paper `_entry_ask_allows_open`) |
+| `HFT_ENTRY_MIN_ASK_UP` / `HFT_ENTRY_MAX_ASK_UP` | _(per runtime)_ | Per-outcome band for UP token (same gates as paper `HFTEngine`) |
+| `HFT_ENTRY_MIN_ASK_DOWN` / `HFT_ENTRY_MAX_ASK_DOWN` | _(per runtime)_ | Per-outcome band for DOWN token |
 | `POLY_CLOB_MIN_SHARES` | 5 | Polymarket minimum GTC order size in shares |
 | `POLY_SIGNATURE_TYPE` | 2 | Wallet signature type (2 = EOA with proxy) |
 | `HFT_LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |

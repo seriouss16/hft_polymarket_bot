@@ -550,14 +550,17 @@ class TestExecuteSkips:
     """execute() must return (0.0, 0.0) on various skip conditions."""
 
     async def test_skip_ask_too_low(self, monkeypatch):
-        """best_ask below min_entry_ask must skip."""
+        """best_ask below HFT_ENTRY_MIN_ASK_DOWN must skip (paper-aligned per-outcome caps)."""
+        monkeypatch.setenv("HFT_ENTRY_MIN_ASK_DOWN", "0.08")
+        monkeypatch.setenv("HFT_ENTRY_MAX_ASK_DOWN", "0.97")
         eng = make_engine(monkeypatch)
         with patch.object(eng, "get_best_prices", return_value=(0.01, 0.02)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
         assert result == (0.0, 0.0)
 
     async def test_skip_ask_too_high(self, monkeypatch):
-        """best_ask above max_entry_ask must skip."""
+        """best_ask at or above HFT_MAX_ENTRY_ASK must skip (global ceiling, same as paper)."""
+        monkeypatch.setenv("HFT_MAX_ENTRY_ASK", "0.99")
         eng = make_engine(monkeypatch)
         with patch.object(eng, "get_best_prices", return_value=(0.98, 0.995)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)

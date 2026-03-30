@@ -124,6 +124,50 @@ except Exception:  # pragma: no cover - optional runtime dependency
     SELL_SIDE = "SELL"
 
 
+def _env_float_inactive0(key: str) -> float:
+    """Parse env float; missing/empty → 0.0 so optional caps stay inactive (matches engine)."""
+    v = os.getenv(key)
+    if v is None or not str(v).strip():
+        return 0.0
+    return float(v)
+
+
+def _paper_aligned_outcome_ask_ok(ask: float, min_cap: float, max_cap: float) -> bool:
+    """Match ``HFTEngine._entry_outcome_price_allows`` / per-outcome min–max bands."""
+    ask_val = float(ask)
+    min_active = 0.0 < float(min_cap) < 1.0
+    max_active = 0.0 < float(max_cap) < 1.0
+    if min_active and ask_val < float(min_cap):
+        return False
+    if max_active and ask_val > float(max_cap):
+        return False
+    return True
+
+
+def _paper_aligned_buy_price_allows(signal: str, best_ask: float, max_entry_ask: float) -> bool:
+    """Match paper OPEN gates: global ``_entry_ask_allows_open`` + per-outcome caps.
+
+    Live previously used a single ``[HFT_MIN_ENTRY_ASK, HFT_MAX_ENTRY_ASK]`` window for
+    both outcome tokens. UP and DOWN tokens have different typical price levels; the
+    same global band skewed fills toward DOWN-only. See ``HFTEngine`` OPEN conditions.
+    """
+    if float(best_ask) >= float(max_entry_ask):
+        return False
+    if signal == "BUY_UP":
+        return _paper_aligned_outcome_ask_ok(
+            best_ask,
+            _env_float_inactive0("HFT_ENTRY_MIN_ASK_UP"),
+            _env_float_inactive0("HFT_ENTRY_MAX_ASK_UP"),
+        )
+    if signal == "BUY_DOWN":
+        return _paper_aligned_outcome_ask_ok(
+            best_ask,
+            _env_float_inactive0("HFT_ENTRY_MIN_ASK_DOWN"),
+            _env_float_inactive0("HFT_ENTRY_MAX_ASK_DOWN"),
+        )
+    return False
+
+
 @dataclass
 class LiveRiskManager:
     """Session realized-PnL guard and trade counter (bot process lifetime)."""
@@ -194,7 +238,6 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK"))
-        self.min_entry_ask = float(os.getenv("HFT_MIN_ENTRY_ASK"))
         self.skip_stats_log_sec = float(os.getenv("HFT_LIVE_SKIP_STATS_LOG_SEC"))
         self._last_skip_stats_log_ts = time.time()
         self._entry_stats: dict[str, int] = {
@@ -1602,11 +1645,12 @@ class LiveExecutionEngine:
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
 
-        if best_ask <= self.min_entry_ask or best_ask >= self.max_entry_ask:
+        if not _paper_aligned_buy_price_allows(signal, best_ask, self.max_entry_ask):
             self._entry_stats["skip_ask_cap"] += 1
             logging.warning(
-                "Skip %s: best_ask %.4f outside allowed range [%.3f, %.3f].",
-                signal, best_ask, self.min_entry_ask, self.max_entry_ask,
+                "Skip %s: best_ask %.4f outside paper-aligned gates (global max HFT_MAX_ENTRY_ASK=%.4f "
+                "+ per-outcome HFT_ENTRY_*_ASK_UP/DOWN).",
+                signal, best_ask, self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
             return _SKIP
