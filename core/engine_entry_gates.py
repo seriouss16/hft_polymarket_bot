@@ -297,20 +297,35 @@ def entry_slot_window_allows(eng: Any, seconds_to_expiry: float | None) -> bool:
     return True
 
 
-def anchor_gate(fast_price: float, slot_anchor_price: float) -> tuple[bool, bool]:
-    """Return (up_allowed, down_allowed) based on slot anchor price filter."""
-    enabled = os.getenv("HFT_ANCHOR_FILTER_ENABLED") == "1"
-    if not enabled or slot_anchor_price <= 0.0 or fast_price <= 0.0:
+def _price_to_beat_filter_enabled() -> bool:
+    return os.getenv("HFT_PRICE_TO_BEAT_FILTER_ENABLED") == "1" or os.getenv(
+        "HFT_ANCHOR_FILTER_ENABLED"
+    ) == "1"
+
+
+def _price_to_beat_counter_min_delta_pct() -> float:
+    raw = (
+        os.getenv("HFT_PRICE_TO_BEAT_COUNTER_MIN_DELTA_PCT")
+        or os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT")
+        or "0.0005"
+    )
+    return float(raw)
+
+
+def price_to_beat_gate(fast_price: float, slot_price_to_beat: float) -> tuple[bool, bool]:
+    """Return (up_allowed, down_allowed) using slot start price (Gamma priceToBeat) vs fast CEX."""
+    enabled = _price_to_beat_filter_enabled()
+    if not enabled or slot_price_to_beat <= 0.0 or fast_price <= 0.0:
         return True, True
-    delta_pct = (fast_price - slot_anchor_price) / slot_anchor_price
-    min_delta = float(os.getenv("HFT_ANCHOR_COUNTER_MIN_DELTA_PCT"))
+    delta_pct = (fast_price - slot_price_to_beat) / slot_price_to_beat
+    min_delta = _price_to_beat_counter_min_delta_pct()
     if delta_pct > 0.0:
-        anchor_ok_up = True
-        anchor_ok_down = abs(delta_pct) >= min_delta
+        ok_up = True
+        ok_down = abs(delta_pct) >= min_delta
     elif delta_pct < 0.0:
-        anchor_ok_up = abs(delta_pct) >= min_delta
-        anchor_ok_down = True
+        ok_up = abs(delta_pct) >= min_delta
+        ok_down = True
     else:
-        anchor_ok_up = True
-        anchor_ok_down = True
-    return anchor_ok_up, anchor_ok_down
+        ok_up = True
+        ok_down = True
+    return ok_up, ok_down

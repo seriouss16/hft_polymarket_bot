@@ -203,10 +203,8 @@ async def main():
     last_slot_ts: int | None = None
     last_skew_warn_time = 0.0
     last_high_latency_warn_time = 0.0
-    # BTC Chainlink price recorded at the moment the slot opens.
-    # The market resolves "Up" if BTC-end >= BTC-start, so this price acts as
-    # the natural target/anchor for trader position bias within the slot.
-    slot_anchor_price: float = 0.0
+    # Official start-of-window BTC/USD (Gamma eventMetadata.priceToBeat); fallback RTDS.
+    slot_price_to_beat: float = 0.0
 
     async def _reconcile_live_inventory_maybe(poly_book_obj) -> None:
         """If chain or CLOB shows outcome shares but PnL is flat, sync live_open for EXIT."""
@@ -417,17 +415,23 @@ async def main():
                             up_id[:16], (down_id or "")[:16],
                         )
                     else:
-                        _anchor_now = float(
-                            poly_book.book.get("btc_oracle")
-                            or poly_book.book.get("mid")
-                            or 0.0
-                        ) if poly_book is not None else 0.0
-                        if _anchor_now > 0.0:
-                            slot_anchor_price = _anchor_now
+                        _ptb = await selector.fetch_event_price_to_beat(slug)
+                        if _ptb is not None and _ptb > 0.0:
+                            slot_price_to_beat = float(_ptb)
+                        else:
+                            _fallback = float(
+                                poly_book.book.get("btc_oracle")
+                                or poly_book.book.get("mid")
+                                or 0.0
+                            ) if poly_book is not None else 0.0
+                            if _fallback > 0.0:
+                                slot_price_to_beat = _fallback
+                            else:
+                                slot_price_to_beat = 0.0
                         logging.info(
-                            "🎯 Смена рынка: %s | anchor=%.2f",
+                            "🎯 Смена рынка: %s | priceToBeat=%.2f",
                             question,
-                            slot_anchor_price,
+                            slot_price_to_beat,
                         )
                         token_up_id = up_id
                         token_down_id = down_id
@@ -488,17 +492,16 @@ async def main():
                     or poly_book.book.get("mid")
                     or 0.0
                 )
-            # RTDS connects asynchronously; at market switch btc_oracle is often still 0.
-            # Latch anchor on the first Chainlink tick so Anchor/Δ and _anchor_gate see a real target.
+            # RTDS fallback when Gamma did not return priceToBeat (or fetch failed).
             if (
-                slot_anchor_price <= 0.0
+                slot_price_to_beat <= 0.0
                 and token_up_id
                 and poly_btc > 0.0
             ):
-                slot_anchor_price = float(poly_btc)
+                slot_price_to_beat = float(poly_btc)
                 logging.info(
-                    "🎯 Slot anchor latched from Chainlink RTDS: %.2f",
-                    slot_anchor_price,
+                    "🎯 priceToBeat latched from Chainlink RTDS (fallback): %.2f",
+                    slot_price_to_beat,
                 )
             if fast_price and poly_book is not None and poly_btc > 0:
                 if token_up_id and (
@@ -700,7 +703,7 @@ async def main():
                     meta_enabled=(trade_allowed or BYPASS_META_GATE),
                     seconds_to_expiry=selector.seconds_to_slot_end(),
                     skew_ms=skew_ms,
-                    slot_anchor_price=slot_anchor_price,
+                    slot_price_to_beat=slot_price_to_beat,
                 )
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
@@ -785,7 +788,7 @@ async def main():
                         f"bn {float(_ft['binance_age_ms']):.0f}) | "
                         f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
                         f"Regime: {regime_detector.get_regime()} | "
-                        f"Anchor: {slot_anchor_price:.2f} Δ={fast_price - slot_anchor_price:+.2f} | "
+                        f"priceToBeat: {slot_price_to_beat:.2f} Δ={fast_price - slot_price_to_beat:+.2f} | "
                         f"Forecast: {forecast:.2f}{profile_suffix}",
                     )
                     last_pulse_time = now

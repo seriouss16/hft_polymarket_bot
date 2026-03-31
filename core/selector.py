@@ -199,6 +199,29 @@ class MarketSelector:
             logging.error("Selector error for slug=%s: %s", slug, e)
             return None, None, slug
 
+    async def fetch_event_price_to_beat(self, slug: str) -> float | None:
+        """Return official start-of-window BTC/USD from Gamma (Chainlink) for this slot.
+
+        Polymarket encodes this as ``eventMetadata.priceToBeat`` on
+        ``GET /events/slug/{slug}`` — the resolution reference vs end-of-window price.
+        """
+        url = f"https://gamma-api.polymarket.com/events/slug/{slug}"
+        try:
+            data = await self._fetch_gamma_json(url, timeout=5.0)
+            if not data:
+                return None
+            meta = data.get("eventMetadata") or {}
+            ptb = meta.get("priceToBeat")
+            if ptb is None:
+                return None
+            v = float(ptb)
+            if v <= 0.0 or v != v:
+                return None
+            return v
+        except Exception as e:
+            logging.warning("Gamma priceToBeat fetch failed slug=%s: %s", slug, e)
+            return None
+
     async def fetch_up_down_quotes(self, slug: str, up_id: str | None, down_id: str | None) -> dict:
         """Return UP/DOWN bid/ask quotes from Gamma payload for a market slug."""
         url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
