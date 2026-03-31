@@ -167,6 +167,19 @@ class StatsCollector:
             "http_polls_total": 0,
             "http_errors": 0,
         }
+        # Balance cache metrics (Phase 3 WebSocket Migration - Balance Cache)
+        self._balance_metrics: dict[str, Any] = {
+            "fetches_total": 0,
+            "cache_hits": 0,
+            "http_fallbacks": 0,
+            "errors": 0,
+            "hit_rate_pct": 0.0,
+            "avg_latency_ms": 0.0,
+            "min_latency_ms": 0.0,
+            "max_latency_ms": 0.0,
+            "usdc_cache_age_sec": 0.0,
+            "conditional_cache_count": 0,
+        }
 
     def set_live_wallet_usdc(self, value: float | None) -> None:
         """Cache fetch_usdc_balance() for the next show_report / final table (LIVE only)."""
@@ -190,6 +203,22 @@ class StatsCollector:
             self.set_ws_metrics(ws_metrics)
         if hasattr(live_engine, '_http_metrics'):
             self.set_http_metrics(live_engine._http_metrics)
+    
+    def set_balance_metrics(self, balance_metrics: dict[str, Any]) -> None:
+        """Set balance cache metrics from BalanceCache.
+        
+        Phase 3 WebSocket Migration: Display balance cache performance.
+        """
+        self._balance_metrics.update(balance_metrics)
+    
+    def update_balance_metrics_from_cache(self, balance_cache) -> None:
+        """Update balance metrics from BalanceCache instance.
+        
+        Phase 3 WebSocket Migration: Pull metrics from balance cache for display.
+        """
+        if hasattr(balance_cache, 'get_metrics'):
+            balance_metrics = balance_cache.get_metrics()
+            self.set_balance_metrics(balance_metrics)
 
     def _ws_metrics_line(self) -> str:
         """Return human-readable WebSocket metrics line."""
@@ -201,6 +230,18 @@ class StatsCollector:
             f"latency_avg={self._ws_metrics['ws_latency_avg_ms']:.1f}ms "
             f"min={self._ws_metrics['ws_latency_min_ms']:.1f}ms "
             f"max={self._ws_metrics['ws_latency_max_ms']:.1f}ms"
+        )
+
+    def _balance_metrics_line(self) -> str:
+        """Return human-readable balance cache metrics line."""
+        if self._balance_metrics["fetches_total"] == 0:
+            return "BAL: n/a"
+        return (
+            f"BAL: fetches={self._balance_metrics['fetches_total']} "
+            f"hits={self._balance_metrics['cache_hits']} "
+            f"hit_rate={self._balance_metrics['hit_rate_pct']:.1f}% "
+            f"latency_avg={self._balance_metrics['avg_latency_ms']:.1f}ms "
+            f"usdc_age={self._balance_metrics['usdc_cache_age_sec']:.1f}s"
         )
 
     def _inventory_line(self) -> str:
@@ -273,6 +314,9 @@ class StatsCollector:
         ]
         # Phase 2 WebSocket Migration: Add WS/HTTP metrics line
         report.append(f"📡 {self._ws_metrics_line()}")
+        
+        # Phase 3 WebSocket Migration: Add balance cache metrics line
+        report.append(f"💾 {self._balance_metrics_line()}")
         
         if self._live_wallet_usdc is not None:
             report.append(

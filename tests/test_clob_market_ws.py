@@ -63,6 +63,7 @@ def test_apply_book_snapshot_matches_snapshot_from_levels() -> None:
 
 
 def test_price_change_updates_level() -> None:
+    """Removing the top bid via price_change (size 0) drops best bid below 0.5 or to empty (0)."""
     c = ClobMarketBookCache()
     c.enabled = False
     c._apply_book(
@@ -88,7 +89,6 @@ def test_price_change_updates_level() -> None:
     )
     s = c.snapshot("tid", 5)
     assert s is not None
-    # Best bid should move after removing 0.5 level
     assert float(s["best_bid"]) < 0.5 or float(s["best_bid"]) == 0.0
 
 
@@ -173,3 +173,41 @@ def test_sync_poly_book_from_cache() -> None:
     assert pb["ts"] == 123.0
     assert float(pb["bid"]) == 0.4
     assert float(pb["down_bid"]) == 0.4
+
+
+def test_sync_poly_book_no_partial_merge_when_down_missing() -> None:
+    """If DOWN is missing, do not write UP-only fields (all-or-nothing)."""
+    c = ClobMarketBookCache()
+    c.enabled = False
+    c._apply_book(
+        {
+            "event_type": "book",
+            "asset_id": "u",
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.6", "size": "10"}],
+        }
+    )
+    pb = {"bid": 0.11, "ask": 0.88}
+    ok = sync_poly_book_from_cache(pb, c, "u", "d", loop_ts=99.0)
+    assert ok is False
+    assert pb["bid"] == 0.11
+    assert pb["ask"] == 0.88
+    assert "ts" not in pb
+
+
+def test_sync_poly_book_up_only_when_no_down_token() -> None:
+    """With ``token_down_id is None``, only UP leg is required."""
+    c = ClobMarketBookCache()
+    c.enabled = False
+    c._apply_book(
+        {
+            "event_type": "book",
+            "asset_id": "u",
+            "bids": [{"price": "0.4", "size": "10"}],
+            "asks": [{"price": "0.6", "size": "10"}],
+        }
+    )
+    pb: dict = {}
+    assert sync_poly_book_from_cache(pb, c, "u", None, loop_ts=1.0) is True
+    assert float(pb["bid"]) == 0.4
+    assert "down_bid" not in pb

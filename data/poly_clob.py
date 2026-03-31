@@ -68,8 +68,8 @@ class PolyOrderBook:
                 await ws.send("PING")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.debug("Poly RTDS ping loop ended: %s", exc)
 
     async def connect(self) -> None:
         """Subscribe to RTDS Chainlink stream and update ``self.book`` until disconnect."""
@@ -124,9 +124,9 @@ class PolyOrderBook:
                             price = float(payload["value"])
                             self.book["btc_oracle"] = price
                             self.book["mid"] = price
-                            if float(self.book.get("ask") or 0.0) <= 0.0 or float(
-                                self.book.get("bid") or 0.0
-                            ) <= 0.0:
+                            ask = float(self.book.get("ask") or 0.0)
+                            bid = float(self.book.get("bid") or 0.0)
+                            if ask <= 0.0 or bid <= 0.0:
                                 half_spread = 0.005
                                 ym = 0.5
                                 self.book["ask"] = min(0.99, ym + half_spread)

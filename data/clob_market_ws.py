@@ -32,6 +32,8 @@ CLOB_MARKET_WS_URL = os.getenv(
     "CLOB_MARKET_WS_URL",
     "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 )
+# Max seconds to wait for TCP + WebSocket handshake (avoids hanging forever on bad routes).
+_CLOB_MARKET_WS_OPEN_TIMEOUT = float(os.getenv("CLOB_MARKET_WS_OPEN_TIMEOUT_SEC", "30"))
 
 
 def _parse_num(x: Any) -> float:
@@ -305,8 +307,8 @@ class ClobMarketBookCache:
                 await ws.send("PING")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.debug("CLOB market WS ping loop ended: %s", exc)
 
     async def close_ws(self) -> None:
         """Force reconnect with new asset list (async)."""
@@ -331,6 +333,7 @@ class ClobMarketBookCache:
                 try:
                     async with websockets.connect(
                         CLOB_MARKET_WS_URL,
+                        open_timeout=_CLOB_MARKET_WS_OPEN_TIMEOUT,
                         ping_interval=None,
                         close_timeout=5,
                         max_size=10 * 1024 * 1024,
@@ -368,6 +371,10 @@ class ClobMarketBookCache:
         self._stop.set()
 
 
+def _valid_spread(bid: float, ask: float) -> bool:
+    return 0.0 < bid < ask <= 1.0
+
+
 def sync_poly_book_from_cache(
     poly_book: dict[str, Any],
     cache: ClobMarketBookCache,
@@ -380,42 +387,37 @@ def sync_poly_book_from_cache(
     """Merge fresh WS snapshots into ``poly_book`` (same keys as HTTP pull path).
 
     Returns True when UP top-of-book is valid and DOWN is valid or absent.
+    All-or-nothing: if the merge would fail (stale snapshot, invalid spread), ``poly_book``
+    is left unchanged so callers never see a half-updated book.
     """
     ob_up = cache.snapshot(token_up_id, depth)
     if ob_up is None or not cache.is_fresh(token_up_id):
         return False
     up_bid = float(ob_up.get("best_bid", 0.0))
     up_ask = float(ob_up.get("best_ask", 0.0))
-    up_valid = 0.0 < up_bid < up_ask <= 1.0
-    if up_valid:
-        poly_book["bid"] = up_bid
-        poly_book["ask"] = up_ask
-        poly_book["bid_size_top"] = float(ob_up.get("bid_size_top", 1.0))
-        poly_book["ask_size_top"] = float(ob_up.get("ask_size_top", 1.0))
-    else:
-        poly_book.pop("bid", None)
-        poly_book.pop("ask", None)
+    if not _valid_spread(up_bid, up_ask):
+        return False
 
-    down_valid = True
+    ob_down = None
     if token_down_id:
         ob_down = cache.snapshot(token_down_id, depth)
         if ob_down is None or not cache.is_fresh(token_down_id):
-            poly_book.pop("down_bid", None)
-            poly_book.pop("down_ask", None)
             return False
         down_bid = float(ob_down.get("best_bid", 0.0))
         down_ask = float(ob_down.get("best_ask", 0.0))
-        down_valid = 0.0 < down_bid < down_ask <= 1.0
-        if down_valid:
-            poly_book["down_bid"] = down_bid
-            poly_book["down_ask"] = down_ask
-            poly_book["down_bid_size_top"] = float(ob_down.get("bid_size_top", 0.0))
-            poly_book["down_ask_size_top"] = float(ob_down.get("ask_size_top", 0.0))
-        else:
-            poly_book.pop("down_bid", None)
-            poly_book.pop("down_ask", None)
+        if not _valid_spread(down_bid, down_ask):
+            return False
+
+    poly_book["bid"] = up_bid
+    poly_book["ask"] = up_ask
+    poly_book["bid_size_top"] = float(ob_up.get("bid_size_top", 1.0))
+    poly_book["ask_size_top"] = float(ob_up.get("ask_size_top", 1.0))
+    if token_down_id and ob_down is not None:
+        poly_book["down_bid"] = float(ob_down.get("best_bid", 0.0))
+        poly_book["down_ask"] = float(ob_down.get("best_ask", 0.0))
+        poly_book["down_bid_size_top"] = float(ob_down.get("bid_size_top", 0.0))
+        poly_book["down_ask_size_top"] = float(ob_down.get("ask_size_top", 0.0))
 
     if loop_ts is not None:
         poly_book["ts"] = loop_ts
-    ok = up_valid and (not token_down_id or down_valid)
-    return bool(ok)
+    return True

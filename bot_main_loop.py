@@ -24,6 +24,7 @@ from data.providers import FastExchangeProvider
 from data.clob_market_ws import ClobMarketBookCache, sync_poly_book_from_cache
 from data.clob_user_ws import ClobUserOrderCache
 from data.poly_clob import PolyOrderBook
+from data.balance_cache import BalanceCache
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
 from utils.stats import StatsCollector
@@ -111,10 +112,23 @@ async def main():
     clob_ws_task = asyncio.create_task(clob_ws_cache.run_forever())
     clob_user_cache: ClobUserOrderCache | None = None
     clob_user_task: asyncio.Task | None = None
+    balance_cache: BalanceCache | None = None
     if LIVE_MODE:
         clob_user_cache = ClobUserOrderCache(lambda: live_exec.get_api_creds())
         live_exec.set_user_order_cache(clob_user_cache)
         clob_user_task = asyncio.create_task(clob_user_cache.run_forever())
+        
+        # Phase 3 WebSocket Migration: Initialize balance cache
+        # Polymarket does not provide balance updates via WebSocket, so we use
+        # cached HTTP polling with configurable staleness thresholds
+        _balance_cache_max_age_sec = float(os.getenv("BALANCE_CACHE_MAX_AGE_SEC", "5.0"))
+        _balance_conditional_max_age_sec = float(os.getenv("BALANCE_CONDITIONAL_MAX_AGE_SEC", "10.0"))
+        balance_cache = BalanceCache(
+            balance_fetcher=live_exec.fetch_usdc_balance,
+            conditional_balance_fetcher=live_exec.fetch_conditional_balance,
+            max_age_sec=_balance_cache_max_age_sec,
+            conditional_max_age_sec=_balance_conditional_max_age_sec,
+        )
     live_risk = LiveRiskManager(max_session_loss=float(os.environ["LIVE_MAX_SESSION_LOSS"]))
     risk = RiskEngine(
         max_drawdown_pct=float(os.environ["MAX_DRAWDOWN_PCT"]),
@@ -250,7 +264,11 @@ async def main():
                 if live_exec.has_pending_buy(_tid) or live_exec.has_pending_sell(_tid):
                     continue
                 _mem = live_exec.filled_buy_shares(_tid)
-                _ch = await asyncio.to_thread(live_exec.fetch_conditional_balance, _tid)
+                # Phase 3 WebSocket Migration: Use balance cache for conditional token balance
+                if balance_cache is not None:
+                    _ch = await asyncio.to_thread(balance_cache.get_conditional_balance, _tid)
+                else:
+                    _ch = await asyncio.to_thread(live_exec.fetch_conditional_balance, _tid)
                 _chv = float(_ch) if _ch is not None else 0.0
                 # Chain truth beats stale in-memory FILLED rows in _active_orders after
                 # clear_filled_buy() (mem can show 5.47 sh while chain is dust — phantom
@@ -371,12 +389,18 @@ async def main():
 
             # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
             if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
-                if LIVE_MODE:
+                if LIVE_MODE and balance_cache is not None:
+                    # Phase 3 WebSocket Migration: Use balance cache for USDC balance
+                    # The cache automatically handles staleness and metrics tracking
                     try:
-                        _st_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                        _st_usdc = await asyncio.to_thread(balance_cache.get_usdc_balance)
                         stats.set_live_wallet_usdc(_st_usdc)
+                        # Update balance cache metrics for display
+                        stats.update_balance_metrics_from_cache(balance_cache)
+                        # Log balance cache metrics periodically
+                        balance_cache.log_metrics("stats_interval")
                     except Exception as _st_exc:
-                        logging.debug("fetch_usdc_balance for stats: %s", _st_exc)
+                        logging.debug("balance_cache.get_usdc_balance for stats: %s", _st_exc)
                         stats.set_live_wallet_usdc(None)
                 else:
                     stats.set_live_wallet_usdc(None)

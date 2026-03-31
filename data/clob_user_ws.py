@@ -29,6 +29,7 @@ CLOB_USER_WS_URL = os.getenv(
     "CLOB_USER_WS_URL",
     "wss://ws-subscriptions-clob.polymarket.com/ws/user",
 )
+_CLOB_USER_WS_OPEN_TIMEOUT = float(os.getenv("CLOB_USER_WS_OPEN_TIMEOUT_SEC", "30"))
 
 
 class OrderState(Enum):
@@ -165,6 +166,22 @@ class ClobUserOrderCache:
         self._state_transitions: dict[tuple[OrderState, OrderState], int] = defaultdict(int)
         self._last_metrics_log = time.time()
         self._metrics_log_interval = 60.0  # Log metrics every 60 seconds
+        self._max_order_entries = max(1, int(os.getenv("CLOB_USER_WS_MAX_ORDER_ENTRIES", "5000")))
+
+    def _trim_order_caches_locked(self) -> None:
+        """Evict oldest-order rows when ``_orders`` grows past ``_max_order_entries``."""
+        n = len(self._orders)
+        if n <= self._max_order_entries:
+            return
+        excess = n - self._max_order_entries
+        sorted_ids = sorted(
+            self._orders.keys(),
+            key=lambda k: float(self._orders[k].get("ts", 0.0)),
+        )
+        for oid in sorted_ids[:excess]:
+            self._orders.pop(oid, None)
+            self._state_machine.pop(oid, None)
+            self._order_events.pop(oid, None)
 
     def set_markets(self, markets: list[str]) -> None:
         """Replace condition ids (hex) for subscription filter."""
@@ -326,7 +343,8 @@ class ClobUserOrderCache:
                 ws_latency_ms if ws_latency_ms > 0 else 0.0,
                 state_info.ws_events_received,
             )
-        
+            self._trim_order_caches_locked()
+
         # Invoke callback outside the lock to avoid blocking other operations
         if self._callback is not None:
             try:
@@ -467,8 +485,8 @@ class ClobUserOrderCache:
                 await ws.send("PING")
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.debug("CLOB user WS ping loop ended: %s", exc)
 
     async def close_ws(self) -> None:
         ws = self._ws
@@ -490,6 +508,7 @@ class ClobUserOrderCache:
             try:
                 async with websockets.connect(
                     CLOB_USER_WS_URL,
+                    open_timeout=_CLOB_USER_WS_OPEN_TIMEOUT,
                     ping_interval=None,
                     ping_timeout=15,
                     close_timeout=5,

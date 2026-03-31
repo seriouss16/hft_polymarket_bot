@@ -1,0 +1,357 @@
+"""Polymarket balance cache with HTTP polling and metrics tracking.
+
+Phase 3 WebSocket Migration: Balance Updates via WebSocket (Not Available)
+
+Since Polymarket does not provide balance updates via WebSocket, this module
+implements an optimized HTTP polling approach with:
+- Configurable polling intervals
+- Cache with staleness detection
+- Metrics tracking for balance fetch latency and success rates
+- Conditional token balance caching per token_id
+
+WebSocket Limitation:
+- Polymarket User WS (wss://ws-subscriptions-clob.polymarket.com/ws/user) only
+  provides order and trade events, not balance updates
+- No separate balance WebSocket endpoint exists
+- Balance must be fetched via REST API (GET /balance-allowance)
+
+Reference: https://docs.polymarket.com/developers/CLOB/websocket/wss-auth
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+
+@dataclass
+class BalanceCacheEntry:
+    """Cached balance entry with staleness tracking."""
+    value: float
+    timestamp: float
+    token_id: Optional[str] = None  # For conditional token balances
+    
+    @property
+    def age_sec(self) -> float:
+        """Return cache age in seconds."""
+        return time.time() - self.timestamp
+
+    def is_fresh(self, max_age_sec: float) -> bool:
+        """Return True if cache entry is within ``max_age_sec``."""
+        return self.age_sec <= max_age_sec
+
+
+@dataclass
+class BalanceMetrics:
+    """Metrics for balance fetch operations."""
+    fetches_total: int = 0
+    cache_hits: int = 0
+    http_fallbacks: int = 0
+    errors: int = 0
+    latency_samples: list[float] = field(default_factory=list)
+    max_samples: int = 1000
+    
+    @property
+    def hit_rate(self) -> float:
+        """Return cache hit rate as percentage."""
+        if self.fetches_total == 0:
+            return 0.0
+        return (self.cache_hits / self.fetches_total) * 100.0
+    
+    @property
+    def avg_latency_ms(self) -> float:
+        """Return average fetch latency in milliseconds."""
+        if not self.latency_samples:
+            return 0.0
+        return sum(self.latency_samples) / len(self.latency_samples)
+    
+    @property
+    def min_latency_ms(self) -> float:
+        """Return minimum fetch latency in milliseconds."""
+        if not self.latency_samples:
+            return 0.0
+        return min(self.latency_samples)
+    
+    @property
+    def max_latency_ms(self) -> float:
+        """Return maximum fetch latency in milliseconds."""
+        if not self.latency_samples:
+            return 0.0
+        return max(self.latency_samples)
+    
+    def record_latency(self, latency_ms: float) -> None:
+        """Record a latency sample, maintaining max_samples limit."""
+        self.latency_samples.append(latency_ms)
+        if len(self.latency_samples) > self.max_samples:
+            self.latency_samples.pop(0)
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Return metrics as dictionary."""
+        return {
+            "fetches_total": self.fetches_total,
+            "cache_hits": self.cache_hits,
+            "http_fallbacks": self.http_fallbacks,
+            "errors": self.errors,
+            "hit_rate_pct": round(self.hit_rate, 2),
+            "avg_latency_ms": round(self.avg_latency_ms, 2),
+            "min_latency_ms": round(self.min_latency_ms, 2),
+            "max_latency_ms": round(self.max_latency_ms, 2),
+            "latency_samples": len(self.latency_samples),
+        }
+
+
+class BalanceCache:
+    """Thread-safe balance cache with HTTP polling and metrics.
+    
+    Since Polymarket does not provide balance updates via WebSocket,
+    this cache implements optimized HTTP polling with configurable
+    staleness thresholds and comprehensive metrics tracking.
+    """
+    
+    def __init__(
+        self,
+        balance_fetcher: Callable[[], Optional[float]],
+        conditional_balance_fetcher: Callable[[str], Optional[float]],
+        max_age_sec: float = 5.0,
+        conditional_max_age_sec: float = 10.0,
+    ) -> None:
+        """Initialize balance cache.
+        
+        Args:
+            balance_fetcher: Callable that fetches USDC balance (returns None on error)
+            conditional_balance_fetcher: Callable that fetches conditional token balance
+                by token_id (returns None on error)
+            max_age_sec: Maximum cache age for USDC balance (default 5s)
+            conditional_max_age_sec: Maximum cache age for conditional token balances
+                (default 10s, longer due to slower chain confirmation)
+        """
+        self._fetcher = balance_fetcher
+        self._conditional_fetcher = conditional_balance_fetcher
+        self._max_age_sec = max_age_sec
+        self._conditional_max_age_sec = conditional_max_age_sec
+        
+        self._usdc_cache: Optional[BalanceCacheEntry] = None
+        self._conditional_caches: dict[str, BalanceCacheEntry] = {}
+        self._max_conditional_entries = max(
+            1, int(os.getenv("BALANCE_CACHE_MAX_CONDITIONAL_ENTRIES", "256"))
+        )
+        self._lock = threading.Lock()
+
+        # Metrics
+        self._metrics = BalanceMetrics()
+        self._last_log_time = time.time()
+        self._log_interval = 60.0  # Log metrics every 60 seconds
+
+    def _trim_conditional_locked(self) -> None:
+        """Evict oldest conditional entries when over ``_max_conditional_entries``."""
+        n = len(self._conditional_caches)
+        if n <= self._max_conditional_entries:
+            return
+        excess = n - self._max_conditional_entries
+        oldest = sorted(
+            self._conditional_caches.items(),
+            key=lambda kv: kv[1].timestamp,
+        )
+        for tid, _ in oldest[:excess]:
+            del self._conditional_caches[tid]
+
+    def get_usdc_balance(self) -> Optional[float]:
+        """Get USDC balance from cache or fetch if stale.
+        
+        Returns:
+            USDC balance in USD, or None if fetch fails
+        """
+        start_time = time.perf_counter()
+        with self._lock:
+            self._metrics.fetches_total += 1
+
+            if self._usdc_cache is not None and self._usdc_cache.is_fresh(self._max_age_sec):
+                self._metrics.cache_hits += 1
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self._metrics.record_latency(latency_ms)
+                return self._usdc_cache.value
+
+            try:
+                balance = self._fetcher()
+                if balance is not None:
+                    self._usdc_cache = BalanceCacheEntry(
+                        value=balance,
+                        timestamp=time.time(),
+                    )
+                    self._metrics.http_fallbacks += 1
+                    logging.debug(
+                        "[BALANCE] USDC balance fetched: %.4f USD (cache_age=%.3fs)",
+                        balance, self._usdc_cache.age_sec,
+                    )
+                else:
+                    self._metrics.errors += 1
+                    logging.warning("[BALANCE] USDC balance fetch returned None")
+            except Exception as exc:
+                self._metrics.errors += 1
+                logging.warning("[BALANCE] USDC balance fetch failed: %s", exc)
+                balance = None
+
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self._metrics.record_latency(latency_ms)
+            return balance
+    
+    def get_conditional_balance(self, token_id: str) -> Optional[float]:
+        """Get conditional token balance from cache or fetch if stale.
+        
+        Args:
+            token_id: The conditional token ID to fetch balance for
+            
+        Returns:
+            Conditional token balance in shares, or None if fetch fails
+        """
+        start_time = time.perf_counter()
+        with self._lock:
+            self._metrics.fetches_total += 1
+
+            cache_entry = self._conditional_caches.get(token_id)
+            if cache_entry is not None and cache_entry.is_fresh(self._conditional_max_age_sec):
+                self._metrics.cache_hits += 1
+                latency_ms = (time.perf_counter() - start_time) * 1000
+                self._metrics.record_latency(latency_ms)
+                return cache_entry.value
+
+            try:
+                balance = self._conditional_fetcher(token_id)
+                if balance is not None:
+                    self._conditional_caches[token_id] = BalanceCacheEntry(
+                        value=balance,
+                        timestamp=time.time(),
+                        token_id=token_id,
+                    )
+                    self._trim_conditional_locked()
+                    self._metrics.http_fallbacks += 1
+                    logging.debug(
+                        "[BALANCE] Conditional balance fetched for %s: %.4f shares (cache_age=%.3fs)",
+                        token_id[:20],
+                        balance,
+                        self._conditional_caches[token_id].age_sec,
+                    )
+                else:
+                    self._metrics.errors += 1
+                    logging.warning(
+                        "[BALANCE] Conditional balance fetch returned None for %s",
+                        token_id[:20],
+                    )
+            except Exception as exc:
+                self._metrics.errors += 1
+                logging.warning(
+                    "[BALANCE] Conditional balance fetch failed for %s: %s",
+                    token_id[:20],
+                    exc,
+                )
+                balance = None
+
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            self._metrics.record_latency(latency_ms)
+            return balance
+    
+    def clear_conditional_cache(self, token_id: str) -> None:
+        """Clear conditional balance cache for a specific token.
+        
+        Args:
+            token_id: The conditional token ID to clear
+        """
+        with self._lock:
+            if token_id in self._conditional_caches:
+                del self._conditional_caches[token_id]
+                logging.debug("[BALANCE] Cleared conditional cache for %s", token_id[:20])
+
+    def clear_all(self) -> None:
+        """Clear all cached balances."""
+        with self._lock:
+            self._usdc_cache = None
+            self._conditional_caches.clear()
+        logging.debug("[BALANCE] Cleared all balance caches")
+    
+    def get_metrics(self) -> dict[str, Any]:
+        """Get current balance cache metrics."""
+        with self._lock:
+            metrics = self._metrics.to_dict()
+            metrics["usdc_cache_age_sec"] = (
+                self._usdc_cache.age_sec if self._usdc_cache else None
+            )
+            metrics["conditional_cache_count"] = len(self._conditional_caches)
+            return metrics
+    
+    def log_metrics(self, reason: str = "periodic") -> None:
+        """Log current metrics if enough time has passed since last log."""
+        now = time.time()
+        with self._lock:
+            if now - self._last_log_time < self._log_interval:
+                return
+            metrics = self._metrics.to_dict()
+            metrics["usdc_cache_age_sec"] = (
+                self._usdc_cache.age_sec if self._usdc_cache else None
+            )
+            metrics["conditional_cache_count"] = len(self._conditional_caches)
+            self._last_log_time = now
+    
+        logging.info(
+            "[BALANCE_METRICS] %s: fetches=%d hits=%d fallbacks=%d errors=%d "
+            "hit_rate=%.1f%% avg_latency=%.2fms min=%.2fms max=%.2fms "
+            "usdc_age=%.2fs cond_cache_count=%d",
+            reason,
+            metrics["fetches_total"],
+            metrics["cache_hits"],
+            metrics["http_fallbacks"],
+            metrics["errors"],
+            metrics["hit_rate_pct"],
+            metrics["avg_latency_ms"],
+            metrics["min_latency_ms"],
+            metrics["max_latency_ms"],
+            metrics["usdc_cache_age_sec"] or 0.0,
+            metrics["conditional_cache_count"],
+        )
+
+    def reset_metrics(self) -> None:
+        """Reset all metrics counters."""
+        with self._lock:
+            self._metrics = BalanceMetrics()
+            self._last_log_time = time.time()
+
+
+class BalanceCacheProvider:
+    """Provider for creating and managing balance caches.
+    
+    This class handles the integration with LiveExecutionEngine
+    and provides a clean interface for balance caching.
+    """
+    
+    @staticmethod
+    def create_from_engine(
+        live_engine: Any,
+        max_age_sec: float = 5.0,
+        conditional_max_age_sec: float = 10.0,
+    ) -> BalanceCache:
+        """Create a BalanceCache from a LiveExecutionEngine instance.
+        
+        Args:
+            live_engine: LiveExecutionEngine instance with fetch_usdc_balance
+                and fetch_conditional_balance methods
+            max_age_sec: Maximum cache age for USDC balance
+            conditional_max_age_sec: Maximum cache age for conditional balances
+            
+        Returns:
+            Configured BalanceCache instance
+        """
+        def usdc_fetcher() -> Optional[float]:
+            return live_engine.fetch_usdc_balance()
+        
+        def conditional_fetcher(token_id: str) -> Optional[float]:
+            return live_engine.fetch_conditional_balance(token_id)
+        
+        return BalanceCache(
+            balance_fetcher=usdc_fetcher,
+            conditional_balance_fetcher=conditional_fetcher,
+            max_age_sec=max_age_sec,
+            conditional_max_age_sec=conditional_max_age_sec,
+        )

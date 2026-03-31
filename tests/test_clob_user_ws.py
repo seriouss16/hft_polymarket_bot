@@ -66,3 +66,13 @@ def test_trade_without_event_type(cache: ClobUserOrderCache):
     st, filled = cache.get_order_fill("0xt")
     assert st == "matched"
     assert abs(filled - 2.0) < 1e-9
+
+
+def test_order_cache_bounded(monkeypatch):
+    monkeypatch.setenv("CLOB_USER_WS_ENABLED", "0")
+    monkeypatch.setenv("CLOB_USER_WS_MAX_ORDER_ENTRIES", "3")
+    c = ClobUserOrderCache(lambda: _Creds())
+    for i in range(5):
+        c._touch(f"0x{i:04x}", "live", 0.0)
+    assert len(c._orders) == 3
+    assert len(c._state_machine) == 3
