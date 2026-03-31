@@ -31,6 +31,7 @@ _LEGACY_HEADER = (
 def test_journal_fieldnames_include_row_kind_and_exit_rsi_raw():
     assert "row_kind" in JOURNAL_FIELDNAMES
     assert "exit_rsi_raw" in JOURNAL_FIELDNAMES
+    assert "entry_adx" in JOURNAL_FIELDNAMES
     assert JOURNAL_FIELDNAMES.index("exit_rsi_raw") == JOURNAL_FIELDNAMES.index("exit_rsi") + 1
 
 

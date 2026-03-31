@@ -11,6 +11,66 @@ import numpy as np
 from core.engine_price import price_array_for_rsi
 
 
+def micro_trend_metrics(
+    edge_window: Any,
+    *,
+    now: float,
+    window_sec: float,
+) -> dict[str, Any]:
+    """Short-window edge dynamics vs oracle (poly mid): slope, convergence, ETA to cross.
+
+    ``edge_window`` holds ``(timestamp, edge)`` with edge = fast - oracle. Slope is OLS
+    on samples in ``[now - window_sec, now]`` (edge points per second). ``toward_target``
+    is True when edge is moving toward zero (possible cross of the target line).
+    """
+    empty = {
+        "micro_slope": None,
+        "micro_strength": None,
+        "toward_target": None,
+        "cross_eta_sec": None,
+    }
+    if not edge_window or len(edge_window) < 2:
+        return empty
+    t_cut = float(now) - float(window_sec)
+    pts = [(float(t), float(e)) for t, e in edge_window if t >= t_cut]
+    if len(pts) < 2:
+        tail = list(edge_window)[-min(8, len(edge_window)) :]
+        pts = [(float(t), float(e)) for t, e in tail]
+    if len(pts) < 2:
+        return empty
+    t_arr = np.array([p[0] for p in pts], dtype=np.float64)
+    e_arr = np.array([p[1] for p in pts], dtype=np.float64)
+    t_rel = t_arr - t_arr[0]
+    n = int(t_rel.size)
+    if n < 2:
+        return empty
+    sum_t = float(t_rel.sum())
+    sum_e = float(e_arr.sum())
+    sum_t2 = float((t_rel * t_rel).sum())
+    sum_te = float((t_rel * e_arr).sum())
+    denom = n * sum_t2 - sum_t * sum_t
+    if abs(denom) < 1e-24:
+        slope = 0.0
+    else:
+        slope = float((n * sum_te - sum_t * sum_e) / denom)
+    edge_last = float(pts[-1][1])
+    eps = 1e-9
+    if abs(edge_last) <= eps:
+        toward = True
+    else:
+        toward = bool((edge_last * slope) < -eps)
+    eta: float | None = None
+    if toward and abs(slope) > eps and abs(edge_last) > eps:
+        eta = abs(edge_last) / abs(slope)
+        eta = min(float(eta), 3600.0)
+    return {
+        "micro_slope": float(slope),
+        "micro_strength": float(abs(slope)),
+        "toward_target": bool(toward),
+        "cross_eta_sec": float(eta) if eta is not None else None,
+    }
+
+
 def update_trend(eng: Any, fast_price, poly_mid):
     """Track crossing of target price and estimate trend speed/depth (mutates ``eng``)."""
     now = time.time()

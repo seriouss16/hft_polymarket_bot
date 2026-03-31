@@ -7,6 +7,69 @@ import math
 import numpy as np
 
 
+def compute_adx_last(prices, period: int = 14) -> float:
+    """Wilder ADX (0–100) at the last bar of ``prices`` (close-only mid series).
+
+    Builds synthetic high/low from adjacent closes (bar ``i``: high = max(c[i-1], c[i]),
+    low = min(c[i-1], c[i])). Returns NaN when history is too short for a stable ADX.
+    """
+    arr = np.asarray(prices, dtype=np.float64)
+    n = int(arr.size)
+    if n < 2 * period + 1:
+        return float("nan")
+    c = arr
+    high = np.empty(n)
+    low = np.empty(n)
+    high[0] = low[0] = c[0]
+    for i in range(1, n):
+        high[i] = max(float(c[i - 1]), float(c[i]))
+        low[i] = min(float(c[i - 1]), float(c[i]))
+    tr: list[float] = []
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    for i in range(1, n):
+        tr_ = max(
+            high[i] - low[i],
+            abs(high[i] - c[i - 1]),
+            abs(low[i] - c[i - 1]),
+        )
+        up_move = high[i] - high[i - 1]
+        down_move = low[i - 1] - low[i]
+        pdm = float(up_move) if up_move > down_move and up_move > 0 else 0.0
+        mdm = float(down_move) if down_move > up_move and down_move > 0 else 0.0
+        tr.append(tr_)
+        plus_dm.append(pdm)
+        minus_dm.append(mdm)
+    m = len(tr)
+
+    def _wilder_smooth(x: list[float]) -> list[float]:
+        out = [0.0] * m
+        out[period - 1] = float(sum(x[:period]))
+        for i in range(period, m):
+            out[i] = out[i - 1] - out[i - 1] / float(period) + x[i]
+        return out
+
+    atr = _wilder_smooth(tr)
+    pdm_s = _wilder_smooth(plus_dm)
+    mdm_s = _wilder_smooth(minus_dm)
+    eps = 1e-12
+    dx = [0.0] * m
+    for i in range(period - 1, m):
+        ai = atr[i]
+        if ai <= eps:
+            continue
+        pdi = 100.0 * pdm_s[i] / ai
+        mdi = 100.0 * mdm_s[i] / ai
+        denom = pdi + mdi
+        if denom > eps:
+            dx[i] = 100.0 * abs(pdi - mdi) / denom
+    adx_s = _wilder_smooth(dx)
+    val = float(adx_s[-1])
+    if not math.isfinite(val):
+        return float("nan")
+    return float(np.clip(val, 0.0, 100.0))
+
+
 def compute_rsi(prices, period=14):
     """Return Wilder-style RSI for the last point of prices."""
     if len(prices) < period + 1:

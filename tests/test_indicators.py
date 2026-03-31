@@ -7,6 +7,7 @@ import unittest
 import numpy as np
 
 from ml.indicators import (
+    compute_adx_last,
     compute_macd_last,
     compute_reaction_score,
     compute_rsi,
@@ -68,6 +69,20 @@ class TestReactionAndMacd(unittest.TestCase):
         self.assertTrue(np.isfinite(r))
         self.assertGreaterEqual(r, 0.0)
         self.assertLessEqual(r, 100.0)
+
+    def test_adx_short_series_returns_nan(self):
+        """ADX needs enough bars; short history yields NaN."""
+        p = np.linspace(80000.0, 80100.0, 10)
+        a = compute_adx_last(p, period=14)
+        self.assertFalse(np.isfinite(a))
+
+    def test_adx_on_strong_uptrend_is_finite_and_positive(self):
+        """ADX is in 0–100 on a long synthetic uptrend."""
+        p = np.linspace(80000.0, 82000.0, 120)
+        a = float(compute_adx_last(p, period=14))
+        self.assertTrue(np.isfinite(a))
+        self.assertGreaterEqual(a, 0.0)
+        self.assertLessEqual(a, 100.0)
 
 
 if __name__ == "__main__":

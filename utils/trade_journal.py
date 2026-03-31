@@ -28,6 +28,7 @@ JOURNAL_FIELDNAMES = [
     "entry_trend",
     "entry_speed",
     "entry_depth",
+    "entry_adx",
     "entry_imbalance",
     "latency_ms",
     "pnl",
@@ -73,7 +74,7 @@ def migrate_journal_schema_if_needed(path: Path, target_fields: list[str]) -> No
     if not first.strip():
         return
     header_keys = next(csv.reader([first.strip()]))
-    if all(k in header_keys for k in ("row_kind", "exit_rsi_raw")):
+    if set(target_fields).issubset(set(header_keys)):
         return
     rows: list[dict[str, str]] = []
     with path.open("r", encoding="utf-8", newline="") as f:
@@ -157,6 +158,7 @@ class JournalEntryComposer:
             "entry_trend": decision.get("entry_trend"),
             "entry_speed": decision.get("entry_speed"),
             "entry_depth": decision.get("entry_depth"),
+            "entry_adx": decision.get("entry_adx"),
             "entry_imbalance": decision.get("entry_imbalance"),
             "latency_ms": decision.get("latency_ms"),
             "pnl": live_pnl,
@@ -207,6 +209,7 @@ class JournalEntryComposer:
             "entry_trend": decision.get("entry_trend"),
             "entry_speed": decision.get("entry_speed"),
             "entry_depth": decision.get("entry_depth"),
+            "entry_adx": decision.get("entry_adx"),
             "entry_imbalance": decision.get("entry_imbalance"),
             "latency_ms": decision.get("latency_ms"),
             "pnl": "",

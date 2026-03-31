@@ -705,6 +705,19 @@ async def main():
                 if (now - last_pulse_time) >= pulse_log_period:
                     diff = fast_price - poly_btc
                     trend = strategy_hub.get_trend_state()
+                    _pulse_adx = trend.get("adx")
+                    _pulse_adx_s = f"{_pulse_adx:.1f}" if _pulse_adx is not None else "n/a"
+                    _pm = trend.get("micro_slope")
+                    _pm_s = f"{_pm:+.2f}/s" if _pm is not None else "n/a"
+                    _tt = trend.get("toward_target")
+                    _tt_s = (
+                        "Y"
+                        if _tt is True
+                        else ("N" if _tt is False else "n/a")
+                    )
+                    _eta = trend.get("cross_eta_sec")
+                    _eta_s = f"{_eta:.1f}s" if _eta is not None else "n/a"
+                    _stale_s = "1" if trend.get("trend_stale") else "0"
                     profile_suffix = ""
                     if os.getenv("HFT_LOG_MARKET_PROFILE") == "1":
                         _gp = getattr(
@@ -760,7 +773,9 @@ async def main():
                         f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
                         f"PolyRTDS: {poly_btc:.2f} | "
                         f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
-                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} a={trend['age']:.1f}s | "
+                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} "
+                        f"a={trend['age']:.1f}s adx={_pulse_adx_s} "
+                        f"micro={_pm_s} tt={_tt_s} eta={_eta_s} stale={_stale_s} | "
                         f"Book: {book_focus} | "
                         f"{_rsi_line} | "
                         f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "

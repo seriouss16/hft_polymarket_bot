@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from ml.indicators import (
+    compute_adx_last,
     compute_ema_last,
     compute_macd_last,
     compute_reaction_score,
@@ -54,6 +55,7 @@ from core.engine_sizing import (
     update_trailing_state,
 )
 from core.engine_trend import dynamic_edge_threshold as compute_dynamic_edge_threshold
+from core.engine_trend import micro_trend_metrics
 from core.engine_trend import update_trend as apply_update_trend
 
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
@@ -170,6 +172,10 @@ class HFTEngine:
 
         # --- RSI логика ---
         self.rsi_period = 14
+        self.adx_period = int(os.getenv("HFT_ADX_PERIOD", "14") or "14")
+        self._last_adx = float("nan")
+        self.micro_trend_window_sec = _env_float_default("HFT_MICRO_TREND_WINDOW_SEC", 2.0)
+        self.micro_trend_stale_sec = _env_float_default("HFT_MICRO_TREND_STALE_SEC", 14.0)
         self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN"))
         self._last_rsi = 50.0
         self.rsi_entry_up_low = float(
@@ -832,6 +838,7 @@ class HFTEngine:
         self._book_stall_ticks = 0
         self._speed_samples.clear()
         self._zscore_samples.clear()
+        self._last_adx = float("nan")
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
@@ -905,6 +912,7 @@ class HFTEngine:
             "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
             "entry_speed": self.entry_context.get("entry_speed", 0.0),
             "entry_depth": self.entry_context.get("entry_depth", 0.0),
+            "entry_adx": self.entry_context.get("entry_adx"),
             "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
             "latency_ms": self.entry_context.get("latency_ms", 0.0),
             "pnl": float(ce.get("pnl") or 0.0),
@@ -1181,6 +1189,7 @@ class HFTEngine:
 
     def get_trend_state(self):
         """Expose latest trend analytics for debug output."""
+        now = time.time()
         speed = 0.0
         edge = 0.0
         if self.edge_window:
@@ -1189,14 +1198,29 @@ class HFTEngine:
             t0, e0 = self.edge_window[-2]
             t1, e1 = self.edge_window[-1]
             speed = (e1 - e0) / max(t1 - t0, 1e-6)
-        age = time.time() - self.trend_since_ts if self.trend_since_ts else 0.0
-        return {
+        age = now - self.trend_since_ts if self.trend_since_ts else 0.0
+        adx_raw = getattr(self, "_last_adx", float("nan"))
+        try:
+            adx_f = float(adx_raw)
+        except (TypeError, ValueError):
+            adx_f = float("nan")
+        micro = micro_trend_metrics(
+            self.edge_window,
+            now=now,
+            window_sec=self.micro_trend_window_sec,
+        )
+        trend_stale = bool(age > self.micro_trend_stale_sec)
+        out = {
             "trend": self.trend_dir,
             "edge": edge,
             "speed": speed,
             "depth": self.trend_depth,
             "age": age,
+            "adx": adx_f if np.isfinite(adx_f) else None,
+            "trend_stale": trend_stale,
         }
+        out.update(micro)
+        return out
 
     async def process_tick(
         self,
@@ -1219,6 +1243,9 @@ class HFTEngine:
             return
         _ = lstm_forecast
 
+        px = price_array_for_rsi(price_history, self.rsi_price_len)
+        self._last_adx = float(compute_adx_last(px, period=self.adx_period))
+
         if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
             self._diag_inc("entry_block_regime")
             _now = time.time()
@@ -1232,7 +1259,6 @@ class HFTEngine:
                 self._last_regime_skip_log_ts = _now
             return None
 
-        px = price_array_for_rsi(price_history, self.rsi_price_len)
         raw_rsi = float(compute_rsi(px, period=self.rsi_period))
         self._last_rsi_raw = raw_rsi
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
@@ -1543,6 +1569,7 @@ class HFTEngine:
                     "entry_trend": trend["trend"],
                     "entry_speed": trend["speed"],
                     "entry_depth": trend["depth"],
+                    "entry_adx": trend.get("adx"),
                     "entry_imbalance": imbalance,
                     "latency_ms": latency_ms,
                     "skew_ms": float(skew_ms),
@@ -1628,6 +1655,7 @@ class HFTEngine:
                     "entry_trend": trend["trend"],
                     "entry_speed": trend["speed"],
                     "entry_depth": trend["depth"],
+                    "entry_adx": trend.get("adx"),
                     "entry_imbalance": imbalance,
                     "latency_ms": latency_ms,
                     "skew_ms": float(skew_ms),
@@ -1923,6 +1951,7 @@ class HFTEngine:
                     "entry_trend": self.entry_context.get("entry_trend", "FLAT"),
                     "entry_speed": self.entry_context.get("entry_speed", 0.0),
                     "entry_depth": self.entry_context.get("entry_depth", 0.0),
+                    "entry_adx": self.entry_context.get("entry_adx"),
                     "entry_imbalance": self.entry_context.get("entry_imbalance", 0.0),
                     "latency_ms": self.entry_context.get("latency_ms", 0.0),
                     "pnl": float(ce.get("pnl") or 0.0),
