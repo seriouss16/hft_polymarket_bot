@@ -15,11 +15,13 @@ from pathlib import Path
 from utils.env_config import req_float, req_int, req_str
 from utils.env_merge import merge_env_file
 
-# Ensure config/runtime.env (+ sim_slippage) is merged before reading LIVE_* (tests
-# import live_engine without loading bot.py first).
+# Ensure layered env matches :func:`bot_runtime.load_runtime_env` (tests may import
+# live_engine without loading bot.py first). Must end with ``hft_bot/.env`` so keys
+# like ``LIVE_MODE`` set in .env are not wiped by a second merge of runtime.env.
 _ROOT = Path(__file__).resolve().parent.parent
 merge_env_file(_ROOT / "config" / "sim_slippage.env", overwrite=False)
 merge_env_file(_ROOT / "config" / "runtime.env", overwrite=True)
+merge_env_file(_ROOT / ".env", overwrite=True)
 
 CLOB_BOOK_HTTP = req_str("CLOB_BOOK_HTTP")
 _CLOB_BOOK_HTTP_TIMEOUT = req_float("LIVE_CLOB_BOOK_HTTP_TIMEOUT")
