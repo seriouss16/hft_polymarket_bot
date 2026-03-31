@@ -595,7 +595,7 @@ async def main():
                 if fast_price and (forecast <= 0 or abs(forecast - fast_price) > 0.2 * fast_price):
                     forecast = float(fast_price)
 
-                aggregator.add_history(fast_price)
+                # Z-score from raw CEX ticks (see FastPriceAggregator.get_zscore), not loop-sampled fast.
                 zscore = aggregator.get_zscore()
                 _ft = aggregator.feed_timing(float(poly_book.book.get("ts", 0.0)))
                 latency_ms = float(_ft["staleness_ms"])

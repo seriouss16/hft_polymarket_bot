@@ -23,7 +23,7 @@ class FastPriceAggregator:
             "coinbase": deque(maxlen=200),
         }
         self.history = deque(maxlen=500)
-        self.zscore_window = 96
+        self.zscore_window = int(os.getenv("HFT_ZSCORE_WINDOW", "96") or "96")
 
     @staticmethod
     def tail_last_n(seq, n: int) -> list[float]:
@@ -117,17 +117,24 @@ class FastPriceAggregator:
         return fb, fa
 
     def add_history(self, price):
-        """Append a fast-price sample for z-score calculations."""
+        """Append a loop-sampled price (legacy buffer; z-score uses ``get_primary_history`` ticks)."""
         if price is None:
             return
         self.history.append(float(price))
 
     def get_zscore(self):
-        """Return rolling z-score using the last ``zscore_window`` fast-price samples."""
-        if len(self.history) < 50:
+        """Rolling z-score on the same **exchange tick** series as ``get_primary_history()`` (CB→BN).
+
+        Uses the last ``zscore_window`` ticks (``HFT_ZSCORE_WINDOW``, default 96), not
+        ``add_history``/loop-sampled fast price — so Z aligns with ADX/RSI tick buffers.
+        """
+        primary = self.get_primary_history()
+        if len(primary) < 50:
             return 0.0
-        window = self.tail_last_n(self.history, self.zscore_window)
+        window = self.tail_last_n(primary, self.zscore_window)
         arr = np.asarray(window, dtype=np.float64)
+        if arr.size < 2:
+            return 0.0
         std = float(arr.std()) + 1e-9
         return float((arr[-1] - arr.mean()) / std)
 
