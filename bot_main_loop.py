@@ -1128,6 +1128,7 @@ async def main():
                                         if _apply_cd and _buy_skip in (
                                             "stale_no_fill",
                                             "emergency_buy_failed",
+                                            "strict_chain_timeout",
                                         ):
                                             if os.getenv(
                                                 "LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL", "0"

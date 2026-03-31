@@ -444,10 +444,11 @@ After a failed live BUY (order not placed or rejected), entries are blocked for
 `LIVE_SKIP_COOLDOWN_SEC` (30 s) to prevent retry spam.
 
 **Exceptions (no cooldown by default):** if the BUY never filled because the GTC
-order went **stale** (`LIVE_ORDER_STALE_SEC`) and/or **emergency** placement failed
-(liquidity/timing), the next tick can retry immediately so the bot does not sit idle
-for 30 s. Set `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1` to apply the same cooldown
-in those cases.
+order went **stale** (`LIVE_ORDER_STALE_SEC`), **emergency** placement failed
+(liquidity/timing), or **strict chain** timed out (`LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=0`
+and on-chain balance never matched the CLOB fill in time), the next tick can retry
+immediately so the bot does not sit idle for 30 s. Set `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1`
+to apply the same cooldown in those cases.
 
 ---
 
@@ -519,7 +520,7 @@ in those cases.
 | `POLY_CLOB_MIN_SHARES` | 5 | Polymarket minimum GTC order size in shares |
 | `POLY_SIGNATURE_TYPE` | 2 | Wallet signature type (2 = EOA with proxy) |
 | `LIVE_SKIP_COOLDOWN_SEC` | 30 | Cooldown after a failed live BUY |
-| `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL` | 0 | If `1`, also apply cooldown on stale/no-fill and emergency BUY failures |
+| `LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL` | 0 | If `1`, also apply cooldown on stale/no-fill, emergency BUY failures, and strict-chain timeout |
 | `LIVE_EMERGENCY_BUY_BALANCE_MARGIN` | 0.002 | Fraction of USDC balance reserved on emergency BUY (avoids micro rounding rejections) |
 
 **Latency tuning (optional):** Lower `LIVE_ORDER_FILL_POLL_SEC` for faster fill detection (more API load). When `HFT_SLOT_POLL_SEC=0`, slot/market checks are still capped by `HFT_MIN_SLOT_POLL_SEC` (default 1 s) to avoid hammering Gamma—reduce for quicker slot-boundary reaction. `LIVE_BALANCE_CONFIRM_DELAYS_SEC` overrides the default backoff after a CLOB-reported BUY when confirming on-chain balance (comma-separated seconds; shorter = faster but higher false-abort risk if RPC lags). `LIVE_HEARTBEAT_INTERVAL_SEC` defaults to 5 s; keep ≤15 s (Polymarket requirement).
@@ -528,6 +529,11 @@ in those cases.
 |---|---|---|
 | `HFT_MIN_SLOT_POLL_SEC` | 1.0 | Min seconds between slot/market resolution checks when `HFT_SLOT_POLL_SEC=0` |
 | `LIVE_BALANCE_CONFIRM_DELAYS_SEC` | `0,0.15,0.35,0.6,1,1.5` | On-chain balance retry delays after BUY (comma-separated) |
+| `LIVE_IMMEDIATE_FILL_CHAIN_WAIT_SEC` | 0.45 | Extra sleep before first balance poll when the BUY was an immediate match (helps RPC lag) |
+| `LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE` | 1 | If `0` (strict), require on-chain balance to match CLOB fill before opening position; otherwise trust CLOB after retries |
+| `LIVE_STRICT_CHAIN_EXTRA_WAIT_SEC` | 4 | In strict mode only: sleep before extra on-chain polls if the first delay list exhausted |
+| `LIVE_STRICT_CHAIN_EXTRA_POLLS` | 8 | In strict mode only: additional balance polls after the extra wait |
+| `LIVE_STRICT_CHAIN_EXTRA_POLL_GAP_SEC` | 0.75 | Gap between strict extra polls |
 | `LIVE_HEARTBEAT_INTERVAL_SEC` | 5.0 | CLOB heartbeat interval (must stay ≤15) |
 | `LIVE_BUY_PRICE_OFFSET` | 0 | Added to best ask for BUY limit (0 = at ask; positive crosses spread) |
 | `LIVE_SELL_GTC_OFFSET_FROM_BID` | −0.002 | GTC SELL limit = `best_bid + this` (negative = below bid, more marketable) |

@@ -1953,6 +1953,11 @@ class LiveExecutionEngine:
         _bal_min_frac = req_float("LIVE_BALANCE_MIN_FRAC")
         _bal_delays = _parse_csv_floats(req_str("LIVE_BALANCE_CONFIRM_DELAYS_SEC"))
         actual_bal: float | None = None
+        # Immediate CLOB matches (esp. after emergency) often land on-chain seconds later.
+        if immediate and not self.test_mode:
+            _im_wait = float(os.getenv("LIVE_IMMEDIATE_FILL_CHAIN_WAIT_SEC", "0.45"))
+            if _im_wait > 0:
+                await asyncio.sleep(_im_wait)
         for _i, _delay in enumerate(_bal_delays):
             await asyncio.sleep(_delay)
             _b = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
@@ -1976,6 +1981,33 @@ class LiveExecutionEngine:
         if actual_bal is None and self.test_mode and filled > 0:
             actual_bal = filled
 
+        # Strict mode: extra wait + polls when first backoff list is too short for RPC lag.
+        _trust_clob_pref = os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE", "1") != "0"
+        if actual_bal is None and not self.test_mode and filled > 0 and not _trust_clob_pref:
+            _xw = float(os.getenv("LIVE_STRICT_CHAIN_EXTRA_WAIT_SEC", "4"))
+            _xp = max(0, int(os.getenv("LIVE_STRICT_CHAIN_EXTRA_POLLS", "8")))
+            _xg = float(os.getenv("LIVE_STRICT_CHAIN_EXTRA_POLL_GAP_SEC", "0.75"))
+            if _xw > 0:
+                logging.info(
+                    "[LIVE] Strict mode: extra wait %.1fs before chain polls token=%s",
+                    _xw,
+                    token_id[:20],
+                )
+                await asyncio.sleep(_xw)
+            for _ep in range(_xp):
+                _b = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
+                if _b is not None and _b >= filled * _bal_min_frac:
+                    actual_bal = _b
+                    logging.info(
+                        "🟢 [LIVE] On-chain balance confirmed (strict extra poll %d): "
+                        "%.4f sh token=%s",
+                        _ep + 1,
+                        actual_bal,
+                        token_id[:20],
+                    )
+                    break
+                await asyncio.sleep(_xg)
+
         if actual_bal is not None:
             filled_clob = float(filled)
             if abs(actual_bal - filled) > 0.005:
@@ -1992,12 +2024,15 @@ class LiveExecutionEngine:
             _trust_clob = os.getenv("LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE", "1") != "0"
             if not _trust_clob:
                 logging.warning(
-                    "⚠️ [LIVE] On-chain balance never matched CLOB fill after %d retries "
-                    "— not opening position (strict mode). "
+                    "⚠️ [LIVE] On-chain balance never matched CLOB fill after backoff + "
+                    "strict extra polls — not opening position (strict mode). "
                     "CLOB reported %.4f sh token=%s. "
-                    "Unset LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE or set to 1 to trust CLOB.",
-                    len(_bal_delays), filled, token_id[:20],
+                    "Set LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=1 or tune "
+                    "LIVE_STRICT_CHAIN_EXTRA_* / LIVE_BALANCE_CONFIRM_DELAYS_SEC.",
+                    filled,
+                    token_id[:20],
                 )
+                self._last_buy_skip_reason = "strict_chain_timeout"
                 self._purge_buy_orders_for_token(token_id)
                 return _SKIP
             logging.warning(
