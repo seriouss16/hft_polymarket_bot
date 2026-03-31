@@ -10,9 +10,14 @@ from utils.env_merge import merge_env_file
 
 
 def load_runtime_env() -> None:
-    """Load layered runtime configuration files (runtime.env then .env overrides)."""
+    """Load layered runtime configuration files (defaults, then runtime, then .env).
+
+    ``sim_slippage.env`` is merged first so SIM slippage defaults apply when
+    ``runtime.env`` omits those keys; ``runtime.env`` then overwrites (see merge_env_file).
+    """
     root = Path(__file__).resolve().parent
-    merge_env_file(root / "config" / "runtime.env", overwrite=False)
+    merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
+    merge_env_file(root / "config" / "runtime.env", overwrite=True)
     merge_env_file(root / ".env", overwrite=True)
 
 

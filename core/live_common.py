@@ -15,10 +15,11 @@ from pathlib import Path
 from utils.env_config import req_float, req_int, req_str
 from utils.env_merge import merge_env_file
 
-# Ensure config/runtime.env is merged before reading LIVE_* (tests import live_engine
-# without loading bot.py first).
+# Ensure config/runtime.env (+ sim_slippage) is merged before reading LIVE_* (tests
+# import live_engine without loading bot.py first).
 _ROOT = Path(__file__).resolve().parent.parent
-merge_env_file(_ROOT / "config" / "runtime.env", overwrite=False)
+merge_env_file(_ROOT / "config" / "sim_slippage.env", overwrite=False)
+merge_env_file(_ROOT / "config" / "runtime.env", overwrite=True)
 
 CLOB_BOOK_HTTP = req_str("CLOB_BOOK_HTTP")
 _CLOB_BOOK_HTTP_TIMEOUT = req_float("LIVE_CLOB_BOOK_HTTP_TIMEOUT")

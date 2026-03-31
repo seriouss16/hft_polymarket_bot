@@ -45,6 +45,25 @@ class TestSimBuy:
         expected_exec = 0.50 * (1 + t.fee_rate)
         assert t.entry_price == pytest.approx(expected_exec)
 
+    def test_buy_respects_sim_entry_slippage_sec(self, monkeypatch):
+        """HFT_SIM_ENTRY_SLIPPAGE_SEC scales exec price after fee (SIM only)."""
+        monkeypatch.setenv("HFT_SIM_ENTRY_SLIPPAGE_SEC", "1.2")
+        monkeypatch.setenv("HFT_SIM_SLIPPAGE_EXTRA_FRACTION_PER_SEC", "0.001")
+        t = make_tracker(100.0)
+        t.log_trade("BUY", 0.50, amount_usd=10.0)
+        slip = 1.0 + min(0.08, 0.001 * 1.2)
+        expected_exec = 0.50 * (1 + t.fee_rate) * slip
+        assert t.entry_price == pytest.approx(expected_exec)
+
+    def test_buy_respects_sim_slippage_extra_fraction(self, monkeypatch):
+        """HFT_SIM_SLIPPAGE_EXTRA_FRACTION overrides the seconds-based slip."""
+        monkeypatch.setenv("HFT_SIM_ENTRY_SLIPPAGE_SEC", "99")
+        monkeypatch.setenv("HFT_SIM_SLIPPAGE_EXTRA_FRACTION", "0.01")
+        t = make_tracker(100.0)
+        t.log_trade("BUY", 0.50, amount_usd=10.0)
+        expected_exec = 0.50 * (1 + t.fee_rate) * 1.01
+        assert t.entry_price == pytest.approx(expected_exec)
+
     def test_buy_returns_open_event(self):
         """log_trade(BUY) should return an OPEN dict."""
         t = make_tracker(100.0)

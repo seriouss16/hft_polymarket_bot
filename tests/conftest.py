@@ -35,6 +35,8 @@ _ENV_DEFAULTS = {
     "LIVE_MAX_SPREAD": "0.10",
     "LIVE_INVENTORY_DUST_SHARES": "0.05",
     "LIVE_SELL_GTC_OFFSET_FROM_BID": "-0.002",
+    # Deterministic SIM entry price in executor tests (shell or runtime may set analyzer suggestion).
+    "HFT_SIM_SLIPPAGE_EXTRA_FRACTION": "0",
 }
 
 
@@ -42,6 +44,7 @@ _ENV_DEFAULTS = {
 def set_env(monkeypatch):
     """Load ``config/runtime.env`` then apply minimal test overrides."""
     root = Path(__file__).resolve().parent.parent
-    merge_env_file(root / "config" / "runtime.env", overwrite=False)
+    merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
+    merge_env_file(root / "config" / "runtime.env", overwrite=True)
     for key, val in _ENV_DEFAULTS.items():
         monkeypatch.setenv(key, val)

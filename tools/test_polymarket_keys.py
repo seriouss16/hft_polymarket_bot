@@ -16,7 +16,8 @@ from utils.env_merge import merge_env_file
 def _load_runtime_env() -> None:
     """Load runtime env from hft_bot config and local .env files."""
     root = Path(__file__).resolve().parents[1]
-    merge_env_file(root / "config" / "runtime.env", overwrite=False)
+    merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
+    merge_env_file(root / "config" / "runtime.env", overwrite=True)
     merge_env_file(root / ".env", overwrite=True)
 
 

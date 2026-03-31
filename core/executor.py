@@ -41,6 +41,53 @@ def mark_price_for_side(book: dict, side: Optional[str]) -> float:
     return 0.0
 
 
+def sim_entry_slippage_multiplier() -> float:
+    """Extra multiplier on SIM BUY price after fee (models delay / chase vs instant book ask).
+
+    **Option A — direct fraction (overrides seconds path):** set
+    ``HFT_SIM_SLIPPAGE_EXTRA_FRACTION`` to e.g. ``0.012`` for +1.2% worse than book
+    after fee (from measured mean (fill−ask)/ask in live logs).
+
+    **Option B — seconds knob:** set ``HFT_SIM_ENTRY_SLIPPAGE_SEC`` > 0. Effective BUY::
+
+        exec = book_px * (1 + fee) * (1 + min(cap, per_sec * sec))
+
+    Tune ``HFT_SIM_SLIPPAGE_EXTRA_FRACTION_PER_SEC`` (default 0.0005 ≈ 0.05%/s) and
+    ``HFT_SIM_SLIPPAGE_EXTRA_CAP_FRACTION`` (default 0.08). If both A and B are set,
+    **direct fraction wins** when it is strictly positive; ``0`` or unset falls through
+    to the seconds path when ``HFT_SIM_ENTRY_SLIPPAGE_SEC`` > 0.
+
+    ``HFT_SIM_ENTRY_SLIPPAGE_SEC=0`` and no positive direct fraction → multiplier 1.0.
+    """
+    direct = os.getenv("HFT_SIM_SLIPPAGE_EXTRA_FRACTION", "").strip()
+    if direct:
+        try:
+            extra = float(direct)
+            if extra > 0.0:
+                return 1.0 + extra
+        except ValueError:
+            pass
+    raw = os.getenv("HFT_SIM_ENTRY_SLIPPAGE_SEC", "").strip()
+    if not raw:
+        return 1.0
+    try:
+        sec = float(raw)
+    except ValueError:
+        return 1.0
+    if sec <= 0.0:
+        return 1.0
+    try:
+        per_sec = float(os.getenv("HFT_SIM_SLIPPAGE_EXTRA_FRACTION_PER_SEC") or "0.0005")
+    except ValueError:
+        per_sec = 0.0005
+    try:
+        cap = float(os.getenv("HFT_SIM_SLIPPAGE_EXTRA_CAP_FRACTION") or "0.08")
+    except ValueError:
+        cap = 0.08
+    extra = min(max(0.0, cap), max(0.0, per_sec) * sec)
+    return 1.0 + extra
+
+
 def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
     """Return conservative liquidation bid for the held outcome (long mark-to-market)."""
     up_bid = float(book.get("bid") or 0.0)
@@ -294,13 +341,15 @@ class PnLTracker:
                 )
                 return None
             book_px = float(price)
-            exec_price = book_px * (1 + self.fee_rate)
+            _slip = sim_entry_slippage_multiplier()
+            exec_price = book_px * (1 + self.fee_rate) * _slip
             new_shares = amount_usd / exec_price if exec_price > 0 else 0.0
             logging.debug(
                 "[LIVE] log_trade(BUY) suppressed — will record via live_open(); "
-                "paper-equivalent book=%.4f exec=%.4f sh=%.4f $=%.2f.",
+                "paper-equivalent book=%.4f exec=%.4f slip=%.4f sh=%.4f $=%.2f.",
                 book_px,
                 exec_price,
+                _slip,
                 new_shares,
                 amount_usd,
             )
@@ -334,7 +383,9 @@ class PnLTracker:
                 return None
 
             book_px = float(price)
-            exec_price = book_px * (1 + self.fee_rate)
+            slip_mult = sim_entry_slippage_multiplier()
+            exec_price = book_px * (1 + self.fee_rate) * slip_mult
+            exec_price = min(exec_price, 0.9999)
             new_shares = amount_usd / exec_price
             new_side = "DOWN" if side == "BUY_DOWN" else "UP"
             if self.inventory > 0:
@@ -357,11 +408,12 @@ class PnLTracker:
             _tag = f"{side} {_sn}".strip() if _sn else side
             _mode = "LIVE" if self.live_mode else "SIM"
             logging.info(
-                "🟢 [%s %s] book=%.4f exec=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
+                "🟢 [%s %s] book=%.4f exec=%.4f slip=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
                 _mode,
                 _tag,
                 book_px,
                 exec_price,
+                slip_mult,
                 amount_usd,
                 new_shares,
                 self.inventory,
