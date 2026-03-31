@@ -10,8 +10,13 @@ import numpy as np
 def compute_adx_last(prices, period: int = 14) -> float:
     """Wilder ADX (0–100) at the last bar of ``prices`` (close-only mid series).
 
-    Builds synthetic high/low from adjacent closes (bar ``i``: high = max(c[i-1], c[i]),
-    low = min(c[i-1], c[i])). Returns NaN when history is too short for a stable ADX.
+    Callers should pass **actual feed ticks** (e.g. last ~60 Coinbase prices for ~12–15s),
+    not a shorter RSI window — see ``HFTEngine`` ``px_adx`` vs ``px``.
+
+    Synthetic OHLC uses a **rolling** high/low over the last ``period`` closes (bar ``i``:
+    high = max(c[i-period+1:i+1]), low = min(...)).  Pairwise adjacent highs/lows inflate
+    +DM/−DM one-sided on long monotonic trends and peg ADX at ~100; rolling range fixes
+    that for close-only BTC feeds.
     """
     arr = np.asarray(prices, dtype=np.float64)
     n = int(arr.size)
@@ -20,10 +25,11 @@ def compute_adx_last(prices, period: int = 14) -> float:
     c = arr
     high = np.empty(n)
     low = np.empty(n)
-    high[0] = low[0] = c[0]
-    for i in range(1, n):
-        high[i] = max(float(c[i - 1]), float(c[i]))
-        low[i] = min(float(c[i - 1]), float(c[i]))
+    for i in range(n):
+        j0 = max(0, i - period + 1)
+        seg = c[j0 : i + 1]
+        high[i] = float(np.max(seg))
+        low[i] = float(np.min(seg))
     tr: list[float] = []
     plus_dm: list[float] = []
     minus_dm: list[float] = []
@@ -43,10 +49,12 @@ def compute_adx_last(prices, period: int = 14) -> float:
     m = len(tr)
 
     def _wilder_smooth(x: list[float]) -> list[float]:
+        """Wilder RMA: first value = mean(x[:period]); then (prev*(n-1)+x)/n."""
         out = [0.0] * m
-        out[period - 1] = float(sum(x[:period]))
+        out[period - 1] = float(sum(x[:period])) / float(period)
+        n = float(period)
         for i in range(period, m):
-            out[i] = out[i - 1] - out[i - 1] / float(period) + x[i]
+            out[i] = (out[i - 1] * (n - 1.0) + x[i]) / n
         return out
 
     atr = _wilder_smooth(tr)

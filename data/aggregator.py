@@ -132,7 +132,12 @@ class FastPriceAggregator:
         return float((arr[-1] - arr.mean()) / std)
 
     def get_primary_history(self):
-        """Return primary series for indicators/LSTM with Coinbase priority."""
+        """Return the raw **exchange tick** close series (Coinbase-first, else Binance).
+
+        Each websocket ``update()`` appends one price; deque maxlen 200 per venue. Used for
+        RSI/MACD windows and ADX (see ``HFT_ADX_TICK_LEN``) so indicators align with **ticks
+        we actually receive**, not the loop-sampled ``add_history`` buffer.
+        """
         c = self.prices.get("coinbase", deque())
         if len(c) > 0:
             return c

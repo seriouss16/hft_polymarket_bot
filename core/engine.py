@@ -173,6 +173,8 @@ class HFTEngine:
         # --- RSI логика ---
         self.rsi_period = 14
         self.adx_period = int(os.getenv("HFT_ADX_PERIOD", "14") or "14")
+        # ADX on raw exchange ticks (~4–5 Hz CB → ~60 ticks ≈ 12–15s lookback for short-trend strength).
+        self.adx_tick_len = int(os.getenv("HFT_ADX_TICK_LEN", "60") or "60")
         self._last_adx = float("nan")
         self.micro_trend_window_sec = _env_float_default("HFT_MICRO_TREND_WINDOW_SEC", 2.0)
         self.micro_trend_stale_sec = _env_float_default("HFT_MICRO_TREND_STALE_SEC", 14.0)
@@ -1244,7 +1246,8 @@ class HFTEngine:
         _ = lstm_forecast
 
         px = price_array_for_rsi(price_history, self.rsi_price_len)
-        self._last_adx = float(compute_adx_last(px, period=self.adx_period))
+        px_adx = price_array_for_rsi(price_history, self.adx_tick_len)
+        self._last_adx = float(compute_adx_last(px_adx, period=self.adx_period))
 
         if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
             self._diag_inc("entry_block_regime")
