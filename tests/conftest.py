@@ -13,6 +13,7 @@ pytest_plugins = ("pytest_asyncio",)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from utils.env_merge import merge_env_file
+from utils.env_unify import apply_sim_live_unify
 
 # Minimal env so modules that read os.getenv() at import time get safe defaults.
 _ENV_DEFAULTS = {
@@ -31,8 +32,9 @@ _ENV_DEFAULTS = {
     "LIVE_ORDER_MAX_REPRICE": "2",
     "HFT_MAX_ENTRY_ASK": "0.99",
     "HFT_MIN_ENTRY_ASK": "0.08",
-    "LIVE_ORDER_SIZE": "10.0",
-    "LIVE_MAX_SPREAD": "0.10",
+    "HFT_MAX_ENTRY_SPREAD": "0.10",
+    # LIVE_ORDER_SIZE / LIVE_MAX_SPREAD: omitted on purpose — filled from HFT_* by
+    # bot_config_log._unify_sim_live_trading_params() when tests call validate_required_config.
     "LIVE_INVENTORY_DUST_SHARES": "0.05",
     "LIVE_SELL_GTC_OFFSET_FROM_BID": "-0.002",
     # Deterministic SIM entry price in executor tests (shell or runtime may set analyzer suggestion).
@@ -48,3 +50,4 @@ def set_env(monkeypatch):
     merge_env_file(root / "config" / "runtime.env", overwrite=True)
     for key, val in _ENV_DEFAULTS.items():
         monkeypatch.setenv(key, val)
+    apply_sim_live_unify()

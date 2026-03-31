@@ -168,6 +168,19 @@ class TestSimSell:
         t.log_trade("SELL", 0.30)
         assert t.max_drawdown > 0
 
+    def test_sell_respects_exit_slippage_fraction(self, monkeypatch):
+        """HFT_SIM_EXIT_SLIPPAGE_FRACTION worsens SELL exec vs book (SIM only)."""
+        monkeypatch.setenv("HFT_SIM_EXIT_SLIPPAGE_FRACTION", "0.10")
+        t = make_tracker(100.0)
+        t.log_trade("BUY", 0.50, amount_usd=10.0)
+        sh = t.inventory
+        entry = t.entry_price
+        book_sell = 0.60
+        exec_px = book_sell * (1.0 - t.fee_rate) * 0.90
+        expected_pnl = sh * (exec_px - entry)
+        t.log_trade("SELL", book_sell)
+        assert t.total_pnl == pytest.approx(expected_pnl)
+
 
 # ---------------------------------------------------------------------------
 # LIVE mode — _suppress_buy
