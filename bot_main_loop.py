@@ -734,7 +734,13 @@ async def main():
                     ask_size = float(poly_book.book.get("ask_size_top", 1.0))
                     db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
                     da_sz = float(poly_book.book.get("down_ask_size_top", 0.0))
-                    if trend["trend"] == "DOWN" and db_sz + da_sz > 0.0:
+                    # Match HFTEngine.process_tick: use the **position** leg when inventory>0, not trend
+                    # (short trend flips must not switch pulse imbalance away from the held outcome).
+                    if pnl.inventory > 1e-9 and pnl.position_side == "DOWN" and db_sz + da_sz > 0.0:
+                        imbalance = db_sz / (db_sz + da_sz + 1e-9)
+                    elif pnl.inventory > 1e-9 and pnl.position_side == "UP":
+                        imbalance = bid_size / (bid_size + ask_size + 1e-9)
+                    elif trend["trend"] == "DOWN" and db_sz + da_sz > 0.0:
                         imbalance = db_sz / (db_sz + da_sz + 1e-9)
                     else:
                         imbalance = bid_size / (bid_size + ask_size + 1e-9)
@@ -765,12 +771,11 @@ async def main():
                     up_ask = float(poly_book.book.get("ask", 0.0))
                     d_bid = float(poly_book.book.get("down_bid", 0.0))
                     d_ask = float(poly_book.book.get("down_ask", 0.0))
-                    if trend["trend"] == "UP":
-                        book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f}"
-                    elif trend["trend"] == "DOWN":
-                        book_focus = f"DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
-                    else:
-                        book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+                    # Always show both outcome legs (pulse used to follow trend only — confusing
+                    # when trend flips while a DOWN/UP position is open).
+                    book_focus = (
+                        f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+                    )
                     
                     logging.info(
                         f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
