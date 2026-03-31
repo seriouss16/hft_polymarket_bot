@@ -36,6 +36,10 @@ from core.live_common import (
     _parse_csv_floats,
     _parse_usdc_verify_delays,
     _snapshot_from_levels,
+    live_buy_reprice_tick,
+    live_emergency_buy_bump,
+    live_emergency_cross_bump,
+    live_sell_reprice_tick,
 )
 
 
@@ -772,7 +776,23 @@ class LiveExecutionEngine:
                 if order_id:
                     fill_status, filled = self._get_order_fill(order_id)
                     if filled > 0:
-                        return (filled, worst_price)
+                        fak_tracked = TrackedOrder(
+                            order_id=order_id,
+                            token_id=token_id,
+                            side=SELL_SIDE,
+                            price=worst_price,
+                            size=size,
+                            status=OrderStatus.FILLED,
+                            filled_size=filled,
+                        )
+                        vwap_px = self._sell_fill_avg_price(fak_tracked, filled)
+                        if abs(vwap_px - worst_price) > 1e-6:
+                            logging.info(
+                                "[LIVE FAK SELL] VWAP %.4f vs worst floor %.4f (better fill)",
+                                vwap_px,
+                                worst_price,
+                            )
+                        return (filled, vwap_px)
                 # matched/filled without id → assume full fill
                 return (size, worst_price)
             return (0.0, 0.0)
@@ -983,8 +1003,10 @@ class LiveExecutionEngine:
                 break
 
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
+            _buy_tick = live_buy_reprice_tick()
+            _sell_tick = live_sell_reprice_tick()
             if tracked.side == BUY:
-                new_price_probe = max(0.01, min(0.99, best_ask + 0.001))
+                new_price_probe = max(0.01, min(0.99, best_ask + _buy_tick))
                 max_slip = req_float("LIVE_MAX_BUY_REPRICE_SLIPPAGE")
                 if (
                     max_slip > 0.0
@@ -1141,7 +1163,8 @@ class LiveExecutionEngine:
                 )
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
-            price = max(0.01, min(0.99, best_ask + 0.005))
+            _eb = live_emergency_buy_bump()
+            price = max(0.01, min(0.99, best_ask + _eb))
             em_size = self._affordable_buy_shares(price, remaining)
             if em_size <= 0.0 or em_size < poly_min:
                 logging.error(
@@ -1232,10 +1255,11 @@ class LiveExecutionEngine:
             return
 
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
+        _xb = live_emergency_cross_bump()
         if side == SELL_SIDE:
-            price = max(0.01, min(0.99, best_bid - 0.005))
+            price = max(0.01, min(0.99, best_bid - _xb))
         else:
-            price = max(0.01, min(0.99, best_ask + 0.005))
+            price = max(0.01, min(0.99, best_ask + _xb))
 
         place_sz = size
         if side == BUY:

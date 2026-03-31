@@ -192,10 +192,13 @@ async def main():
     # rejects every entry due to insufficient balance for the minimum share count.
     _live_skip_until: float = 0.0
     _live_skip_cooldown_sec = req_float("LIVE_SKIP_COOLDOWN_SEC")
+    _live_max_book_age_sec = float(os.getenv("LIVE_MAX_BOOK_AGE_SEC", "0"))
     _live_inventory_reconcile_sec = float(os.getenv("LIVE_INVENTORY_RECONCILE_SEC", "5"))
     _last_live_reconcile_ts = 0.0
     last_lstm_time = 0
     last_book_pull_time = 0
+    # Last asyncio time when CLOB HTTP pull wrote valid UP bid/ask into poly_book (live OPEN freshness).
+    last_clob_book_success_time = 0.0
     last_book_mismatch_warn_time = 0.0
     last_clob_pull_fail_log_time = 0.0
     forecast = 0.0
@@ -435,6 +438,7 @@ async def main():
                         )
                         token_up_id = up_id
                         token_down_id = down_id
+                        last_clob_book_success_time = 0.0
                         strategy_hub.reset_for_new_market()
                         # Reset orderbook cache to avoid stale data from previous market
                         if poly_book and hasattr(poly_book, 'book'):
@@ -572,6 +576,8 @@ async def main():
                             # Reset stale DOWN data to force complement calculation
                             poly_book.book.pop("down_bid", None)
                             poly_book.book.pop("down_ask", None)
+                        if up_valid and (not token_down_id or down_valid):
+                            last_clob_book_success_time = now
                     except Exception as exc:
                         if (now - last_clob_pull_fail_log_time) >= 90.0:
                             logging.warning("CLOB book pull failed: %s", exc)
@@ -1057,13 +1063,36 @@ async def main():
                                             "best_bid": _live_bb,
                                             "best_ask": _live_ba,
                                         }
-                                    # Blocks until CLOB confirms fill or timeout.
-                                    _filled_sh, _filled_px = await live_exec.execute(
-                                        _open_signal,
-                                        _live_tid,
-                                        budget_usd=_cost_usd,
-                                        **_exec_kw,
-                                    )
+                                    if _live_max_book_age_sec > 0.0:
+                                        _book_age = (
+                                            (now - last_clob_book_success_time)
+                                            if last_clob_book_success_time > 0.0
+                                            else float("inf")
+                                        )
+                                        if _book_age > _live_max_book_age_sec:
+                                            logging.warning(
+                                                "[LIVE] Skip OPEN: CLOB book not fresh "
+                                                "(age=%.2fs, max=%.2fs; success_ts=%.3f).",
+                                                _book_age,
+                                                _live_max_book_age_sec,
+                                                last_clob_book_success_time,
+                                            )
+                                            _filled_sh, _filled_px = 0.0, 0.0
+                                        else:
+                                            _filled_sh, _filled_px = await live_exec.execute(
+                                                _open_signal,
+                                                _live_tid,
+                                                budget_usd=_cost_usd,
+                                                **_exec_kw,
+                                            )
+                                    else:
+                                        # Blocks until CLOB confirms fill or timeout.
+                                        _filled_sh, _filled_px = await live_exec.execute(
+                                            _open_signal,
+                                            _live_tid,
+                                            budget_usd=_cost_usd,
+                                            **_exec_kw,
+                                        )
                                     if _filled_sh > 0:
                                         # Record confirmed CLOB fill into PnL tracker. Use actual
                                         # notional (shares × CLOB avg) so balance/entry match wallet + UI;

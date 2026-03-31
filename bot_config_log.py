@@ -1,4 +1,10 @@
-"""Runtime config validation and logging setup for the HFT bot."""
+"""Runtime config validation and logging setup for the HFT bot.
+
+SIM vs LIVE sizing/spread: set ``HFT_DEFAULT_TRADE_USD`` and ``HFT_MAX_ENTRY_SPREAD`` once.
+If ``LIVE_ORDER_SIZE`` / ``LIVE_MAX_SPREAD`` are omitted, :func:`utils.env_unify.apply_sim_live_unify`
+copies from those HFT keys (also run from :func:`bot_runtime.load_runtime_env`).
+Explicit ``LIVE_*`` values still override.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from utils.env_config import req_str
+from utils.env_unify import apply_sim_live_unify
 from utils.log_dedupe import SameMessageDedupeFilter
 
 
@@ -77,8 +84,8 @@ _LIVE_REQUIRED_KEYS: tuple[str, ...] = (
     "MAX_DRAWDOWN_PCT",
     "MAX_POSITION_PCT",
     "LOSS_COOLDOWN_SEC",
-    "LIVE_MAX_SPREAD",
-    "LIVE_ORDER_SIZE",
+    # LIVE_MAX_SPREAD / LIVE_ORDER_SIZE: filled from HFT_MAX_ENTRY_SPREAD / HFT_DEFAULT_TRADE_USD
+    # by _unify_sim_live_trading_params() when unset; validated below.
     "LIVE_ORDER_FILL_POLL_SEC",
     "LIVE_ORDER_STALE_SEC",
     "LIVE_ORDER_MAX_REPRICE",
@@ -111,6 +118,7 @@ def _migrate_legacy_live_max_session_loss() -> None:
 
 def validate_required_config(live_mode: bool) -> None:
     """Abort startup if required parameters are missing from the environment."""
+    apply_sim_live_unify()
     if live_mode:
         _migrate_legacy_live_max_session_loss()
     missing: list[str] = []
@@ -121,6 +129,15 @@ def validate_required_config(live_mode: bool) -> None:
         for key in _LIVE_REQUIRED_KEYS:
             if not os.environ.get(key, "").strip():
                 missing.append(f"  {key}  (required for LIVE_MODE=1)")
+    if live_mode:
+        if not os.environ.get("LIVE_ORDER_SIZE", "").strip():
+            missing.append(
+                "  LIVE_ORDER_SIZE  (or set HFT_DEFAULT_TRADE_USD — unified at startup)"
+            )
+        if not os.environ.get("LIVE_MAX_SPREAD", "").strip():
+            missing.append(
+                "  LIVE_MAX_SPREAD  (or set HFT_MAX_ENTRY_SPREAD — unified at startup)"
+            )
     if missing:
         lines = "\n".join(missing)
         raise SystemExit(

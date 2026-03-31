@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from utils.env_merge import merge_env_file
+from utils.env_unify import apply_sim_live_unify
 
 
 def load_runtime_env() -> None:
@@ -14,11 +15,14 @@ def load_runtime_env() -> None:
 
     ``sim_slippage.env`` is merged first so SIM slippage defaults apply when
     ``runtime.env`` omits those keys; ``runtime.env`` then overwrites (see merge_env_file).
+    Finally :func:`utils.env_unify.apply_sim_live_unify` aligns ``LIVE_ORDER_SIZE`` /
+    ``LIVE_MAX_SPREAD`` with ``HFT_*`` when the former are unset.
     """
     root = Path(__file__).resolve().parent
     merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
     merge_env_file(root / "config" / "runtime.env", overwrite=True)
     merge_env_file(root / ".env", overwrite=True)
+    apply_sim_live_unify()
 
 
 UVLOOP_ACTIVE = False

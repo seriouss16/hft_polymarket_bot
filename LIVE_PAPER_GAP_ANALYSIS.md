@@ -401,3 +401,14 @@ The paper-to-live gap is **not** due to strategy logic but to **execution infras
 **Priority fix**: Align paper PnL calculation to use realistic fill prices (including slippage and fees) before attempting live trading. The current paper simulation is overly optimistic and does not reflect CLOB realities.
 
 **After this audit**: (1) FAK worst bid multiplier is **configurable** (`LIVE_FAK_SELL_WORST_BID_MULT`). (2) Section 4 in the original text was **incorrect** about allowance — the code refreshes before SELL. (3) **Paper vs live price path** (#1, #6) still differs by design until you add a paper slippage / execution model or stricter live guards.
+
+**Implemented mitigations (code)**:
+- **`HFT_SIM_EXIT_SLIPPAGE_FRACTION`** (paper): SELL exec price is `book * (1-fee) * (1-fraction)` after fee; set e.g. `0.05`–`0.10` to align with FAK haircut. See `config/sim_slippage.env`.
+- **`LIVE_MAX_BOOK_AGE_SEC`** (live, default `0` = off): skip OPEN when the last successful CLOB HTTP refresh of the outcome book is older than this many seconds (reduces entries on stale books).
+
+**Live execution — reduce slippage (not paper tuning)**:
+- **`LIVE_BUY_REPRICE_TICK`** / **`LIVE_SELL_REPRICE_TICK`** (default `0.001`): each reprice moved `±0.001` vs book. **Lower** (e.g. `0.0005`) = smaller adverse move per chase (more reprices may be needed).
+- **`LIVE_EMERGENCY_BUY_BUMP`** (default `0.005`): emergency BUY limit above ask; **lower** = tighter limit (less pay-up, may rest longer).
+- **`LIVE_EMERGENCY_SPREAD_CROSS_BUMP`** (default `0.005`): `emergency_exit()` cross spread; **lower** = less aggressive.
+- **`LIVE_FAK_SELL_WORST_BID_MULT`** (e.g. `0.92`–`0.99`): floor for FAK SELL; **raise toward 1.0** for less haircut vs bid (still must be marketable).
+- **FAK SELL**: after fill, engine resolves **VWAP** from `get_order` / `associate_trades` when possible so PnL uses actual fill, not worst-price floor only.

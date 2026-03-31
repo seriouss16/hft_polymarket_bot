@@ -88,6 +88,26 @@ def sim_entry_slippage_multiplier() -> float:
     return 1.0 + extra
 
 
+def sim_exit_slippage_multiplier() -> float:
+    """Extra discount on SIM SELL exec vs book bid after fee (paper closer to live FAK/GTC).
+
+    Set ``HFT_SIM_EXIT_SLIPPAGE_FRACTION`` to e.g. ``0.08`` so SELL exec becomes
+    ``book_px * (1 - fee) * (1 - 0.08)``, modeling worse exit than ideal bid.
+    ``0`` or unset → multiplier ``1.0`` (legacy paper behavior).
+    """
+    raw = os.getenv("HFT_SIM_EXIT_SLIPPAGE_FRACTION", "").strip()
+    if not raw:
+        return 1.0
+    try:
+        frac = float(raw)
+    except ValueError:
+        return 1.0
+    if frac <= 0.0:
+        return 1.0
+    frac = min(frac, 0.99)
+    return max(0.01, 1.0 - frac)
+
+
 def mark_bid_for_side(book: dict, side: Optional[str]) -> float:
     """Return conservative liquidation bid for the held outcome (long mark-to-market)."""
     up_bid = float(book.get("bid") or 0.0)
@@ -440,7 +460,7 @@ class PnLTracker:
             if settlement_fill:
                 exec_price = book_px
             else:
-                exec_price = book_px * (1 - self.fee_rate)
+                exec_price = book_px * (1 - self.fee_rate) * sim_exit_slippage_multiplier()
             cost_basis_usd = shares_sold * self.entry_price
             proceeds_usd = shares_sold * exec_price
             profit = proceeds_usd - cost_basis_usd
