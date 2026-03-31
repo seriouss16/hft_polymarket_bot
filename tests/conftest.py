@@ -37,6 +37,9 @@ _ENV_DEFAULTS = {
     # bot_config_log._unify_sim_live_trading_params() when tests call validate_required_config.
     "LIVE_INVENTORY_DUST_SHARES": "0.05",
     "LIVE_SELL_GTC_OFFSET_FROM_BID": "-0.002",
+    # Tests: no live CLOB market WebSocket (avoid network).
+    "CLOB_MARKET_WS_ENABLED": "0",
+    "CLOB_USER_WS_ENABLED": "0",
     # Deterministic SIM entry price in executor tests (shell or runtime may set analyzer suggestion).
     "HFT_SIM_SLIPPAGE_EXTRA_FRACTION": "0",
 }

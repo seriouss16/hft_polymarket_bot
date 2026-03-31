@@ -163,18 +163,23 @@ class MarketSelector:
         return await asyncio.to_thread(_do_request)
 
     async def fetch_up_down_token_ids(self, slug):
-        """Return (up_token_id, down_token_id, question) for a market slug."""
+        """Return (up_token_id, down_token_id, question, condition_id) for a market slug.
+
+        ``condition_id`` is Gamma ``conditionId`` (hex) for CLOB user-channel ``markets`` filter.
+        """
         url = f"https://gamma-api.polymarket.com/markets?slug={slug}"
         try:
             data = await self._fetch_gamma_json(url, timeout=5.0)
             if not data:
-                return None, None, slug
+                return None, None, slug, None
             m = data[0]
             question = m.get("question", slug)
+            cond = m.get("conditionId") or m.get("condition_id")
+            condition_id = str(cond).strip() if cond else None
             raw_tids = m.get("clobTokenIds")
             tids = normalize_clob_token_ids(raw_tids)
             if len(tids) < 1:
-                return None, None, question
+                return None, None, question, condition_id
             outcomes_raw = _parse_json_field(m.get("outcomes")) or []
             if isinstance(outcomes_raw, (list, tuple)):
                 outcomes = [str(x) for x in outcomes_raw]
@@ -194,10 +199,10 @@ class MarketSelector:
                 up_id = str(tids[0])
             if down_id is None and len(tids) >= 2:
                 down_id = str(tids[1])
-            return up_id, down_id, question
+            return up_id, down_id, question, condition_id
         except Exception as e:
             logging.error("Selector error for slug=%s: %s", slug, e)
-            return None, None, slug
+            return None, None, slug, None
 
     async def fetch_event_price_to_beat(self, slug: str) -> float | None:
         """Return official start-of-window BTC/USD from Gamma (Chainlink) for this slot.

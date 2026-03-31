@@ -1,4 +1,11 @@
-"""Live execution and risk controls for Polymarket CLOB."""
+"""Live execution and risk controls for Polymarket CLOB.
+
+Phase 2 WebSocket Migration: Fully event-driven order tracking.
+- Removes HTTP polling for order status
+- Implements complete order state machine using WebSocket events
+- Adds comprehensive logging for WS/HTTP fallback events
+- Adds latency metrics to track WS vs HTTP performance
+"""
 
 from __future__ import annotations
 
@@ -7,7 +14,9 @@ import json
 import logging
 import os
 import time
+from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -75,7 +84,10 @@ class LiveExecutionEngine:
         min_order_size: float = 10.0,
         max_spread: float = 0.03,
     ) -> None:
-        """Initialise execution engine and optionally connect to Polymarket CLOB."""
+        """Initialise execution engine and optionally connect to Polymarket CLOB.
+
+        Phase 2 WebSocket Migration: Event-driven order tracking with HTTP fallback.
+        """
         self.test_mode = test_mode
         self.min_order_size = min_order_size
         self.max_spread = max_spread
@@ -91,6 +103,20 @@ class LiveExecutionEngine:
             "emergency_exits": 0,
             "reprice_total": 0,
         }
+        # WebSocket/HTTP metrics tracking
+        self._ws_metrics: dict[str, int] = {
+            "ws_events_received": 0,
+            "http_fallbacks": 0,
+            "ws_latency_samples": 0,
+            "ws_latency_total_ms": 0.0,
+            "ws_latency_min_ms": float("inf"),
+            "ws_latency_max_ms": 0.0,
+        }
+        self._http_metrics: dict[str, int] = {
+            "http_polls_total": 0,
+            "http_fallbacks_total": 0,
+            "http_errors": 0,
+        }
         self._active_orders: dict[str, TrackedOrder] = {}
         # Last confirmed BUY fills, keyed by token_id.  Persists after the order
         # leaves _active_orders so that close_position can still find the shares.
@@ -99,6 +125,11 @@ class LiveExecutionEngine:
         self._last_buy_skip_reason: str | None = None
         self.client = None
         self._http = requests.Session()
+        self._market_book_cache: object | None = None
+        self._user_order_cache: object | None = None
+        self._api_creds: object | None = None
+        self._ws_metrics_last_log = time.time()
+        self._ws_metrics_log_interval = 60.0  # Log metrics every 60 seconds
 
         if ClobClient is None:
             if not self.test_mode:
@@ -120,10 +151,26 @@ class LiveExecutionEngine:
             # Explicit API keys in env may be stale (rotated/re-generated on Polymarket).
             derived = self.client.create_or_derive_api_creds()
             self.client.set_api_creds(derived)
+            self._api_creds = derived
             logging.info(
                 "[LIVE] ClobClient credentials derived from private key (key=%.8s...).",
                 derived.api_key,
             )
+
+    def get_api_creds(self) -> object | None:
+        """L2 API credentials object for user-channel WebSocket (live only)."""
+        return self._api_creds
+
+    def set_user_order_cache(self, cache: object | None) -> None:
+        """Optional user-channel WS cache (``data.clob_user_ws.ClobUserOrderCache``)."""
+        self._user_order_cache = cache
+        # Initialize callback for event-driven order tracking
+        if cache is not None:
+            self._init_user_order_cache()
+
+    def set_market_book_cache(self, cache: object | None) -> None:
+        """Optional CLOB market WebSocket cache (``data.clob_market_ws.ClobMarketBookCache``)."""
+        self._market_book_cache = cache
 
     def ensure_allowances(self) -> None:
         """Refresh USDC (COLLATERAL) spending allowance for the CLOB at startup.
@@ -388,31 +435,61 @@ class LiveExecutionEngine:
     def get_orderbook_snapshot(self, token_id: str, depth: int = 5) -> dict:
         """Return top-N orderbook metrics for imbalance and pressure.
 
-        Retries the SDK call on transient errors without blocking sleeps between
-        attempts (avoids holding asyncio thread-pool workers), then falls back
-        to the public HTTP book endpoint so the bot can keep a coherent snapshot
-        without spamming warnings on every tick.
+        WS-first architecture: uses market WebSocket cache as primary source.
+        HTTP/SDK fallback only when WS cache is unavailable, stale, or failed.
+        Returns cached data even if slightly stale to avoid blocking on HTTP.
         """
+        cache = self._market_book_cache
+        ws_enabled = getattr(cache, "enabled", True) if cache else False
+        ws_primary = os.getenv("CLOB_MARKET_WS_PRIMARY", "1").strip().lower() in ("1", "true", "yes")
+        
+        # 1. Try WS cache first (always)
+        if cache is not None and ws_enabled:
+            try:
+                snap = cache.snapshot(token_id, depth)
+                if snap is not None:
+                    if cache.is_fresh(token_id):
+                        return snap
+                    else:
+                        # Cache stale but we have data — return it to avoid blocking
+                        # unless WS_PRIMARY=0, then try HTTP
+                        if ws_primary:
+                            logging.debug(
+                                "[WS] Book cache stale for %s (age>%.1fs), returning cached data",
+                                token_id[:8], cache._max_stale_sec
+                            )
+                            return snap
+            except Exception as exc:
+                logging.debug("Market book cache read failed: %s", exc)
+        
+        # 2. HTTP fallback only if no WS or WS failed AND we need fresh data
         if self.client is None:
             return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
-        max_attempts = max(1, req_int("CLOB_ORDERBOOK_RETRIES"))
-        last_exc: Exception | None = None
-        for attempt in range(max_attempts):
-            try:
-                book = self.client.get_order_book(token_id)
-                bid_levels = _levels_from_book_rows(book.bids)
-                ask_levels = _levels_from_book_rows(book.asks)
-                return _snapshot_from_levels(bid_levels, ask_levels, depth)
-            except Exception as exc:
-                last_exc = exc
-        snap = self._orderbook_snapshot_http(token_id, depth, log_errors=False)
-        if last_exc is not None:
-            logging.debug(
-                "CLOB SDK order book failed after %d attempts; HTTP fallback used: %s",
-                max_attempts,
-                last_exc,
-            )
-        return snap
+        
+        # Try SDK once, then HTTP
+        try:
+            book = self.client.get_order_book(token_id)
+            bid_levels = _levels_from_book_rows(book.bids)
+            ask_levels = _levels_from_book_rows(book.asks)
+            fresh_snap = _snapshot_from_levels(bid_levels, ask_levels, depth)
+            # Update WS cache with fresh data if available
+            if cache is not None:
+                try:
+                    cache._apply_snapshot(fresh_snap, token_id)
+                except Exception as e:
+                    logging.debug("Failed to update WS cache with HTTP data: %s", e)
+            return fresh_snap
+        except Exception as exc:
+            logging.warning("CLOB SDK order book failed: %s", exc)
+            # Return last cached even if stale (better than empty)
+            if cache is not None:
+                try:
+                    snap = cache.snapshot(token_id, depth)
+                    if snap is not None:
+                        return snap
+                except Exception:
+                    pass
+            return self._orderbook_snapshot_http(token_id, depth, log_errors=False)
 
     def _get_order_fill(self, order_id: str) -> tuple[str, float]:
         """Return (status_str, filled_size) for an active order from CLOB.
@@ -425,6 +502,14 @@ class LiveExecutionEngine:
         """
         if self.test_mode or self.client is None:
             return "unknown", 0.0
+        cache = self._user_order_cache
+        if cache is not None and getattr(cache, "enabled", True):
+            try:
+                cached = cache.get_order_fill(order_id)
+                if cached is not None:
+                    return cached
+            except Exception as exc:
+                logging.debug("User order WS cache read failed order=%s: %s", order_id, exc)
         try:
             data = self.client.get_order(order_id)
             if not data:
@@ -445,6 +530,209 @@ class LiveExecutionEngine:
         except Exception as exc:
             logging.warning("Order fill poll failed order=%s: %s", order_id, exc)
             return "unknown", 0.0
+
+    def _init_user_order_cache(self) -> None:
+        """Initialize user order cache with callback for event-driven tracking."""
+        if self._user_order_cache is not None:
+            self._user_order_cache.set_order_callback(self._on_user_order_event)
+
+    def _on_user_order_event(self, order_id: str, status: str, filled: float) -> None:
+        """Callback from user WS cache when order/trade event arrives.
+
+        Phase 2 WebSocket Migration: Event-driven order tracking.
+        Updates the tracked order state immediately without HTTP polling.
+        Called by ClobUserOrderCache after processing order/trade events.
+        
+        Comprehensive logging for WS/HTTP fallback events with detailed metrics.
+        """
+        # Track WS event
+        self._ws_metrics["ws_events_received"] += 1
+        
+        if order_id not in self._active_orders:
+            # Order not tracked yet (race condition) — ignore
+            logging.debug(
+                "[WS] Order event for untracked order: id=%s status=%s filled=%.2f "
+                "(total_ws_events=%d http_fallbacks=%d)",
+                order_id[:20], status, filled,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+            return
+        
+        tracked = self._active_orders[order_id]
+        old_status = tracked.status
+        old_filled = tracked.filled_size
+        
+        # Update status based on event
+        if status in ("matched", "filled"):
+            tracked.status = OrderStatus.FILLED
+            tracked.filled_size = min(tracked.size, filled)
+            logging.info(
+                "✅ [WS] Order filled via event: id=%s %s %.2f @ %.4f "
+                "(filled=%.2f/%.2f) | WS events=%d HTTP fallbacks=%d",
+                order_id[:20], tracked.side, tracked.filled_size, tracked.price,
+                tracked.filled_size, tracked.size,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+        elif status in ("canceled", "cancelled"):
+            tracked.status = OrderStatus.CANCELLED
+            tracked.filled_size = filled
+            logging.info(
+                "🚫 [WS] Order canceled via event: id=%s filled=%.2f "
+                "| WS events=%d HTTP fallbacks=%d",
+                order_id[:20], filled,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+        elif status == "partially_matched":
+            tracked.status = OrderStatus.PARTIAL
+            tracked.filled_size = min(tracked.size, filled)
+            logging.info(
+                "⚡ [WS] Order partial fill via event: id=%s filled=%.2f / %.2f "
+                "| WS events=%d HTTP fallbacks=%d",
+                order_id[:20], filled, tracked.size,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+        elif status == "live":
+            tracked.status = OrderStatus.PENDING
+            tracked.filled_size = filled
+            logging.debug(
+                "[WS] Order status live: id=%s filled=%.2f "
+                "| WS events=%d HTTP fallbacks=%d",
+                order_id[:20], filled,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+        else:
+            # Unknown status — log but don't change state
+            logging.debug(
+                "[WS] Unknown order status from event: id=%s status=%s filled=%.2f "
+                "| WS events=%d HTTP fallbacks=%d",
+                order_id[:20], status, filled,
+                self._ws_metrics["ws_events_received"],
+                self._http_metrics["http_fallbacks_total"],
+            )
+            return
+        
+        # Log state change with metrics
+        logging.info(
+            "[WS] Order state update: id=%s %s → %s filled %.2f → %.2f "
+            "| WS events=%d HTTP fallbacks=%d latency_avg=%.2fms",
+            order_id[:20],
+            old_status.value if hasattr(old_status, 'value') else str(old_status),
+            tracked.status.value if hasattr(tracked.status, 'value') else str(tracked.status),
+            old_filled,
+            tracked.filled_size,
+            self._ws_metrics["ws_events_received"],
+            self._http_metrics["http_fallbacks_total"],
+            self._get_ws_metrics()["ws_latency_avg_ms"],
+        )
+
+    async def _wait_for_order_fill(
+        self,
+        order_id: str,
+        timeout: float | None = None,
+    ) -> tuple[str, float]:
+        """Wait for order event via WS with HTTP fallback.
+
+        Phase 2 WebSocket Migration: Truly event-driven using asyncio.Event.
+        Uses ClobUserOrderCache.wait_for_order_update() for event-driven waiting.
+        Falls back to HTTP polling only if WS events timeout.
+        
+        Comprehensive logging for WS/HTTP fallback events.
+        Latency metrics tracking for WS vs HTTP performance.
+
+        Returns (status_str, filled_size) tuple.
+        """
+        if timeout is None:
+            timeout = float(os.getenv("LIVE_ORDER_WS_TIMEOUT_SEC", "30"))
+        
+        start_time = time.time()
+        
+        # Check cache first (may have recent data from WS)
+        if self._user_order_cache is not None:
+            cached = self._user_order_cache.get_order_fill(order_id)
+            if cached is not None:
+                ws_latency = (time.time() - start_time) * 1000
+                self._track_ws_latency(ws_latency)
+                logging.debug(
+                    "[WS] Order fill from cache: id=%s status=%s filled=%.2f "
+                    "(WS latency=%.2fms)",
+                    order_id[:20], cached[0], cached[1], ws_latency,
+                )
+                return cached
+        
+        # Use event-driven wait via ClobUserOrderCache
+        if self._user_order_cache is not None:
+            event_received = await self._user_order_cache.wait_for_order_update(
+                order_id, timeout=timeout
+            )
+            if event_received:
+                # Event received - check cache for updated data
+                cached = self._user_order_cache.get_order_fill(order_id)
+                if cached is not None:
+                    ws_latency = (time.time() - start_time) * 1000
+                    self._track_ws_latency(ws_latency)
+                    logging.debug(
+                        "[WS] Order fill from event: id=%s status=%s filled=%.2f "
+                        "(WS latency=%.2fms)",
+                        order_id[:20], cached[0], cached[1], ws_latency,
+                    )
+                    return cached
+        
+        # Timeout — fall back to HTTP polling
+        http_wait_time = time.time() - start_time
+        self._http_metrics["http_fallbacks_total"] += 1
+        logging.warning(
+            "[WS] Order event timeout for %s after %.1fs, falling back to HTTP "
+            "(WS latency=%.2fms, HTTP fallback count=%d)",
+            order_id[:20], http_wait_time,
+            (time.time() - start_time) * 1000,
+            self._http_metrics["http_fallbacks_total"],
+        )
+        return await asyncio.to_thread(self._get_order_fill, order_id)
+    
+    def _track_ws_latency(self, latency_ms: float) -> None:
+        """Track WebSocket latency metrics."""
+        self._ws_metrics["ws_latency_samples"] += 1
+        self._ws_metrics["ws_latency_total_ms"] += latency_ms
+        if latency_ms < self._ws_metrics["ws_latency_min_ms"]:
+            self._ws_metrics["ws_latency_min_ms"] = latency_ms
+        if latency_ms > self._ws_metrics["ws_latency_max_ms"]:
+            self._ws_metrics["ws_latency_max_ms"] = latency_ms
+    
+    def _get_ws_metrics(self) -> dict[str, Any]:
+        """Get WebSocket metrics summary."""
+        metrics = dict(self._ws_metrics)
+        if metrics["ws_latency_samples"] > 0:
+            metrics["ws_latency_avg_ms"] = round(
+                metrics["ws_latency_total_ms"] / metrics["ws_latency_samples"], 2
+            )
+        else:
+            metrics["ws_latency_avg_ms"] = 0.0
+            metrics["ws_latency_min_ms"] = 0.0
+        return metrics
+    
+    def _log_ws_metrics(self, reason: str = "periodic") -> None:
+        """Log WebSocket metrics."""
+        metrics = self._get_ws_metrics()
+        ws_events = metrics["ws_events_received"]
+        http_fallbacks = self._http_metrics["http_fallbacks_total"]
+        ws_latency = metrics["ws_latency_avg_ms"]
+        
+        ws_rate = ws_events / (time.time() - self._ws_metrics_last_log) if ws_events > 0 else 0
+        
+        logging.info(
+            "[WS_METRICS] %s: ws_events=%d http_fallbacks=%d "
+            "ws_latency_avg=%.2fms min=%.2fms max=%.2fms "
+            "ws_rate=%.2f/s",
+            reason, ws_events, http_fallbacks,
+            ws_latency, metrics["ws_latency_min_ms"], metrics["ws_latency_max_ms"],
+            ws_rate,
+        )
+        self._ws_metrics_last_log = time.time()
 
     @staticmethod
     def _associate_trade_ids_from_order(data: dict) -> list[str]:
@@ -885,11 +1173,16 @@ class LiveExecutionEngine:
     async def _poll_order(self, tracked: TrackedOrder) -> None:
         """Monitor fill status; reprice stale orders; handle partial fills correctly.
 
+        Phase 2 WebSocket Migration: Fully event-driven order tracking.
+        Uses WebSocket events for immediate fill detection with HTTP fallback.
         Loop terminates when the order reaches a terminal state.  Partial fills
         accumulate across reprice cycles — ``tracked.filled_size`` always reflects
         the running total confirmed by the CLOB.  After each cancel-before-reprice,
         ``_recover_fill_after_cancel`` polls the old order id so fills that race
         with cancel are not mistaken for failed sells.
+        
+        Comprehensive logging for WS/HTTP fallback events.
+        Latency metrics tracking for WS vs HTTP performance.
 
         BUY partial fill logic:
           - If a BUY goes stale with partial fill < POLY_CLOB_MIN_SHARES: cancel the
@@ -902,12 +1195,21 @@ class LiveExecutionEngine:
             (CLOB rejects GTC below the minimum).
         """
         poly_min = req_float("POLY_CLOB_MIN_SHARES")
-
+        ws_enabled = os.getenv("CLOB_USER_WS_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+        
+        # Log order tracking start
+        logging.debug(
+            "[WS] Starting event-driven order tracking: id=%s %s %.2f @ %.4f",
+            tracked.order_id[:20], tracked.side, tracked.size, tracked.price,
+        )
+        
+        # Use event-driven model with WS timeout fallback
+        # Polling loop replaced with event wait + HTTP fallback
         while tracked.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
-            await asyncio.sleep(_ORDER_FILL_POLL_SEC)
-
-            status_str, clob_filled = await asyncio.to_thread(
-                self._get_order_fill, tracked.order_id
+            # Wait for WS event with timeout (default 30s)
+            status_str, clob_filled = await self._wait_for_order_fill(
+                tracked.order_id,
+                timeout=float(os.getenv("LIVE_ORDER_WS_TIMEOUT_SEC", "30")),
             )
 
             # Polymarket API statuses (after normalisation to lower, prefix stripped):
@@ -923,8 +1225,11 @@ class LiveExecutionEngine:
                 else:
                     tracked.filled_size = tracked.size
                 logging.info(
-                    "✅ Order filled: id=%s %s %.2f @ %.4f",
-                    tracked.order_id, tracked.side, tracked.filled_size, tracked.price,
+                    "✅ Order filled: id=%s %s %.2f @ %.4f "
+                    "(WS events=%d HTTP fallbacks=%d)",
+                    tracked.order_id[:20], tracked.side, tracked.filled_size, tracked.price,
+                    self._ws_metrics["ws_events_received"],
+                    self._http_metrics["http_fallbacks_total"],
                 )
                 break
 
@@ -933,8 +1238,11 @@ class LiveExecutionEngine:
                 tracked.status = OrderStatus.CANCELLED
                 tracked.filled_size = clob_filled
                 logging.info(
-                    "🚫 Order cancelled externally: id=%s filled=%.2f",
-                    tracked.order_id, clob_filled,
+                    "🚫 Order cancelled externally: id=%s filled=%.2f "
+                    "(WS events=%d HTTP fallbacks=%d)",
+                    tracked.order_id[:20], clob_filled,
+                    self._ws_metrics["ws_events_received"],
+                    self._http_metrics["http_fallbacks_total"],
                 )
                 break
 
@@ -942,8 +1250,11 @@ class LiveExecutionEngine:
                 tracked.filled_size = clob_filled
                 tracked.status = OrderStatus.PARTIAL
                 logging.info(
-                    "⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f",
-                    tracked.order_id, clob_filled, tracked.size, tracked.remaining,
+                    "⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f "
+                    "(WS events=%d HTTP fallbacks=%d)",
+                    tracked.order_id[:20], clob_filled, tracked.size, tracked.remaining,
+                    self._ws_metrics["ws_events_received"],
+                    self._http_metrics["http_fallbacks_total"],
                 )
                 # Reset stale timer on new activity.
                 tracked.placed_at = time.time()
@@ -965,8 +1276,11 @@ class LiveExecutionEngine:
                 self._cancel_order(tracked.order_id)
                 logging.warning(
                     "⚠️ BUY stale with partial fill %.2f < min %.0f shares — "
-                    "cancelling BUY and FAK-selling filled shares.",
+                    "cancelling BUY and FAK-selling filled shares. "
+                    "(WS events=%d HTTP fallbacks=%d)",
                     tracked.filled_size, poly_min,
+                    self._ws_metrics["ws_events_received"],
+                    self._http_metrics["http_fallbacks_total"],
                 )
                 fak_filled = await self._fak_sell(tracked.token_id, tracked.filled_size)
                 # Report net filled as zero so caller treats this as a skip.
@@ -983,19 +1297,25 @@ class LiveExecutionEngine:
                     logging.warning(
                         "⚠️ Order stale (LIVE_ORDER_MAX_REPRICE=0: no reprice chase) id=%s — "
                         "emergency exit (filled=%.2f remaining=%.2f). "
-                        "Increase LIVE_ORDER_STALE_SEC or set LIVE_ORDER_MAX_REPRICE>0 to chase.",
-                        tracked.order_id,
+                        "Increase LIVE_ORDER_STALE_SEC or set LIVE_ORDER_MAX_REPRICE>0 to chase. "
+                        "(WS events=%d HTTP fallbacks=%d)",
+                        tracked.order_id[:20],
                         tracked.filled_size,
                         remaining,
+                        self._ws_metrics["ws_events_received"],
+                        self._http_metrics["http_fallbacks_total"],
                     )
                 else:
                     logging.warning(
                         "⚠️ Order stale after %d reprice attempts id=%s — emergency exit "
-                        "(filled=%.2f remaining=%.2f).",
+                        "(filled=%.2f remaining=%.2f). "
+                        "(WS events=%d HTTP fallbacks=%d)",
                         _ORDER_MAX_REPRICE,
-                        tracked.order_id,
+                        tracked.order_id[:20],
                         tracked.filled_size,
                         remaining,
+                        self._ws_metrics["ws_events_received"],
+                        self._http_metrics["http_fallbacks_total"],
                     )
                 self._cancel_order(tracked.order_id)
                 tracked.status = OrderStatus.STALE
@@ -1015,13 +1335,16 @@ class LiveExecutionEngine:
                 ):
                     logging.warning(
                         "⚠️ [LIVE] BUY reprice aborted: best ask moved %.4f → %.4f "
-                        "(limit would be %.4f > ref %.4f + max slip %.4f) token=%s",
+                        "(limit would be %.4f > ref %.4f + max slip %.4f) token=%s. "
+                        "(WS events=%d HTTP fallbacks=%d)",
                         tracked.entry_best_ask,
                         best_ask,
                         new_price_probe,
                         tracked.entry_best_ask,
                         max_slip,
                         tracked.token_id[:20],
+                        self._ws_metrics["ws_events_received"],
+                        self._http_metrics["http_fallbacks_total"],
                     )
                     self._last_buy_skip_reason = "slippage_abort"
                     self._cancel_order(tracked.order_id)
@@ -1503,21 +1826,45 @@ class LiveExecutionEngine:
         return None
 
     def _log_entry_stats_if_due(self) -> None:
-        """Emit aggregated live entry stats periodically for gate diagnostics."""
+        """Emit aggregated live entry stats periodically for gate diagnostics.
+        
+        Phase 2 WebSocket Migration: Includes WS/HTTP metrics.
+        """
         if self.skip_stats_log_sec <= 0:
             return
         now = time.time()
         if now - self._last_skip_stats_log_ts < self.skip_stats_log_sec:
             return
+        
+        # Log WS metrics periodically
+        if now - self._ws_metrics_last_log >= self._ws_metrics_log_interval:
+            self._log_ws_metrics("periodic")
+        
         st = self._entry_stats
         logging.info(
             "Live entry stats: attempts=%s executed=%s skip_ask_cap=%s "
-            "skip_spread=%s skip_signal=%s reprice=%s emergency=%s active_orders=%s.",
+            "skip_spread=%s skip_signal=%s reprice=%s emergency=%s active_orders=%s "
+            "ws_events=%d http_fallbacks=%d ws_latency_avg=%.2fms.",
             st["attempts"], st["executed"], st["skip_ask_cap"],
             st["skip_spread"], st["skip_signal"], st["reprice_total"],
             st["emergency_exits"], len(self._active_orders),
+            self._ws_metrics["ws_events_received"],
+            self._http_metrics["http_fallbacks_total"],
+            self._get_ws_metrics()["ws_latency_avg_ms"],
         )
         self._last_skip_stats_log_ts = now
+    
+    def shutdown(self) -> None:
+        """Shutdown execution engine and log final metrics."""
+        self._log_ws_metrics("shutdown")
+        logging.info(
+            "[LIVE] Final metrics: ws_events=%d http_fallbacks=%d "
+            "ws_latency_avg=%.2fms active_orders=%d",
+            self._ws_metrics["ws_events_received"],
+            self._http_metrics["http_fallbacks_total"],
+            self._get_ws_metrics()["ws_latency_avg_ms"],
+            len(self._active_orders),
+        )
 
     async def _maybe_warn_or_fak_chain_remainder(
         self,

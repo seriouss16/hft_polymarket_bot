@@ -21,6 +21,8 @@ from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
+from data.clob_market_ws import ClobMarketBookCache, sync_poly_book_from_cache
+from data.clob_user_ws import ClobUserOrderCache
 from data.poly_clob import PolyOrderBook
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
@@ -104,6 +106,15 @@ async def main():
         min_order_size=float(os.environ["LIVE_ORDER_SIZE"]),
         max_spread=float(os.environ["LIVE_MAX_SPREAD"]),
     )
+    clob_ws_cache = ClobMarketBookCache()
+    live_exec.set_market_book_cache(clob_ws_cache)
+    clob_ws_task = asyncio.create_task(clob_ws_cache.run_forever())
+    clob_user_cache: ClobUserOrderCache | None = None
+    clob_user_task: asyncio.Task | None = None
+    if LIVE_MODE:
+        clob_user_cache = ClobUserOrderCache(lambda: live_exec.get_api_creds())
+        live_exec.set_user_order_cache(clob_user_cache)
+        clob_user_task = asyncio.create_task(clob_user_cache.run_forever())
     live_risk = LiveRiskManager(max_session_loss=float(os.environ["LIVE_MAX_SESSION_LOSS"]))
     risk = RiskEngine(
         max_drawdown_pct=float(os.environ["MAX_DRAWDOWN_PCT"]),
@@ -369,6 +380,10 @@ async def main():
                         stats.set_live_wallet_usdc(None)
                 else:
                     stats.set_live_wallet_usdc(None)
+                # Phase 2 WebSocket Migration: Update WS/HTTP metrics from engine (both LIVE and PAPER modes)
+                stats.update_ws_metrics_from_engine(live_exec)
+                # Log WS metrics periodically
+                live_exec._log_ws_metrics("stats_interval")
                 stats.show_report()
                 logging.info(
                     "Intermediate stats (STATS_INTERVAL_SEC=%s, loop.now=%.3f).",
@@ -401,7 +416,7 @@ async def main():
                     last_slot_ts = ts
                 slug = selector.format_slug(ts)
                 current_slug = slug
-                up_id, down_id, question = await selector.fetch_up_down_token_ids(slug)
+                up_id, down_id, question, condition_id = await selector.fetch_up_down_token_ids(slug)
 
                 if up_id and (up_id != token_up_id or down_id != token_down_id):
                     if pnl.inventory > 0:
@@ -439,6 +454,12 @@ async def main():
                         token_up_id = up_id
                         token_down_id = down_id
                         last_clob_book_success_time = 0.0
+                        _sub = [token_up_id] + ([token_down_id] if token_down_id else [])
+                        await clob_ws_cache.set_asset_ids_async(_sub)
+                        if clob_user_cache is not None:
+                            await clob_user_cache.set_markets_async(
+                                [condition_id] if condition_id else []
+                            )
                         strategy_hub.reset_for_new_market()
                         # Reset orderbook cache to avoid stale data from previous market
                         if poly_book and hasattr(poly_book, 'book'):
@@ -508,90 +529,107 @@ async def main():
                     slot_price_to_beat,
                 )
             if fast_price and poly_book is not None and poly_btc > 0:
-                if token_up_id and (
-                    CLOB_PULL_INTERVAL <= 0.0
-                    or (now - last_book_pull_time) >= CLOB_PULL_INTERVAL
-                ):
-                    if _net_dbg:
-                        _nw_t2 = time.perf_counter()
-                    try:
-                        up_bid = 0.0
-                        up_ask = 0.0
-                        down_bid = 0.0
-                        down_ask = 0.0
-
-                        if token_down_id:
-                            ob_up, ob_down = await asyncio.gather(
-                                asyncio.to_thread(
-                                    live_exec.get_orderbook_snapshot, token_up_id, 5
-                                ),
-                                asyncio.to_thread(
-                                    live_exec.get_orderbook_snapshot, token_down_id, 5
-                                ),
-                            )
-                        else:
-                            ob_up = await asyncio.to_thread(
-                                live_exec.get_orderbook_snapshot, token_up_id, 5
-                            )
-                            ob_down = {}
-                        up_bid = float(ob_up.get("best_bid", 0.0))
-                        up_ask = float(ob_up.get("best_ask", 0.0))
-                        if token_down_id:
-                            down_bid = float(ob_down.get("best_bid", 0.0))
-                            down_ask = float(ob_down.get("best_ask", 0.0))
-
-                        up_valid = 0.0 < up_bid < up_ask <= 1.0
-                        down_valid = 0.0 < down_bid < down_ask <= 1.0
-                        if (not up_valid or not down_valid) and current_slug:
-                            q = await selector.fetch_up_down_quotes(current_slug, token_up_id, token_down_id)
-                            if not up_valid:
-                                up_bid = float(q.get("up_bid", 0.0))
-                                up_ask = float(q.get("up_ask", 0.0))
-                                up_valid = 0.0 < up_bid < up_ask <= 1.0
-                            if not down_valid:
-                                down_bid = float(q.get("down_bid", 0.0))
-                                down_ask = float(q.get("down_ask", 0.0))
-                                down_valid = 0.0 < down_bid < down_ask <= 1.0
-
-                        if up_valid:
-                            poly_book.book["bid"] = up_bid
-                            poly_book.book["ask"] = up_ask
-                            poly_book.book["bid_size_top"] = float(ob_up.get("bid_size_top", poly_book.book.get("bid_size_top", 1.0)))
-                            poly_book.book["ask_size_top"] = float(ob_up.get("ask_size_top", poly_book.book.get("ask_size_top", 1.0)))
-                        else:
-                            # Reset stale UP data to force complement calculation
-                            poly_book.book.pop("bid", None)
-                            poly_book.book.pop("ask", None)
-                        if down_valid:
-                            poly_book.book["down_bid"] = down_bid
-                            poly_book.book["down_ask"] = down_ask
-                            if isinstance(ob_down, dict) and ob_down:
-                                poly_book.book["down_bid_size_top"] = float(
-                                    ob_down.get("bid_size_top", 0.0)
-                                )
-                                poly_book.book["down_ask_size_top"] = float(
-                                    ob_down.get("ask_size_top", 0.0)
-                                )
-                        else:
-                            # Reset stale DOWN data to force complement calculation
-                            poly_book.book.pop("down_bid", None)
-                            poly_book.book.pop("down_ask", None)
-                        if up_valid and (not token_down_id or down_valid):
-                            last_clob_book_success_time = now
-                    except Exception as exc:
-                        if (now - last_clob_pull_fail_log_time) >= 90.0:
-                            logging.warning("CLOB book pull failed: %s", exc)
-                            last_clob_pull_fail_log_time = now
-                        else:
-                            logging.debug("CLOB book pull failed (rate-limited): %s", exc)
-                    last_book_pull_time = now
-                    if _net_dbg:
-                        _nw_t3 = time.perf_counter()
-                        logging.info(
-                            "NetworkCheck read_fast=%.1fms clob_roundtrip=%.1fms",
-                            (_nw_t1 - _nw_t0) * 1000.0,
-                            (_nw_t3 - _nw_t2) * 1000.0,
+                if token_up_id:
+                    _ws_filled = False
+                    if (
+                        clob_ws_cache.enabled
+                        and clob_ws_cache.has_valid_pair(token_up_id, token_down_id)
+                    ):
+                        _loop_ts = asyncio.get_running_loop().time()
+                        _ws_filled = sync_poly_book_from_cache(
+                            poly_book.book,
+                            clob_ws_cache,
+                            token_up_id,
+                            token_down_id,
+                            depth=5,
+                            loop_ts=_loop_ts,
                         )
+                        if _ws_filled:
+                            last_clob_book_success_time = now
+                    if not _ws_filled and (
+                        CLOB_PULL_INTERVAL <= 0.0
+                        or (now - last_book_pull_time) >= CLOB_PULL_INTERVAL
+                    ):
+                        if _net_dbg:
+                            _nw_t2 = time.perf_counter()
+                        try:
+                            up_bid = 0.0
+                            up_ask = 0.0
+                            down_bid = 0.0
+                            down_ask = 0.0
+
+                            if token_down_id:
+                                ob_up, ob_down = await asyncio.gather(
+                                    asyncio.to_thread(
+                                        live_exec.get_orderbook_snapshot, token_up_id, 5
+                                    ),
+                                    asyncio.to_thread(
+                                        live_exec.get_orderbook_snapshot, token_down_id, 5
+                                    ),
+                                )
+                            else:
+                                ob_up = await asyncio.to_thread(
+                                    live_exec.get_orderbook_snapshot, token_up_id, 5
+                                )
+                                ob_down = {}
+                            up_bid = float(ob_up.get("best_bid", 0.0))
+                            up_ask = float(ob_up.get("best_ask", 0.0))
+                            if token_down_id:
+                                down_bid = float(ob_down.get("best_bid", 0.0))
+                                down_ask = float(ob_down.get("best_ask", 0.0))
+
+                            up_valid = 0.0 < up_bid < up_ask <= 1.0
+                            down_valid = 0.0 < down_bid < down_ask <= 1.0
+                            if (not up_valid or not down_valid) and current_slug:
+                                q = await selector.fetch_up_down_quotes(current_slug, token_up_id, token_down_id)
+                                if not up_valid:
+                                    up_bid = float(q.get("up_bid", 0.0))
+                                    up_ask = float(q.get("up_ask", 0.0))
+                                    up_valid = 0.0 < up_bid < up_ask <= 1.0
+                                if not down_valid:
+                                    down_bid = float(q.get("down_bid", 0.0))
+                                    down_ask = float(q.get("down_ask", 0.0))
+                                    down_valid = 0.0 < down_bid < down_ask <= 1.0
+
+                            if up_valid:
+                                poly_book.book["bid"] = up_bid
+                                poly_book.book["ask"] = up_ask
+                                poly_book.book["bid_size_top"] = float(ob_up.get("bid_size_top", poly_book.book.get("bid_size_top", 1.0)))
+                                poly_book.book["ask_size_top"] = float(ob_up.get("ask_size_top", poly_book.book.get("ask_size_top", 1.0)))
+                            else:
+                                # Reset stale UP data to force complement calculation
+                                poly_book.book.pop("bid", None)
+                                poly_book.book.pop("ask", None)
+                            if down_valid:
+                                poly_book.book["down_bid"] = down_bid
+                                poly_book.book["down_ask"] = down_ask
+                                if isinstance(ob_down, dict) and ob_down:
+                                    poly_book.book["down_bid_size_top"] = float(
+                                        ob_down.get("bid_size_top", 0.0)
+                                    )
+                                    poly_book.book["down_ask_size_top"] = float(
+                                        ob_down.get("ask_size_top", 0.0)
+                                    )
+                            else:
+                                # Reset stale DOWN data to force complement calculation
+                                poly_book.book.pop("down_bid", None)
+                                poly_book.book.pop("down_ask", None)
+                            if up_valid and (not token_down_id or down_valid):
+                                last_clob_book_success_time = now
+                        except Exception as exc:
+                            if (now - last_clob_pull_fail_log_time) >= 90.0:
+                                logging.warning("CLOB book pull failed: %s", exc)
+                                last_clob_pull_fail_log_time = now
+                            else:
+                                logging.debug("CLOB book pull failed (rate-limited): %s", exc)
+                        last_book_pull_time = now
+                        if _net_dbg:
+                            _nw_t3 = time.perf_counter()
+                            logging.info(
+                                "NetworkCheck read_fast=%.1fms clob_roundtrip=%.1fms",
+                                (_nw_t1 - _nw_t0) * 1000.0,
+                                (_nw_t3 - _nw_t2) * 1000.0,
+                            )
 
                 # Re-read fast anchor after CLOB awaits; feeds advance while the event loop is in thread/network work.
                 _fp_before_refresh = fast_price
@@ -1240,6 +1278,21 @@ async def main():
                 logging.error("Emergency exit on shutdown failed: %s", _exc)
         if _heartbeat_task is not None and not _heartbeat_task.done():
             _heartbeat_task.cancel()
+        clob_ws_cache.stop()
+        if not clob_ws_task.done():
+            clob_ws_task.cancel()
+            try:
+                await clob_ws_task
+            except asyncio.CancelledError:
+                pass
+        if clob_user_cache is not None:
+            clob_user_cache.stop()
+        if clob_user_task is not None and not clob_user_task.done():
+            clob_user_task.cancel()
+            try:
+                await clob_user_task
+            except asyncio.CancelledError:
+                pass
         for _t in provider_tasks:
             if not _t.done():
                 _t.cancel()
@@ -1263,6 +1316,20 @@ async def main():
                 try:
                     _fin_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
                     stats.set_live_wallet_usdc(_fin_usdc)
+                    # Phase 2 WebSocket Migration: Set WS/HTTP metrics for final report
+                    if hasattr(live_exec, '_get_ws_metrics'):
+                        ws_metrics = live_exec._get_ws_metrics()
+                        stats.set_ws_metrics(ws_metrics)
+                    if hasattr(live_exec, '_http_metrics'):
+                        stats.set_http_metrics(live_exec._http_metrics)
+                    # Log final WS/HTTP metrics
+                    logging.info(
+                        "[WS_METRICS] Final report: ws_events=%d http_fallbacks=%d "
+                        "ws_latency_avg=%.2fms",
+                        ws_metrics.get("ws_events_received", 0),
+                        live_exec._http_metrics.get("http_fallbacks_total", 0),
+                        ws_metrics.get("ws_latency_avg_ms", 0.0),
+                    )
                 except Exception as _fin_exc:
                     logging.debug("fetch_usdc_balance for final report: %s", _fin_exc)
                     stats.set_live_wallet_usdc(None)

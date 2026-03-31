@@ -1,4 +1,7 @@
-"""Session PnL reporting and journal aggregation for HFT bot."""
+"""Session PnL reporting and journal aggregation for HFT bot.
+
+Phase 2 WebSocket Migration: Includes WebSocket/HTTP latency metrics tracking.
+"""
 
 import csv
 import logging
@@ -8,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 
 def _median_avg(values: List[float]) -> float:
@@ -140,7 +143,10 @@ def _stats_from_realized_pnls(pnls: List[float]) -> _JournalStats:
 
 
 class StatsCollector:
-    """Aggregate PnL metrics and print session / shutdown reports."""
+    """Aggregate PnL metrics and print session / shutdown reports.
+
+    Phase 2 WebSocket Migration: Includes WebSocket/HTTP latency metrics tracking.
+    """
 
     def __init__(self, pnl_tracker):
         """Initialize with a PnLTracker instance."""
@@ -148,10 +154,54 @@ class StatsCollector:
         self.started_ts = time.time()
         # Last Polymarket CLOB free USDC (from API), set by bot in LIVE before each report.
         self._live_wallet_usdc: float | None = None
+        # WebSocket/HTTP metrics tracking (Phase 2 WebSocket Migration)
+        self._ws_metrics: dict[str, Any] = {
+            "ws_events_total": 0,
+            "http_fallbacks_total": 0,
+            "ws_latency_avg_ms": 0.0,
+            "ws_latency_min_ms": 0.0,
+            "ws_latency_max_ms": 0.0,
+            "ws_latency_samples": 0,
+        }
+        self._http_metrics: dict[str, int] = {
+            "http_polls_total": 0,
+            "http_errors": 0,
+        }
 
     def set_live_wallet_usdc(self, value: float | None) -> None:
         """Cache fetch_usdc_balance() for the next show_report / final table (LIVE only)."""
         self._live_wallet_usdc = value
+
+    def set_ws_metrics(self, ws_metrics: dict[str, Any]) -> None:
+        """Set WebSocket metrics from LiveExecutionEngine."""
+        self._ws_metrics.update(ws_metrics)
+
+    def set_http_metrics(self, http_metrics: dict[str, int]) -> None:
+        """Set HTTP metrics from LiveExecutionEngine."""
+        self._http_metrics.update(http_metrics)
+
+    def update_ws_metrics_from_engine(self, live_engine) -> None:
+        """Update WS metrics from LiveExecutionEngine.
+        
+        Phase 2 WebSocket Migration: Pull metrics from live engine for display.
+        """
+        if hasattr(live_engine, '_get_ws_metrics'):
+            ws_metrics = live_engine._get_ws_metrics()
+            self.set_ws_metrics(ws_metrics)
+        if hasattr(live_engine, '_http_metrics'):
+            self.set_http_metrics(live_engine._http_metrics)
+
+    def _ws_metrics_line(self) -> str:
+        """Return human-readable WebSocket metrics line."""
+        if self._ws_metrics["ws_latency_samples"] == 0:
+            return "WS: n/a"
+        return (
+            f"WS: events={self._ws_metrics['ws_events_total']} "
+            f"fallbacks={self._ws_metrics['http_fallbacks_total']} "
+            f"latency_avg={self._ws_metrics['ws_latency_avg_ms']:.1f}ms "
+            f"min={self._ws_metrics['ws_latency_min_ms']:.1f}ms "
+            f"max={self._ws_metrics['ws_latency_max_ms']:.1f}ms"
+        )
 
     def _inventory_line(self) -> str:
         """Human-readable open position for stats (incl. dust)."""
@@ -221,6 +271,9 @@ class StatsCollector:
             f"📈 Реализовано:       {self.pnl.total_pnl:>10.2f} USD  (ROI {roi_realized:+.2f}% от депозита)",
             f"📐 Δ кассы vs депозит: {roi_cash:>+9.2f}%  (модель по fills; при открытой позиции см. риск)",
         ]
+        # Phase 2 WebSocket Migration: Add WS/HTTP metrics line
+        report.append(f"📡 {self._ws_metrics_line()}")
+        
         if self._live_wallet_usdc is not None:
             report.append(
                 f"💵 USDC (CLOB API):   {self._live_wallet_usdc:>10.2f} USD  (свободный баланс на бирже, как в UI)",
