@@ -4,6 +4,7 @@ import statistics
 import subprocess
 import logging
 import json
+import shutil
 from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 
@@ -248,10 +249,22 @@ def print_request_analysis():
 
 
 def traceroute(host="clob.polymarket.com"):
-    logger.info("Running traceroute to CLOB...")
+    traceroute_bin = shutil.which("traceroute")
+    if traceroute_bin:
+        cmd = [traceroute_bin, "-n", "-q", "3", host]
+        tool_name = "traceroute"
+    else:
+        tracepath_bin = shutil.which("tracepath")
+        if not tracepath_bin:
+            logger.warning("Neither traceroute nor tracepath is installed; skipping route diagnostics.")
+            return
+        cmd = [tracepath_bin, host]
+        tool_name = "tracepath"
+
+    logger.info("Running %s to CLOB...", tool_name)
     try:
         result = subprocess.run(
-            ["traceroute", "-n", "-q", "3", host],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
