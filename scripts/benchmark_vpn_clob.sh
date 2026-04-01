@@ -10,24 +10,19 @@
 #   ./hft_bot/scripts/benchmark_vpn_clob.sh
 #
 # Env:
-#   CLOB_URL          default https://clob.polymarket.com/
-#   BENCHMARK_RUNS    default 3
-#   VPN_SETTLE_SEC    seconds after "up" before curl (default 3)
-
-#!/usr/bin/env bash
-# Benchmark HTTPS latency to Polymarket CLOB across NetworkManager VPN profiles.
-#
-# Автоматическое определение местоположения VPN по публичному IP.
-#
-# Usage:
-#   chmod +x hft_bot/scripts/benchmark_vpn_clob.sh
-#   ./hft_bot/scripts/benchmark_vpn_clob.sh
+#   CLOB_URL           default https://clob.polymarket.com/
+#   BENCHMARK_RUNS     default 3
+#   VPN_SETTLE_SEC     seconds after "up" before curl (default 3)
+#   VPN_ONLY_UUID      if set, only this NM connection UUID is benchmarked
+#   VPN_SILENT_NMCLI   if 1, hide nmcli stderr on failure (default 0 = show error text)
 
 set -euo pipefail
 
 CLOB_URL="${CLOB_URL:-https://clob.polymarket.com/}"
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-3}"
 VPN_SETTLE_SEC="${VPN_SETTLE_SEC:-3}"
+VPN_ONLY_UUID="${VPN_ONLY_UUID:-}"
+VPN_SILENT_NMCLI="${VPN_SILENT_NMCLI:-0}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -43,6 +38,21 @@ mapfile -t _uuid_types < <(
 )
 
 [[ ${#_uuid_types[@]} -gt 0 ]] || die "no VPN/WireGuard/OpenVPN profiles in NetworkManager"
+
+if [[ -n "$VPN_ONLY_UUID" ]]; then
+  _filtered=()
+  for ut in "${_uuid_types[@]}"; do
+    IFS=$'\t' read -r u _ <<<"$ut"
+    if [[ "$u" == "$VPN_ONLY_UUID" ]]; then
+      _filtered+=("$ut")
+      break
+    fi
+  done
+  if [[ ${#_filtered[@]} -eq 0 ]]; then
+    die "VPN_ONLY_UUID=$VPN_ONLY_UUID not found among VPN-type connections (see nmcli -t -f UUID,TYPE connection show)"
+  fi
+  _uuid_types=("${_filtered[@]}")
+fi
 
 # Функция для получения местоположения по IP
 get_location_for_ip() {
@@ -111,17 +121,24 @@ trap 'rm -f "$results_file"' EXIT
 printf '%s\n' "uuid	name	type	ok	avg_s	min_s	max_s	ok_runs" >"$results_file"
 
 echo "CLOB_URL=$CLOB_URL  runs=$BENCHMARK_RUNS  settle=${VPN_SETTLE_SEC}s  profiles=${#_uuid_types[@]}"
+[[ -n "$VPN_ONLY_UUID" ]] && echo "VPN_ONLY_UUID=$VPN_ONLY_UUID (single profile)"
 echo ""
 
 for ut in "${_uuid_types[@]}"; do
   IFS=$'\t' read -r uuid typ <<<"$ut"
+  _pname=$(nmcli -g connection.id connection show uuid "$uuid" 2>/dev/null || echo "$uuid")
 
   # Поднятие VPN
   ok=0
-  if nmcli connection up uuid "$uuid" >/dev/null 2>&1; then
+  _nm_out=""
+  if _nm_out=$(nmcli connection up uuid "$uuid" 2>&1); then
     ok=1
   else
-    echo "  connection up FAILED (save password in NM or fix profile)"
+    echo "  connection up FAILED: $_pname  ($typ)"
+    echo "    hint: save VPN password/key in NetworkManager for all users, or fix the profile."
+    if [[ "$VPN_SILENT_NMCLI" != "1" && -n "$_nm_out" ]]; then
+      printf '%s\n' "$_nm_out" | sed 's/^/    nmcli: /'
+    fi
   fi
 
   if [[ "$ok" -eq 1 ]]; then

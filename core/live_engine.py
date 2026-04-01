@@ -124,7 +124,7 @@ class LiveExecutionEngine:
         self._confirmed_buys: dict[str, float] = {}
         self._last_buy_skip_reason: str | None = None
         self.client = None
-        self._http = requests.Session()
+        # Removed unused requests.Session() — all HTTP goes through py_clob_client
         self._market_book_cache: object | None = None
         self._user_order_cache: object | None = None
         self._api_creds: object | None = None
@@ -635,14 +635,14 @@ class LiveExecutionEngine:
         order_id: str,
         timeout: float | None = None,
     ) -> tuple[str, float]:
-        """Wait for order event via WS with HTTP fallback.
+        """Wait for order event via WebSocket only — no HTTP fallback.
 
-        Phase 2 WebSocket Migration: Truly event-driven using asyncio.Event.
+        Phase 2 WebSocket Migration: Purely event-driven using asyncio.Event.
         Uses ClobUserOrderCache.wait_for_order_update() for event-driven waiting.
-        Falls back to HTTP polling only if WS events timeout.
+        No HTTP fallback — if WS times out, returns ("live", 0.0) to continue waiting.
         
-        Comprehensive logging for WS/HTTP fallback events.
-        Latency metrics tracking for WS vs HTTP performance.
+        Memory-based tracking only — no redundant HTTP polling.
+        Latency metrics tracking for WS performance.
 
         Returns (status_str, filled_size) tuple.
         """
@@ -682,17 +682,14 @@ class LiveExecutionEngine:
                     )
                     return cached
         
-        # Timeout — fall back to HTTP polling
-        http_wait_time = time.time() - start_time
-        self._http_metrics["http_fallbacks_total"] += 1
-        logging.warning(
-            "[WS] Order event timeout for %s after %.1fs, falling back to HTTP "
-            "(WS latency=%.2fms, HTTP fallback count=%d)",
-            order_id[:20], http_wait_time,
-            (time.time() - start_time) * 1000,
-            self._http_metrics["http_fallbacks_total"],
+        # Timeout — return ("live", 0.0) to continue waiting in the loop
+        # No HTTP fallback — pure WebSocket event-driven
+        wait_time = time.time() - start_time
+        logging.debug(
+            "[WS] Order event timeout: id=%s wait=%.1fs — continuing to wait",
+            order_id[:20], wait_time,
         )
-        return await asyncio.to_thread(self._get_order_fill, order_id)
+        return ("live", 0.0)
     
     def _track_ws_latency(self, latency_ms: float) -> None:
         """Track WebSocket latency metrics."""
@@ -1107,7 +1104,7 @@ class LiveExecutionEngine:
             logging.warning("get_open_orders failed: %s", exc)
             return []
 
-    def _place_limit_raw(
+    async def _place_limit_raw(
         self, token_id: str, side: str, price: float, size: float
     ) -> tuple[str | None, bool]:
         """Submit a GTC limit order; return (order_id, immediate_fill) or (None, False).
@@ -1115,6 +1112,9 @@ class LiveExecutionEngine:
         immediate_fill is True when the CLOB responds with status='matched' meaning
         the order was fully filled synchronously (no need to poll).
         The order_id key in Polymarket CLOB dict responses is 'orderID' (capital D).
+        
+        Phase 2 Optimization: Non-blocking order placement using executor to avoid
+        blocking the event loop during EIP-712 signing and HTTP request.
         """
         if self.test_mode:
             fake_id = f"sim-{side}-{int(time.time() * 1000)}"
@@ -1127,9 +1127,16 @@ class LiveExecutionEngine:
             logging.error("Cannot place order: py_clob_client unavailable.")
             return None, False
         try:
+            # Create order args (fast, CPU-bound)
             order = OrderArgs(token_id=token_id, price=price, size=size, side=side)
-            signed = self.client.create_order(order)
-            resp = self.client.post_order(signed, OrderType.GTC)
+            
+            # Non-blocking EIP-712 signing (5-10ms CPU-bound)
+            loop = asyncio.get_running_loop()
+            signed = await loop.run_in_executor(None, self.client.create_order, order)
+            
+            # Non-blocking HTTP request (620ms network-bound from Portugal, ~20ms from Ireland)
+            resp = await loop.run_in_executor(None, self.client.post_order, signed, OrderType.GTC)
+            
             if isinstance(resp, dict):
                 order_id = str(resp.get("orderID") or resp.get("order_id") or "")
                 immediate = str(resp.get("status", "")).lower() in ("matched", "filled")
@@ -1414,8 +1421,8 @@ class LiveExecutionEngine:
                 tracked.reprice_count, _ORDER_MAX_REPRICE,
                 tracked.filled_size, remaining, place_size,
             )
-            new_id, new_immediate = await asyncio.to_thread(
-                self._place_limit_raw, tracked.token_id, tracked.side, new_price, place_size
+            new_id, new_immediate = await self._place_limit_raw(
+                tracked.token_id, tracked.side, new_price, place_size
             )
             if new_id:
                 self._active_orders.pop(tracked.order_id, None)
@@ -1526,8 +1533,8 @@ class LiveExecutionEngine:
                 )
                 self._last_buy_skip_reason = "emergency_buy_failed"
                 return
-            order_id, immediate = await asyncio.to_thread(
-                self._place_limit_raw, tracked.token_id, tracked.side, price, em_size
+            order_id, immediate = await self._place_limit_raw(
+                tracked.token_id, tracked.side, price, em_size
             )
             if order_id:
                 emergency = TrackedOrder(
@@ -1623,8 +1630,8 @@ class LiveExecutionEngine:
             token_id[:20],
         )
         self._entry_stats["emergency_exits"] += 1
-        order_id, immediate = await asyncio.to_thread(
-            self._place_limit_raw, token_id, side, price, place_sz
+        order_id, immediate = await self._place_limit_raw(
+            token_id, side, price, place_sz
         )
         if order_id:
             tracked = TrackedOrder(
@@ -2033,8 +2040,8 @@ class LiveExecutionEngine:
         immediate = False
         for _att in range(sell_attempts):
             await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
-            order_id, immediate = await asyncio.to_thread(
-                self._place_limit_raw, token_id, SELL_SIDE, price, size
+            order_id, immediate = await self._place_limit_raw(
+                token_id, SELL_SIDE, price, size
             )
             if order_id:
                 break
@@ -2243,8 +2250,8 @@ class LiveExecutionEngine:
         usdc_before_snapshot: float | None = None
         if not self.test_mode:
             usdc_before_snapshot = await asyncio.to_thread(self.fetch_usdc_balance)
-        order_id, immediate = await asyncio.to_thread(
-            self._place_limit_raw, token_id, BUY, price, shares
+        order_id, immediate = await self._place_limit_raw(
+            token_id, BUY, price, shares
         )
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)

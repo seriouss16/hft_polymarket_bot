@@ -412,7 +412,7 @@ class TestPollOrderReprice:
 
         reprice_calls: list = []
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             reprice_calls.append(price)
             return "new-id", True
 
@@ -438,7 +438,7 @@ class TestPollOrderReprice:
                            age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             return "new-id", True
 
         with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
@@ -464,7 +464,7 @@ class TestPollOrderReprice:
         eng._active_orders[order.order_id] = order
         reprice_prices: list = []
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             reprice_prices.append(price)
             return "new-id", True
 
@@ -520,7 +520,7 @@ class TestClosePosition:
 
         gtc_calls: list = []
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             gtc_calls.append((side, size))
             return "sell-id", True
 
@@ -573,7 +573,7 @@ class TestClosePosition:
 
         gtc_calls: list = []
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             gtc_calls.append(size)
             return "sell-id", True
 
@@ -657,7 +657,7 @@ class TestExecuteSuccess:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             return "order-1", True
 
         with patch.object(eng, "get_best_prices", return_value=(0.48, 0.52)):
@@ -677,7 +677,7 @@ class TestExecuteSuccess:
             http_calls.append(token_id)
             return (0.48, 0.52)
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             return "order-cached", True
 
         with patch.object(eng, "get_best_prices", side_effect=fake_get_best):
@@ -699,7 +699,7 @@ class TestExecuteSuccess:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
-        def fake_place(token_id, side, price, size):
+        async def fake_place(token_id, side, price, size):
             return "order-2", False
 
         poll_awaited: list = []

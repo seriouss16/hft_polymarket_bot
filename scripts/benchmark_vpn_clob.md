@@ -42,6 +42,10 @@ BENCHMARK_RUNS=10 VPN_SETTLE_SEC=5 \
 | `CLOB_URL`        | `https://clob.polymarket.com/` | URL для `curl` (полный HTTPS-запрос) |
 | `BENCHMARK_RUNS` | `7`         | Сколько замеров подряд на один VPN |
 | `VPN_SETTLE_SEC`  | `4`          | Пауза после `connection up` до первого замера (сек) |
+| `VPN_ONLY_UUID`   | *(пусто)*   | Только один профиль: UUID из `nmcli -t -f UUID,TYPE connection show` |
+| `VPN_SILENT_NMCLI` | `0`        | Если `1` — не печатать текст ошибки `nmcli` при неудачном `up` |
+
+При ошибке `connection up` скрипт теперь выводит **имя профиля** и строки от `nmcli` (например, что не хватает секрета) — так проще понять причину, не только общую подсказку про пароль.
 
 Пример:
 

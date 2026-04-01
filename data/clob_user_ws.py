@@ -198,7 +198,11 @@ class ClobUserOrderCache:
         await self.close_ws()
 
     def get_order_fill(self, order_id: str) -> tuple[str, float] | None:
-        """Return ``(status_lower, filled_size)`` if cache has fresh data, else HTTP fallback."""
+        """Return ``(status_lower, filled_size)`` if cache has fresh data, else None.
+
+        Pure WebSocket event-driven — no HTTP fallback.
+        Returns None if no fresh cache available, caller should continue waiting.
+        """
         if not order_id:
             return None
         oid = _norm_oid(order_id)
@@ -212,25 +216,10 @@ class ClobUserOrderCache:
                         break
             if row is not None:
                 if time.time() - float(row.get("ts", 0.0)) <= self._max_stale_sec:
-                    # Fresh cache available, return it without HTTP fallback
+                    # Fresh cache available, return it
                     return str(row.get("status", "unknown")), float(row.get("filled", 0.0))
             
-            # No fresh cache - this would trigger HTTP fallback in the caller
-            # Track the fallback attempt for metrics
-            if oid in self._state_machine:
-                self._state_machine[oid].http_fallback_count += 1
-                self._state_machine[oid].last_http_poll_ts = time.time()
-                # Log fallback event with context
-                logging.debug(
-                    "[WS] HTTP fallback triggered: id=%s cache_age=%.3fs max_stale=%.1fs "
-                    "(fallback_count=%d)",
-                    oid[:20],
-                    time.time() - float(row.get("ts", 0.0)) if row else -1.0,
-                    self._max_stale_sec,
-                    self._state_machine[oid].http_fallback_count,
-                )
-            self._http_fallbacks_total += 1
-            
+            # No fresh cache — return None, caller should continue waiting for WS event
             return None
 
     def set_order_callback(self, callback: Callable[[str, str, float], None]) -> None:
