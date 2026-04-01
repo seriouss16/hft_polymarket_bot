@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -10,20 +11,49 @@ from utils.env_merge import merge_env_file
 from utils.env_unify import apply_sim_live_unify
 from utils.workspace_root import get_workspace_root
 
+_log = logging.getLogger(__name__)
+
 
 def load_runtime_env() -> None:
-    """Load layered runtime configuration files (defaults, then runtime, then .env).
+    """Load layered runtime configuration files (weakest → strongest).
 
-    ``sim_slippage.env`` is merged first so SIM slippage defaults apply when
-    ``runtime.env`` omits those keys; ``runtime.env`` then overwrites (see merge_env_file).
-    Finally :func:`utils.env_unify.apply_sim_live_unify` aligns ``LIVE_ORDER_SIZE`` /
-    ``LIVE_MAX_SPREAD`` with ``HFT_*`` when the former are unset.
+    Hierarchy (each layer overwrites the previous for keys it defines):
+
+    1. ``config/runtime.env``        — base defaults (weakest)
+    2. Day/Night session profile     — ``config/runtime_day.env`` or ``config/runtime_night.env``
+    3. ``config/sim_slippage.env``   — simulation slippage defaults
+    4. ``.env``                      — local overrides (strongest)
+
+    After all layers are merged, :func:`utils.env_unify.apply_sim_live_unify` aligns
+    ``LIVE_ORDER_SIZE`` / ``LIVE_MAX_SPREAD`` with ``HFT_*`` when the former are unset.
+    Finally, sizing parameters are logged for startup diagnostics.
     """
     root = get_workspace_root()
-    merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
+
+    # 1. Base defaults (weakest)
     merge_env_file(root / "config" / "runtime.env", overwrite=True)
+
+    # 2. Day/Night session profile (applied at startup based on UTC time)
+    from core.session_profile import apply_profile
+    apply_profile(force=True)
+
+    # 3. SIM slippage defaults
+    merge_env_file(root / "config" / "sim_slippage.env", overwrite=True)
+
+    # 4. Local .env overrides (strongest)
     merge_env_file(root / ".env", overwrite=True)
+
+    # 5. Unify SIM/LIVE params (fills LIVE_ORDER_SIZE from HFT_DEFAULT_TRADE_USD if unset)
     apply_sim_live_unify()
+
+    # 6. Startup logging for diagnostics — confirms the effective sizing params
+    _log.info(
+        "Startup sizing: LIVE_ORDER_SIZE=%s HFT_DEFAULT_TRADE_USD=%s HFT_MAX_POSITION_USD=%s LIVE_ACCOUNT_BALANCE=%s",
+        os.environ.get("LIVE_ORDER_SIZE"),
+        os.environ.get("HFT_DEFAULT_TRADE_USD"),
+        os.environ.get("HFT_MAX_POSITION_USD"),
+        os.environ.get("LIVE_ACCOUNT_BALANCE"),
+    )
 
 
 UVLOOP_ACTIVE = False
