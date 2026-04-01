@@ -17,6 +17,7 @@ from pathlib import Path
 from utils.env_config import req_str
 from utils.env_unify import apply_sim_live_unify
 from utils.log_dedupe import SameMessageDedupeFilter
+from utils.workspace_root import get_workspace_root
 
 
 def _silence_http_client_loggers() -> None:
@@ -193,7 +194,7 @@ def _runtime_configuration_keys(root: Path) -> list[str]:
 
 def _log_runtime_configuration() -> None:
     """Log effective configuration from env files and matching process variables."""
-    root = Path(__file__).resolve().parent
+    root = get_workspace_root()
     keys = _runtime_configuration_keys(root)
     logging.info("--- Runtime configuration (effective env, %s keys) ---", len(keys))
     for k in keys:
@@ -201,11 +202,25 @@ def _log_runtime_configuration() -> None:
     logging.info("--- End runtime configuration ---")
 
 
+def _resolve_log_dir() -> Path:
+    """Log directory: ``HFT_LOG_DIR`` or ``<workspace>/reports/logs`` (relative paths vs workspace)."""
+    root = get_workspace_root()
+    raw = (os.getenv("HFT_LOG_DIR") or "").strip()
+    if not raw:
+        return root / "reports" / "logs"
+    p = Path(raw)
+    return p.resolve() if p.is_absolute() else (root / p).resolve()
+
+
 def setup_logging() -> None:
     """Configure stdout logging and per-run file logs with retention."""
-    log_dir = Path(os.getenv("HFT_LOG_DIR", str(Path(__file__).resolve().parent / "reports" / "logs")))
+    log_dir = _resolve_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
-    keep_files = int(os.getenv("HFT_LOG_KEEP_FILES"))
+    _raw_keep = (os.getenv("HFT_LOG_KEEP_FILES") or "100").strip()
+    try:
+        keep_files = int(_raw_keep) if _raw_keep else 100
+    except ValueError:
+        keep_files = 100
     start_tag = datetime.now().strftime("%d%m%y_%H%M%S")
     log_basename = f"bot_{start_tag}.log"
     log_path = log_dir / log_basename
@@ -235,5 +250,9 @@ def setup_logging() -> None:
     fh.addFilter(_dedupe)
     root.addHandler(fh)
     _silence_http_client_loggers()
-    logging.info("File logging initialized: %s (retention=%s)", log_path.name, keep_files)
+    logging.info(
+        "File logging initialized: %s (retention=%s)",
+        log_path,
+        keep_files,
+    )
     _log_runtime_configuration()

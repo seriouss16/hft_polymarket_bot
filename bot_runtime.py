@@ -8,6 +8,7 @@ from pathlib import Path
 
 from utils.env_merge import merge_env_file
 from utils.env_unify import apply_sim_live_unify
+from utils.workspace_root import get_workspace_root
 
 
 def load_runtime_env() -> None:
@@ -18,7 +19,7 @@ def load_runtime_env() -> None:
     Finally :func:`utils.env_unify.apply_sim_live_unify` aligns ``LIVE_ORDER_SIZE`` /
     ``LIVE_MAX_SPREAD`` with ``HFT_*`` when the former are unset.
     """
-    root = Path(__file__).resolve().parent
+    root = get_workspace_root()
     merge_env_file(root / "config" / "sim_slippage.env", overwrite=False)
     merge_env_file(root / "config" / "runtime.env", overwrite=True)
     merge_env_file(root / ".env", overwrite=True)
