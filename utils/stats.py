@@ -216,7 +216,7 @@ class StatsCollector:
             omitted = len(items) - max_rows
             items = items[-max_rows:]
         lines = [
-            "📊 Слоты 5m UTC (старт окна)   n   W-L    WR%      PnL$",
+            "📊 5m slots UTC (window start)   n   W-L    WR%      PnL$",
         ]
         tot_n = tot_w = tot_pnl = 0
         for slot_ts, a in items:
@@ -230,7 +230,7 @@ class StatsCollector:
                 f"   {label:>10}  {a.n:>3}  {a.wins:>2}-{losses:<2}  {wr:>5.1f}%  {a.pnl_sum:>+8.2f}"
             )
         if omitted:
-            lines.append(f"   … ещё слотов: {omitted} (см. HFT_STATS_SLOT_TABLE_MAX)")
+            lines.append(f"   … {omitted} more slots (see HFT_STATS_SLOT_TABLE_MAX)")
         twr = (tot_w / tot_n * 100.0) if tot_n else 0.0
         lines.append(
             f"   {'Σ':>10}  {tot_n:>3}  {tot_w:>2}-{tot_n - tot_w:<2}  {twr:>5.1f}%  {tot_pnl:>+8.2f}"
@@ -307,7 +307,7 @@ class StatsCollector:
         if inv <= 1e-12:
             return "NO"
         if inv <= max(dust, 1e-6):
-            return f"пыль (~{inv:.4f} sh)"
+            return f"dust (~{inv:.4f} sh)"
         return f"YES ({inv:.4f} sh)"
 
     @staticmethod
@@ -329,17 +329,17 @@ class StatsCollector:
         forced = (day_mode == "1") != (night_mode == "1")
         if forced:
             active = "DAY ☀️" if day_mode == "1" else "NIGHT 🌙"
-            return f"{active} [принудительный]"
+            return f"{active} [forced]"
         from core.session_profile import current_profile_name  # noqa: PLC0415
         name = current_profile_name()
         label = "DAY ☀️" if name == "day" else "NIGHT 🌙"
-        return f"{label} [авто]"
+        return f"{label} [auto]"
 
     def _execution_mode_title(self) -> str:
         """SIM = modeled book/fees; LIVE = CLOB fills (valid to compare to Polymarket UI)."""
         if getattr(self.pnl, "live_mode", False):
             return "HFT LIVE (CLOB)"
-        return "HFT SIM (модель ≠ UI Polymarket)"
+        return "HFT SIM (model ≠ Polymarket UI)"
 
     def show_report(self):
         """Print compact PnL summary to stdout (legacy block format)."""
@@ -358,15 +358,15 @@ class StatsCollector:
 
         report = [
             "\n" + "=" * 45,
-            f"📊 ОТЧЕТ ПО ЭФФЕКТИВНОСТИ ({self._execution_mode_title()})",
+            f"📊 PERFORMANCE REPORT ({self._execution_mode_title()})",
             "=" * 45,
-            f"🕒 Старт сессии:      {started_at}",
-            f"🧾 Время отчета:      {report_at}",
-            f"⏱️ Аптайм:            {uptime_min:>10.1f} min",
-            f"🗂️ Режим:             {self._session_mode_label()}",
-            f"💰 Касса (сессия):    {self.pnl.balance:>10.2f} USD  (депозит {_ib:.2f}, Δ {cash_delta:+.2f})",
-            f"📈 Реализовано:       {self.pnl.total_pnl:>10.2f} USD  (ROI {roi_realized:+.2f}% от депозита)",
-            f"📐 Δ кассы vs депозит: {roi_cash:>+9.2f}%  (модель по fills; при открытой позиции см. риск)",
+            f"🕒 Session start:      {started_at}",
+            f"🧾 Report time:        {report_at}",
+            f"⏱️ Uptime:             {uptime_min:>10.1f} min",
+            f"🗂️ Mode:               {self._session_mode_label()}",
+            f"💰 Cash (session):     {self.pnl.balance:>10.2f} USD  (deposit {_ib:.2f}, Δ {cash_delta:+.2f})",
+            f"📈 Realized PnL:       {self.pnl.total_pnl:>10.2f} USD  (ROI {roi_realized:+.2f}% on deposit)",
+            f"📐 Cash vs deposit:    {roi_cash:>+9.2f}%  (fill-based model; open position adds risk)",
         ]
         # Phase 2 WebSocket Migration: Add WS/HTTP metrics line
         report.append(f"📡 {self._ws_metrics_line()}")
@@ -376,24 +376,24 @@ class StatsCollector:
         
         if self._live_wallet_usdc is not None:
             report.append(
-                f"💵 USDC (CLOB API):   {self._live_wallet_usdc:>10.2f} USD  (свободный баланс на бирже, как в UI)",
+                f"💵 USDC (CLOB API):   {self._live_wallet_usdc:>10.2f} USD  (free balance on venue, as in UI)",
             )
         elif getattr(self.pnl, "live_mode", False):
             report.append(
-                "💵 USDC (CLOB API):        —  (не удалось прочитать)",
+                "💵 USDC (CLOB API):        —  (unavailable)",
             )
         report += [
-            f"🔄 Всего сделок:      {self.pnl.trades_count:>10}",
-            f"✅ Побед / ❌ Убытков: {self.pnl.wins:>4} / {losses:<4}",
+            f"🔄 Total trades:       {self.pnl.trades_count:>10}",
+            f"✅ Wins / ❌ Losses:   {self.pnl.wins:>4} / {losses:<4}",
             f"🎯 Win rate:          {win_rate:>10.1f}%",
-            f"📊 Средняя на сделку: {avg_pnl:>+10.4f} USD",
-            f"📉 Макс. просадка:    {self.pnl.max_drawdown*100:>10.1f}%",
-            f"📦 В позиции:         {self._inventory_line()}",
+            f"📊 Avg per trade:     {avg_pnl:>+10.4f} USD",
+            f"📉 Max drawdown:      {self.pnl.max_drawdown*100:>10.1f}%",
+            f"📦 In position:       {self._inventory_line()}",
             f"⏸️ Regime cooldown:   {self._format_regime_cooldown(cooldown_until, now_ts)}",
         ]
         sp = getattr(self.pnl, "strategy_performance", None)
         if sp is not None and sp.slices:
-            report.append("📊 По срезам (strategy:profile), реализовано:")
+            report.append("📊 By slice (strategy:profile), realized:")
             for key in sorted(sp.slices.keys()):
                 sl = sp.slices[key]
                 wr = (sl.wins / sl.trades * 100.0) if sl.trades > 0 else 0.0
@@ -402,7 +402,7 @@ class StatsCollector:
                     f"   {key:<30} n={sl.trades:>3}  WR={wr:>5.1f}%  "
                     f"PnL={sl.pnl_sum:>+9.2f} USD  avg={sl_avg:>+7.4f}"
                 )
-            report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
+            report.append(f"📊 Sum over slices:            {sp.total_pnl_all_keys():>+10.2f} USD")
 
         _slot_lines = self._slot_performance_lines()
         if _slot_lines:
@@ -413,10 +413,10 @@ class StatsCollector:
         if _pnls:
             js = _stats_from_realized_pnls(_pnls)
             if js.rows > 0:
-                report.append("📊 Медианные показатели (сессия):")
-                report.append(f"   Медианная средняя (все):     {js.median_avg_pnl:>+10.4f} USD")
-                report.append(f"   Медианная средняя (профит):  {js.median_avg_win:>+10.4f} USD")
-                report.append(f"   Медианная средняя (убыток):  {js.median_avg_loss:>10.4f} USD")
+                report.append("📊 Median metrics (session):")
+                report.append(f"   Median avg (all):            {js.median_avg_pnl:>+10.4f} USD")
+                report.append(f"   Median avg (wins):           {js.median_avg_win:>+10.4f} USD")
+                report.append(f"   Median avg (losses):         {js.median_avg_loss:>10.4f} USD")
         
         report.append("=" * 45 + "\n")
 
@@ -515,38 +515,38 @@ class StatsCollector:
         lines = [
             "",
             sep,
-            row("Итоговая таблица (сессия)", ""),
+            row("Final summary (session)", ""),
             sep,
-            row("Причина завершения", shutdown_reason),
-            row("Режим", self._session_mode_label()),
-            row("Учёт PnL", self._execution_mode_title()),
-            row("Старт сессии", started_at),
-            row("Время отчета", report_at),
-            row("Аптайм, min", f"{uptime_min:.1f}"),
+            row("Shutdown reason", shutdown_reason),
+            row("Mode", self._session_mode_label()),
+            row("PnL accounting", self._execution_mode_title()),
+            row("Session start", started_at),
+            row("Report time", report_at),
+            row("Uptime, min", f"{uptime_min:.1f}"),
             sep,
-            row("Начальный баланс USD", f"{self.pnl.initial_balance:.2f}"),
-            row("Текущий баланс USD (сессия)", f"{self.pnl.balance:.2f}"),
-            row("Чистая прибыль USD (реализ.)", f"{self.pnl.total_pnl:+.2f}"),
-            row("ROI % (реализ. / депозит)", f"{roi_realized:+.2f}"),
-            row("Δ кассы vs депозит %", f"{roi_cash:+.2f}"),
+            row("Initial balance USD", f"{self.pnl.initial_balance:.2f}"),
+            row("Current balance USD (session)", f"{self.pnl.balance:.2f}"),
+            row("Net profit USD (realized)", f"{self.pnl.total_pnl:+.2f}"),
+            row("ROI % (realized / deposit)", f"{roi_realized:+.2f}"),
+            row("Cash vs deposit %", f"{roi_cash:+.2f}"),
             row(
                 "USDC CLOB (API)",
                 f"{self._live_wallet_usdc:.2f}" if self._live_wallet_usdc is not None else "—",
             ),
-            row("Макс. просадка %", f"{self.pnl.max_drawdown*100:.1f}"),
+            row("Max drawdown %", f"{self.pnl.max_drawdown*100:.1f}"),
             sep,
-            row("Закрытых сделок (sim)", str(self.pnl.trades_count)),
-            row("Побед / Убытков", f"{self.pnl.wins} / {losses}"),
+            row("Closed trades (sim)", str(self.pnl.trades_count)),
+            row("Wins / Losses", f"{self.pnl.wins} / {losses}"),
             row("Win rate %", f"{win_rate:.1f}"),
-            row("Позиция (PnL)", self._inventory_line()),
+            row("Position (PnL)", self._inventory_line()),
             sep,
         ]
 
         if js_session.rows > 0:
             lines += [
-                row("Медианная средняя (все, сессия)", f"{js_session.median_avg_pnl:+.4f} USD"),
-                row("Медианная средняя (профит, сессия)", f"{js_session.median_avg_win:+.4f} USD"),
-                row("Медианная средняя (убыток, сессия)", f"{js_session.median_avg_loss:+.4f} USD"),
+                row("Median avg (all, session)", f"{js_session.median_avg_pnl:+.4f} USD"),
+                row("Median avg (wins, session)", f"{js_session.median_avg_win:+.4f} USD"),
+                row("Median avg (losses, session)", f"{js_session.median_avg_loss:+.4f} USD"),
                 sep,
             ]
 
@@ -554,27 +554,27 @@ class StatsCollector:
             lines += [
                 row("--- Journal stats ---", ""),
                 sep,
-                row("Строк в журнале", str(js.rows)),
-                row("Побед / Убытков", f"{js.win_count} / {js.loss_count}"),
+                row("Journal rows", str(js.rows)),
+                row("Wins / Losses (journal)", f"{js.win_count} / {js.loss_count}"),
                 row("Win rate % (journal)", f"{js.win_rate_pct:.1f}"),
                 row("Profit factor", f"{js.profit_factor:.2f}" if js.profit_factor != float('inf') else "∞"),
                 sep,
-                row("Сумма PnL (журнал)", f"{js.pnl_sum:+.4f} USD"),
-                row("Сумма профитов", f"{js.win_pnl_sum:+.4f} USD"),
-                row("Сумма убытков", f"{js.loss_pnl_sum:+.4f} USD"),
+                row("PnL sum (journal)", f"{js.pnl_sum:+.4f} USD"),
+                row("Sum of wins", f"{js.win_pnl_sum:+.4f} USD"),
+                row("Sum of losses", f"{js.loss_pnl_sum:+.4f} USD"),
                 sep,
-                row("Средняя на сделку", f"{js.avg_pnl:+.4f} USD"),
-                row("Средняя прибыльная", f"{js.avg_win:+.4f} USD"),
-                row("Средняя убыточная", f"{js.avg_loss:+.4f} USD"),
+                row("Avg per trade", f"{js.avg_pnl:+.4f} USD"),
+                row("Avg winning", f"{js.avg_win:+.4f} USD"),
+                row("Avg losing", f"{js.avg_loss:+.4f} USD"),
                 sep,
-                row("Средневзвешенная (все)", f"{js.weighted_avg_pnl:+.4f} USD"),
-                row("Средневзвешенная (профит)", f"{js.weighted_avg_win:+.4f} USD"),
-                row("Средневзвешенная (убыток)", f"{js.weighted_avg_loss:+.4f} USD"),
+                row("Weighted avg (all)", f"{js.weighted_avg_pnl:+.4f} USD"),
+                row("Weighted avg (wins)", f"{js.weighted_avg_win:+.4f} USD"),
+                row("Weighted avg (losses)", f"{js.weighted_avg_loss:+.4f} USD"),
                 sep,
             ]
 
             if jp is not None:
-                lines.append(row("Журнал (файл)", jp.name))
+                lines.append(row("Journal (file)", jp.name))
 
             lines += [
                 row("exit_reason", "count"),
@@ -585,8 +585,8 @@ class StatsCollector:
             lines.append(sep)
         elif jp is not None:
             lines += [
-                row("Журнал (файл)", jp.name),
-                row("Строк в журнале", "0"),
+                row("Journal (file)", jp.name),
+                row("Journal rows", "0"),
                 sep,
             ]
 

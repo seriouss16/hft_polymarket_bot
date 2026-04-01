@@ -30,7 +30,7 @@ class FastExchangeProvider:
         while True:
             try:
                 async with websockets.connect(uri, ping_interval=10, ping_timeout=5) as ws:
-                    logging.info(f"✅ [{self.name}] Соединение установлено: {uri}")
+                    logging.info(f"✅ [{self.name}] Connected: {uri}")
                     
                     if self.name == "coinbase":
                         product = self.symbol.upper()
@@ -81,6 +81,6 @@ class FastExchangeProvider:
                 logging.info("🛑 [%s] WebSocket task cancelled; stopping provider.", self.name)
                 raise
             except Exception as e:
-                logging.error(f"❌ [{self.name}] Ошибка: {e}")
+                logging.error(f"❌ [{self.name}] Error: {e}")
                 delay = float(os.getenv("HFT_WS_RECONNECT_SEC") or "2")
                 await asyncio.sleep(delay)

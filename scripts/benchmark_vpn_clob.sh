@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Benchmark HTTPS latency to Polymarket CLOB across NetworkManager VPN profiles.
 #
-# Instructions (RU): see benchmark_vpn_clob.md in this directory.
+# See project docs for VPN benchmarking notes if needed.
 #
 # Requires: NetworkManager (nmcli), curl. Secrets should be stored in NM (no password prompt).
 #
@@ -31,7 +31,7 @@ command -v curl >/dev/null 2>&1 || die "curl not found"
 
 VPN_TYPES='^(vpn|wireguard|openvpn|pptp|l2tp|openconnect)$'
 
-# UUID + TYPE (без имени)
+# UUID + TYPE (no display name)
 mapfile -t _uuid_types < <(
   nmcli -t -f UUID,TYPE connection show 2>/dev/null | awk -F: -v re="$VPN_TYPES" '
     NF == 2 && $2 ~ re { print $1 "\t" $2 }'
@@ -54,7 +54,7 @@ if [[ -n "$VPN_ONLY_UUID" ]]; then
   _uuid_types=("${_filtered[@]}")
 fi
 
-# Функция для получения местоположения по IP
+# Resolve rough location label for an IP (ipinfo.io).
 get_location_for_ip() {
   local ip="$1"
   local info city country
@@ -64,13 +64,13 @@ get_location_for_ip() {
   echo "$country, $city"
 }
 
-# Получение читаемого имени профиля с местоположением
+# Human-readable profile label (optional location suffix).
 name_for_uuid() {
   local uuid="$1"
   local base_name
   base_name=$(nmcli -g connection.id connection show uuid "$uuid" 2>/dev/null || echo "$uuid")
 
-  # Если переменная LOC_TEMP установлена, использовать её
+  # If LOC_TEMP is set, prefix it (VPN egress location).
   if [[ -n "${LOC_TEMP:-}" ]]; then
     echo "$LOC_TEMP - $base_name"
   else
@@ -128,7 +128,7 @@ for ut in "${_uuid_types[@]}"; do
   IFS=$'\t' read -r uuid typ <<<"$ut"
   _pname=$(nmcli -g connection.id connection show uuid "$uuid" 2>/dev/null || echo "$uuid")
 
-  # Поднятие VPN
+  # Bring VPN up
   ok=0
   _nm_out=""
   if _nm_out=$(nmcli connection up uuid "$uuid" 2>&1); then
@@ -144,7 +144,7 @@ for ut in "${_uuid_types[@]}"; do
   if [[ "$ok" -eq 1 ]]; then
     sleep "$VPN_SETTLE_SEC"
 
-    # Получаем текущий публичный IP VPN
+    # Current public IP over VPN
     IP=$(curl -s https://ipinfo.io/ip || echo "")
     if [[ -n "$IP" ]]; then
       LOC_TEMP=$(get_location_for_ip "$IP")
@@ -163,7 +163,7 @@ for ut in "${_uuid_types[@]}"; do
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$uuid" "$name" "$typ" "$ok" "$avg" "$min" "$max" "$nruns" >>"$results_file"
 
-  # Отключаем VPN
+  # Tear VPN down
   down_if_vpn_uuid "$uuid"
   echo ""
 done

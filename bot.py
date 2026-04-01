@@ -15,7 +15,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-print(">>> Инициализация HFT системы...", flush=True)
+print(">>> Initializing HFT system...", flush=True)
 
 from bot_config_log import setup_logging  # noqa: E402
 

@@ -122,12 +122,12 @@ class HFTEngine:
         self.pnl = pnl_tracker
         self._strategy_label = str(strategy_label)
         
-        # --- Базовый Edge (в пунктах цены) ---
+        # --- Base edge (price points) ---
         self.noise_edge = float(os.getenv("HFT_NOISE_EDGE"))
         self.buy_edge = float(os.getenv("HFT_BUY_EDGE"))
         self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS"))
         
-        # --- Тайминги и объемы ---
+        # --- Timing and sizing ---
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC"))
         self.last_trade_time = 0.0
         self.max_position = float(os.getenv("HFT_MAX_POSITION_USD"))
@@ -149,7 +149,7 @@ class HFTEngine:
         self.entry_time = 0.0
         self._live_entry_sync_pending = False
 
-        # --- Тейки и Стопы (в пунктах и USD) ---
+        # --- Take-profit / stop (points and USD) ---
         self.poly_take_profit_move = float(os.getenv("HFT_POLY_TP_MOVE"))
         self.poly_stop_move = float(os.getenv("HFT_POLY_SL_MOVE"))
         self.target_profit_usd = float(os.getenv("HFT_TARGET_PROFIT_USD"))
@@ -170,7 +170,7 @@ class HFTEngine:
         self._peak_unrealized = 0.0
         self._trailing_sl_floor = None
 
-        # --- RSI логика ---
+        # --- RSI logic ---
         self.rsi_period = 14
         self.adx_period = int(os.getenv("HFT_ADX_PERIOD", "14") or "14")
         # ADX on raw exchange ticks (~4–5 Hz CB → ~60 ticks ≈ 12–15s lookback for short-trend strength).
@@ -193,7 +193,7 @@ class HFTEngine:
             os.getenv("HFT_RSI_ENTRY_DOWN_HIGH") or os.getenv("HFT_RSI_ENTRY_NO_HIGH")
         )
         
-        # Выходы по RSI
+        # RSI exits
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE"))
         self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE"))
         self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD"))
@@ -208,7 +208,7 @@ class HFTEngine:
         self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
         self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
 
-        # --- RSI Slope (Наклон) ---
+        # --- RSI slope ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED") == "1"
         self.rsi_slope_up_exit = -2.0
         self.rsi_slope_down_exit = 2.0
@@ -244,7 +244,7 @@ class HFTEngine:
         self.aggressive_entry_relax_speed = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED"))
         self.aggressive_entry_relax_speed_down = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED_DOWN"))
 
-        # --- Подтверждение входа (Entry Confirm) ---
+        # --- Entry confirmation ---
         self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC"))
         self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC"))
         self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE"))
@@ -254,13 +254,13 @@ class HFTEngine:
         self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
         self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
 
-        # --- Скорость и Акселерация ---
+        # --- Speed and acceleration ---
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR"))
         self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED") == "1"
         self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN"))
         self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR"))
 
-        # --- Динамический объем (Risk Management) ---
+        # --- Dynamic size (risk management) ---
         self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD"))
         self.dynamic_amount_min_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MIN_USD"))
         self.dynamic_amount_max_usd = float(os.getenv("HFT_DYNAMIC_AMOUNT_MAX_USD"))
@@ -275,7 +275,7 @@ class HFTEngine:
         self.trade_pct_of_deposit = float(os.getenv("HFT_TRADE_PCT_OF_DEPOSIT"))
         self.fixed_trade_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
 
-        # --- Стакан (Orderbook) и Ликвидность ---
+        # --- Order book and liquidity ---
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN"))
         self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX"))
         self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS"))
@@ -296,7 +296,7 @@ class HFTEngine:
         )
         self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
 
-        # --- Задержка (Latency Guard) ---
+        # --- Latency guard ---
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
         self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS"))
         self.entry_min_ask_up_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_UP"))
@@ -320,7 +320,7 @@ class HFTEngine:
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
 
-        # --- Z-Score (Статистический вход) ---
+        # --- Z-score (statistical entry) ---
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
 
@@ -330,7 +330,7 @@ class HFTEngine:
         self.entry_zscore_bypass_abs_speed = float(os.getenv("HFT_ENTRY_ZSCORE_BYPASS_ABS_SPEED"))
         self.entry_aggressive_min_trend_age_sec = float(os.getenv("HFT_AGGRESSIVE_MIN_TREND_AGE_SEC"))
 
-        # --- Вспомогательные состояния ---
+        # --- Auxiliary state ---
         self.soft_exits_enabled = True
         self.no_entry_guards = os.getenv("HFT_NO_ENTRY_GUARDS") == "1"
         self.edge_window = deque(maxlen=120)
@@ -1724,7 +1724,7 @@ class HFTEngine:
                 and sec_left <= self.slot_force_close_last_sec
             ):
                 logging.warning(
-                    "⚠️ СЛОТ: до конца ≤%.1fс (осталось %.2fс) — принудительное закрытие по 99¢.",
+                    "⚠️ SLOT: ≤%.1fs to end (%.2fs left) — forcing close at 99¢.",
                     self.slot_force_close_last_sec,
                     sec_left,
                 )
@@ -1749,7 +1749,7 @@ class HFTEngine:
                 )
                 if reached_99c:
                     logging.warning(
-                        "⚠️ СЛОТ: осталось %.0fс (< %.0fс) и 99¢ на книге — закрываем по 99¢.",
+                        "⚠️ SLOT: %.0fs left (< %.0fs) and 99¢ on book — closing at 99¢.",
                         sec_left,
                         self.slot_99c_max_sec,
                     )
@@ -1771,7 +1771,7 @@ class HFTEngine:
                 _slot_log_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_LOG_MIN_SEC"))
                 if _slot_log_sec <= 0.0 or _now - self._last_slot_expiry_info_log_ts >= _slot_log_sec:
                     logging.info(
-                        "⏳ СЛОТ ЗАКАНЧИВАЕТСЯ (%.0fс), но 99¢ не достигнуты -> продолжаем плановый выход.",
+                        "⏳ SLOT ending (%.0fs left), 99¢ not reached — continuing planned exit.",
                         sec_left,
                     )
                     self._last_slot_expiry_info_log_ts = _now

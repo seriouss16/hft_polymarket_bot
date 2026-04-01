@@ -56,7 +56,7 @@ async def main():
     if UVLOOP_ACTIVE:
         logging.info("asyncio: uvloop event loop policy active")
 
-    # --- Конфигурация ---
+    # --- Configuration ---
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     validate_required_config(LIVE_MODE)
 
@@ -81,7 +81,7 @@ async def main():
     # When HFT_SLOT_POLL_SEC=0, slot/market checks still run at most once per this interval.
     MIN_SLOT_POLL_SEC = req_float("HFT_MIN_SLOT_POLL_SEC")
 
-    # --- Инициализация компонентов ---
+    # --- Component wiring ---
     # Signal path: identical to SIM (process_tick + execute → log_trade). LIVE only
     # changes (1) PnLTracker.live_mode so log_trade suppresses ledger updates until
     # live_open/live_close, and (2) the block below that sends real CLOB orders.
@@ -174,7 +174,7 @@ async def main():
         import tensorflow as tf
         tf.config.set_visible_devices([], 'GPU')
 
-    # --- Запуск провайдеров быстрых цен (Coinbase anchor; Binance опционально) ---
+    # --- Start fast price providers (Coinbase anchor; Binance optional) ---
     providers: list[FastExchangeProvider] = []
     if not DISABLE_BINANCE_FAST:
         providers.append(
@@ -374,7 +374,7 @@ async def main():
         except Exception as _ea_exc:
             logging.debug("[LIVE] reconcile ensure_conditional_allowance: %s", _ea_exc)
 
-    logging.info("🔥 Система запущена. Ожидание первого слота Polymarket...")
+    logging.info("🔥 System started. Waiting for first Polymarket slot...")
     if ENABLE_LSTM:
         logging.info("HFT_ENABLE_LSTM=1: TensorFlow LSTM inference on (higher CPU).")
     else:
@@ -433,7 +433,7 @@ async def main():
                 strategy_hub.reload_profile_params()
                 risk.reload_profile_params()
 
-            # 1. Авто-переключение слота.
+            # 1. Auto slot rollover.
             # React immediately when UTC time crosses an exact 5m boundary.
             slot_poll = SLOT_POLL_SEC if SLOT_POLL_SEC > 0.0 else MIN_SLOT_POLL_SEC
             slot_poll = max(slot_poll, MIN_SLOT_POLL_SEC)
@@ -446,7 +446,7 @@ async def main():
                 if last_slot_ts is None:
                     last_slot_ts = ts
                 elif slot_boundary_crossed:
-                    logging.info("🕒 Новый 5m-слот: UTC boundary ts=%s.", ts)
+                    logging.info("🕒 New 5m slot: UTC boundary ts=%s.", ts)
                     last_slot_ts = ts
                 slug = selector.format_slug(ts)
                 current_slug = slug
@@ -481,7 +481,7 @@ async def main():
                             else:
                                 slot_price_to_beat = 0.0
                         logging.info(
-                            "🎯 Смена рынка: %s | priceToBeat=%.2f",
+                            "🎯 Market switch: %s | priceToBeat=%.2f",
                             question,
                             slot_price_to_beat,
                         )
@@ -518,7 +518,7 @@ async def main():
                         poly_book = PolyOrderBook(symbol="bitcoin")
                         poly_connect_task = asyncio.create_task(poly_book.connect())
 
-            # 2. Получение данных
+            # 2. Data ingestion
             _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG") == "1"
             if _net_dbg:
                 _nw_t0 = time.perf_counter()
@@ -543,7 +543,7 @@ async def main():
             if fast_price and (forecast <= 0 or abs(forecast - fast_price) > 0.2 * fast_price):
                 forecast = float(fast_price)
 
-            # 4. Анализ и "Пульс"
+            # 4. Analysis and pulse log
             poly_btc = 0.0
             if poly_book is not None:
                 poly_btc = float(
@@ -1279,17 +1279,17 @@ async def main():
                                                 "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT=1 to enable).",
                                             )
             elif (now - last_pulse_time) >= pulse_log_period:
-                # logging.debug("⏳ Ожидание полной синхронизации данных (Coinbase/Poly)...")
+                # logging.debug("⏳ Waiting for full data sync (Coinbase/Poly)...")
                 last_pulse_time = now
 
             # When MAIN_LOOP_SLEEP is 0, asyncio.sleep(0) only yields to the event loop (no wall delay).
             await asyncio.sleep(MAIN_LOOP_SLEEP if MAIN_LOOP_SLEEP > 0.0 else 0.0)
 
     except KeyboardInterrupt:
-        print("\n🛑 Остановка пользователем...")
+        print("\n🛑 Stopped by user...")
         shutdown_reason = "KeyboardInterrupt"
     except Exception:
-        logging.error("💥 КРИТИЧЕСКАЯ ОШИБКА В ГЛАВНОМ ЦИКЛЕ")
+        logging.error("💥 CRITICAL ERROR IN MAIN LOOP")
         logging.error(traceback.format_exc())
         shutdown_reason = "exception"
         try:

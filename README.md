@@ -1,28 +1,88 @@
 # prjBH_hft_bot
 
-Polymarket HFT bot — отдельный репозиторий, история извлечена из `prjBJ_arb_polymarket` только по пути `hft_bot/` (`git filter-repo --subdirectory-filter hft_bot`).
+High-frequency bot for **Polymarket** Bitcoin Up/Down binary markets: latency arbitrage between spot feeds (Coinbase, Binance) and the oracle / CLOB order book.
 
-## Запуск
+## Project goals
+
+- Automated trading on short 5-minute slots with market switching without restarting the process.
+- Low latency: WebSockets to CEX, RTDS/CLOB to Polymarket, fast-price aggregation.
+- Risk controls: session limits, drawdown, regime filter, live cooldowns.
+- **Simulation by default**; live trading only with explicit `LIVE_MODE=1` and credentials.
+
+## Install and run
+
+Requires **Python ≥ 3.10** and **[uv](https://github.com/astral-sh/uv)**.
 
 ```bash
 uv sync --all-groups
 uv run python bot.py
-# или
+# or
 uv run hft-bot
 ```
 
-Тесты:
+Tests:
 
 ```bash
 uv run pytest tests/
 ```
 
-Опционально скрипты с графиками: `uv sync --extra scripts`.
+Optional plotting scripts: `uv sync --extra scripts`.
 
-## История и соответствие монорепозиторию
+## How it works
 
-Коммит монорепозитория `bd7ac4f8ee6005bf0d7f54392958cbd5020c5565` (первое появление `hft_bot/`) соответствует дереву в этом репозитории в коммите **`3638c01089b6ecdca2377c8647e6079c40e75e4f`**.
+1. **Price signal** — CEX anchor (Coinbase, optional Binance blend) vs Polymarket oracle; **edge** is the gap in price points.
+2. **Strategies** — phase router (`phase_router`) or pure latency arbitrage; entry filters (book spread, staleness, RSI, CEX imbalance, slot window).
+3. **Exits** — trailing TP/SL, book reaction, trend, timeouts, PnL limits.
+4. **Optional** — LSTM predictor and indicators under `ml/`.
 
-В монорепозитории ветка **`main_short`** указывает на корневой коммит до выноса бота (`6c32aad…`), для справки по «чистому» дереву арбитражного проекта без последующей истории.
+Details: [docs/strategies.md](docs/strategies.md).
 
-Подробности: [docs/GIT_HISTORY.md](docs/GIT_HISTORY.md).
+## Data sources
+
+| Source | Role |
+|--------|------|
+| Coinbase WebSocket | Mid anchor, primary CEX feed |
+| Binance WebSocket | Leading signal / blending |
+| Polymarket RTDS | BTC oracle price (Polymarket) |
+| Polymarket CLOB API | Order book, live order placement |
+| Gamma API | Active market / slot discovery |
+
+## Configuration
+
+Loaded in layers (see `bot_runtime.load_runtime_env`):
+
+1. `config/sim_slippage.env` — simulation defaults (does not overwrite keys already set).
+2. `config/runtime.env` — main bot parameters (overwrites the previous layer).
+3. **`.env`** at repo root — secrets and machine overrides (**do not commit**).
+
+Then `apply_sim_live_unify()` aligns `LIVE_ORDER_SIZE` / `LIVE_MAX_SPREAD` with `HFT_*` when live keys are unset.
+
+Optional presets: `config/runtime_day.env`, `config/runtime_night.env` — merge or copy into your `runtime.env` as needed.
+
+Live variables (keys, funder, limits): [docs/live.md](docs/live.md).
+
+## Security
+
+- Keep secrets in **`.env`** or a secure store; `.env` is gitignored.
+- **Live is off by default** (`LIVE_MODE=0`) — real orders only after explicit enablement and sane limits.
+- Cap `LIVE_MAX_SESSION_LOSS`, `MAX_DRAWDOWN_PCT`, and position size; run simulation before raising risk.
+- Prefer **not** storing Polymarket API keys manually when the client can derive them from the wallet key to avoid stale credentials.
+- For production hosts: access control, dependency updates, log and balance monitoring.
+
+## Roadmap
+
+- Lower latency and more resilient feeds (WebSockets, region/VPN tuning).
+- Strategy and filter tuning for current market regimes.
+- Optional ML layer expansion with data-quality and latency guardrails.
+- More tests and observability (metrics, alerts).
+
+## Documentation index
+
+| Doc | Contents |
+|-----|----------|
+| [docs/architecture.md](docs/architecture.md) | Components, data flow, repo history |
+| [docs/simulation.md](docs/simulation.md) | Paper mode, logs, tests |
+| [docs/live.md](docs/live.md) | Live trading, risks, checklist |
+| [docs/strategies.md](docs/strategies.md) | Strategies and thresholds |
+
+Short architecture pointer at repo root: [architecture.md](architecture.md).
