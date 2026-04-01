@@ -36,9 +36,14 @@ def _suppress_uvloop_shutdown_error(args: threading.ExceptHookArgs) -> None:
     threading.__excepthook__(args)
 
 
-if __name__ == "__main__":
+def run_cli() -> None:
+    """Console entry for \`uv run hft-bot\` / \`hft-bot\`."""
     threading.excepthook = _suppress_uvloop_shutdown_error
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    run_cli()
