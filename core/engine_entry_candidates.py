@@ -65,6 +65,8 @@ def entry_candidate_from_state(
     up_mid=0.0,
     down_mid=0.0,
     edge_mult=1.0,
+    up_ask=0.0,
+    down_ask=0.0,
 ):
     """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
     if not eng._regime_allows_new_entries():
@@ -85,6 +87,23 @@ def entry_candidate_from_state(
         return None
     strong = eng._is_strong_oracle_edge(edge)
     aggressive = eng._is_aggressive_oracle_edge(edge)
+    if aggressive and os.getenv("HFT_AGGRESSIVE_EXTREME_ASK_BLOCK", "1") == "1":
+        hi = float(os.getenv("HFT_AGGRESSIVE_EXTREME_ASK_HI", "0.79"))
+        lo = float(os.getenv("HFT_AGGRESSIVE_EXTREME_ASK_LO", "0.21"))
+        ua = float(up_ask or 0.0)
+        da = float(down_ask or 0.0)
+        if trend == "UP" and ua > 0.0 and (ua > hi or ua < lo):
+            logging.info(
+                "Entry blocked: extreme book level (UP ask=%.4f, aggressive edge)",
+                ua,
+            )
+            return None
+        if trend == "DOWN" and da > 0.0 and (da > hi or da < lo):
+            logging.info(
+                "Entry blocked: extreme book level (DOWN ask=%.4f, aggressive edge)",
+                da,
+            )
+            return None
     if aggressive:
         now_ts = time.time()
         noise_min = float(os.getenv("HFT_AGGRESSIVE_ENTRY_LOG_MIN_SEC"))

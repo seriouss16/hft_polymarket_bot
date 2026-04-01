@@ -289,6 +289,8 @@ class HFTEngine:
         self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
         self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE"))
         self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD"))
+        # Poly top-of-book bid/(bid+ask) for UP / DOWN outcome; 0 = gate disabled.
+        self.min_imbalance_entry = float(os.getenv("HFT_MIN_IMBALANCE_ENTRY", "0"))
         # When trend is UP, multiply max spread limits (legacy + liquidity) so BUY_UP is not
         # blocked as often as BUY_DOWN. 1.0 = no change. Values < 1.0 are clamped to 1.0.
         self.spread_gate_up_relax_mult = max(
@@ -1070,6 +1072,16 @@ class HFTEngine:
             self._zscore_samples, self.entry_zscore_strict_ticks, trend_dir
         )
 
+    def _imbalance_allows_entry(self, signal: str, imb_up: float, imb_down: float) -> bool:
+        """Gate entries on Poly top-of-book bid share when ``HFT_MIN_IMBALANCE_ENTRY`` > 0."""
+        if self.min_imbalance_entry <= 0.0:
+            return True
+        if signal == "BUY_UP":
+            return imb_up >= self.min_imbalance_entry
+        if signal == "BUY_DOWN":
+            return imb_down >= self.min_imbalance_entry
+        return True
+
     def _entry_momentum_alt_signal(
         self,
         edge: float,
@@ -1104,6 +1116,8 @@ class HFTEngine:
         up_mid=0.0,
         down_mid=0.0,
         edge_mult=1.0,
+        up_ask=0.0,
+        down_ask=0.0,
     ):
         """Return BUY_UP/BUY_DOWN/None from trend vs oracle (no cooldown / no update_trend here)."""
         return entry_candidate_from_state(
@@ -1118,6 +1132,8 @@ class HFTEngine:
             up_mid,
             down_mid,
             edge_mult,
+            up_ask,
+            down_ask,
         )
 
     def _book_move_for_outcome(self, token_mid, prev_key, want_up):
@@ -1168,9 +1184,10 @@ class HFTEngine:
             return None
         tr = self.get_trend_state()
         if poly_orderbook is not None:
-            *_, up_mid, down_mid = poly_book_outcome_quotes(poly_orderbook)
+            _, up_ask, _, down_ask, up_mid, down_mid = poly_book_outcome_quotes(poly_orderbook)
             edge_mult = self._latency_expiry_edge_multiplier(latency_ms, seconds_to_expiry)
         else:
+            up_ask = down_ask = 0.0
             up_mid = 0.0
             down_mid = 0.0
             edge_mult = 1.0
@@ -1185,6 +1202,8 @@ class HFTEngine:
             up_mid=up_mid,
             down_mid=down_mid,
             edge_mult=edge_mult,
+            up_ask=up_ask,
+            down_ask=down_ask,
         )
 
     def get_trend_state(self):
@@ -1316,6 +1335,9 @@ class HFTEngine:
             imbalance = db_top / (db_top + da_top + 1e-9)
         else:
             imbalance = bid_size / (bid_size + ask_size + 1e-9)
+        imb_up = bid_size / (bid_size + ask_size + 1e-9)
+        _dtot = db_top + da_top
+        imb_down = db_top / (_dtot + 1e-9) if _dtot > 0.0 else 0.0
 
         up_bid, up_ask, down_bid, down_ask, up_mid, down_mid = poly_book_outcome_quotes(
             poly_orderbook
@@ -1385,6 +1407,8 @@ class HFTEngine:
                 up_mid=up_mid,
                 down_mid=down_mid,
                 edge_mult=edge_mult,
+                up_ask=up_ask,
+                down_ask=down_ask,
             )
             if signal is None:
                 signal = self._entry_momentum_alt_signal(
@@ -1537,6 +1561,7 @@ class HFTEngine:
             and self.can_trade()
             and self._entry_ask_allows_open(up_ask)
             and self._entry_outcome_price_allows("UP", up_ask, down_ask)
+            and self._imbalance_allows_entry("BUY_UP", imb_up, imb_down)
             and rsi_ok_up
             and book_ok_up
             and spread_gate
@@ -1623,6 +1648,7 @@ class HFTEngine:
             and self.can_trade()
             and self._entry_ask_allows_open(down_ask)
             and self._entry_outcome_price_allows("DOWN", up_ask, down_ask)
+            and self._imbalance_allows_entry("BUY_DOWN", imb_up, imb_down)
             and rsi_ok_down
             and book_ok_down
             and spread_gate

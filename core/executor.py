@@ -427,8 +427,12 @@ class PnLTracker:
             _sn = str(strategy_name).strip() if strategy_name else ""
             _tag = f"{side} {_sn}".strip() if _sn else side
             _mode = "LIVE" if self.live_mode else "SIM"
+            _bucket = ""
+            if not self.live_mode:
+                _bk = int(book_px * 100.0) // 10 * 10
+                _bucket = f" | BOOK_BUCKET={_bk}"
             logging.info(
-                "🟢 [%s %s] book=%.4f exec=%.4f slip=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)",
+                "🟢 [%s %s] book=%.4f exec=%.4f slip=%.4f | %0.2f$ → %0.4f sh (pos %0.4f @ avg %0.4f)%s",
                 _mode,
                 _tag,
                 book_px,
@@ -438,6 +442,7 @@ class PnLTracker:
                 new_shares,
                 self.inventory,
                 self.entry_price,
+                _bucket,
             )
             return {
                 "event": "OPEN",
@@ -510,8 +515,12 @@ class PnLTracker:
             _sn = str(strategy_name).strip() if strategy_name else ""
             _mode = "LIVE" if self.live_mode else "SIM"
             _sell_hdr = f"[{_mode} SELL {_sn}]" if _sn else f"[{_mode} SELL]"
+            _bucket = ""
+            if not self.live_mode:
+                _bk = int(book_px * 100.0) // 10 * 10
+                _bucket = f" | BOOK_BUCKET={_bk}"
             logging.info(
-                "🔴 %s book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%",
+                "🔴 %s book=%.4f exec=%.4f | sold %0.4f sh | cost %.2f$ → proceeds %.2f$ | PnL %+0.2f$ | WR %.1f%%%s",
                 _sell_hdr,
                 book_px,
                 exec_price,
@@ -520,6 +529,7 @@ class PnLTracker:
                 proceeds_usd,
                 profit,
                 win_rate,
+                _bucket,
             )
 
             self.inventory = 0.0
