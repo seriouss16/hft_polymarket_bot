@@ -31,6 +31,18 @@ from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
 
+def _max_runtime_sec_from_env() -> float:
+    """Wall-clock session cap. Only values > 0 enable auto-stop (LIVE and paper). 0/empty/invalid = unlimited."""
+    raw = (os.getenv("HFT_MAX_RUNTIME_SEC") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        v = float(raw)
+    except ValueError:
+        return 0.0
+    return v if v > 0.0 else 0.0
+
+
 def _conditional_token_for_position_side(
     position_side: str | None,
     token_up_id: str | None,
@@ -382,10 +394,27 @@ async def main():
             "HFT_ENABLE_LSTM=0: LSTM off; forecast tracks spot. Set HFT_ENABLE_LSTM=1 to enable."
         )
 
+    _session_wall_start = time.time()
+    _max_runtime_sec = _max_runtime_sec_from_env()
+    if _max_runtime_sec > 0.0:
+        logging.info(
+            "⏱️ HFT_MAX_RUNTIME_SEC=%.0fs (LIVE and paper): soft stop → final report; LIVE emergency SELL if open. "
+            "Unset or 0 = run until manual stop / other limits.",
+            _max_runtime_sec,
+        )
+
     shutdown_reason = "shutdown"
     try:
         while True:
             now = asyncio.get_event_loop().time()
+
+            if _max_runtime_sec > 0.0 and (time.time() - _session_wall_start) >= _max_runtime_sec:
+                logging.info(
+                    "⏱️ HFT_MAX_RUNTIME_SEC reached (%.0fs) — stopping main loop.",
+                    _max_runtime_sec,
+                )
+                shutdown_reason = "time_limit"
+                break
 
             if LIVE_MODE and live_risk.session_loss_breached():
                 logging.error(
