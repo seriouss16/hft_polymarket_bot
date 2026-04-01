@@ -1,4 +1,4 @@
-# prjBH_hft_bot
+# HFT Polymarket Bot
 
 High-frequency bot for **Polymarket** Bitcoin Up/Down binary markets: latency arbitrage between spot feeds (Coinbase, Binance) and the oracle / CLOB order book.
 
