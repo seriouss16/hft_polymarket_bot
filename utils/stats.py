@@ -9,7 +9,7 @@ import os
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List
 
@@ -142,6 +142,15 @@ def _stats_from_realized_pnls(pnls: List[float]) -> _JournalStats:
     return js
 
 
+@dataclass
+class _SlotCloseAgg:
+    """Realized closes attributed to one 5m market slot (UTC slot start unix ts)."""
+
+    n: int = 0
+    wins: int = 0
+    pnl_sum: float = 0.0
+
+
 class StatsCollector:
     """Aggregate PnL metrics and print session / shutdown reports.
 
@@ -180,6 +189,53 @@ class StatsCollector:
             "usdc_cache_age_sec": 0.0,
             "conditional_cache_count": 0,
         }
+        # Per 5m slot (unix start, UTC): closes for market-efficiency view in reports.
+        self._slot_closes: dict[int, _SlotCloseAgg] = {}
+
+    def record_slot_close(self, pnl: float, slot_ts: int | None) -> None:
+        """Attribute one realized close to the active 5m slot (``slot_ts`` = slot start, UTC)."""
+        if slot_ts is None or int(slot_ts) <= 0:
+            return
+        key = int(slot_ts)
+        row = self._slot_closes.setdefault(key, _SlotCloseAgg())
+        row.n += 1
+        row.pnl_sum += float(pnl)
+        if float(pnl) > 0.0:
+            row.wins += 1
+
+    def _slot_performance_lines(self) -> list[str]:
+        """Compact monospace table: slot UTC, n, W-L, WR%, PnL (only if ``HFT_STATS_SLOT_TABLE`` not 0)."""
+        if (os.getenv("HFT_STATS_SLOT_TABLE", "1") or "1").strip() in ("0", "false", "no"):
+            return []
+        if not self._slot_closes:
+            return []
+        max_rows = max(8, int(os.getenv("HFT_STATS_SLOT_TABLE_MAX", "32") or "32"))
+        items = sorted(self._slot_closes.items(), key=lambda kv: kv[0])
+        omitted = 0
+        if len(items) > max_rows:
+            omitted = len(items) - max_rows
+            items = items[-max_rows:]
+        lines = [
+            "📊 Слоты 5m UTC (старт окна)   n   W-L    WR%      PnL$",
+        ]
+        tot_n = tot_w = tot_pnl = 0
+        for slot_ts, a in items:
+            tot_n += a.n
+            tot_w += a.wins
+            tot_pnl += a.pnl_sum
+            losses = a.n - a.wins
+            wr = (a.wins / a.n * 100.0) if a.n else 0.0
+            label = datetime.fromtimestamp(slot_ts, tz=timezone.utc).strftime("%m%d %H:%M")
+            lines.append(
+                f"   {label:>10}  {a.n:>3}  {a.wins:>2}-{losses:<2}  {wr:>5.1f}%  {a.pnl_sum:>+8.2f}"
+            )
+        if omitted:
+            lines.append(f"   … ещё слотов: {omitted} (см. HFT_STATS_SLOT_TABLE_MAX)")
+        twr = (tot_w / tot_n * 100.0) if tot_n else 0.0
+        lines.append(
+            f"   {'Σ':>10}  {tot_n:>3}  {tot_w:>2}-{tot_n - tot_w:<2}  {twr:>5.1f}%  {tot_pnl:>+8.2f}"
+        )
+        return lines
 
     def set_live_wallet_usdc(self, value: float | None) -> None:
         """Cache fetch_usdc_balance() for the next show_report / final table (LIVE only)."""
@@ -347,6 +403,10 @@ class StatsCollector:
                     f"PnL={sl.pnl_sum:>+9.2f} USD  avg={sl_avg:>+7.4f}"
                 )
             report.append(f"📊 Сумма по срезам:            {sp.total_pnl_all_keys():>+10.2f} USD")
+
+        _slot_lines = self._slot_performance_lines()
+        if _slot_lines:
+            report.extend(_slot_lines)
         
         # Median metrics from this process session (not from on-disk journal CSV).
         _pnls = getattr(self.pnl, "closed_trade_pnls", None)
@@ -531,5 +591,8 @@ class StatsCollector:
             ]
 
         block = "\n".join(lines)
+        _slot_extra = self._slot_performance_lines()
+        if _slot_extra:
+            block += "\n\n" + "\n".join(_slot_extra)
         print(block)
         logging.info("Session final report:\n%s", block)

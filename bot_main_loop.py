@@ -65,6 +65,8 @@ async def main():
 
     BYPASS_META_GATE = os.getenv("HFT_BYPASS_META_GATE", "1") == "1"
     USE_SMART_FAST = os.getenv("USE_SMART_FAST", "0") == "1"
+    # Coinbase-only fast path: do not open Binance WS (EU latency / venue lag vs Polymarket).
+    DISABLE_BINANCE_FAST = os.getenv("HFT_DISABLE_BINANCE_FAST", "0") == "1"
     SYMBOL = "BTC"
     STATS_INTERVAL = float(os.environ["STATS_INTERVAL_SEC"])
     # PULSE_INTERVAL_SEC>0: at most one Fast: line per N seconds. When 0, use HFT_FAST_LOG_MIN_SEC.
@@ -172,11 +174,19 @@ async def main():
         import tensorflow as tf
         tf.config.set_visible_devices([], 'GPU')
 
-    # --- Запуск провайдеров быстрых цен (Coinbase anchor + Binance lead) ---
-    providers = [
-        FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update),
+    # --- Запуск провайдеров быстрых цен (Coinbase anchor; Binance опционально) ---
+    providers: list[FastExchangeProvider] = []
+    if not DISABLE_BINANCE_FAST:
+        providers.append(
+            FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update)
+        )
+    else:
+        logging.info(
+            "Fast feeds: Binance disabled (HFT_DISABLE_BINANCE_FAST=1) — using Coinbase only.",
+        )
+    providers.append(
         FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
-    ]
+    )
     provider_tasks: list[asyncio.Task] = [
         asyncio.create_task(p.connect()) for p in providers
     ]
@@ -866,6 +876,7 @@ async def main():
                     )
                     last_pulse_time = now
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
+                    _close_slot_ts = int(selector.get_current_slot_timestamp())
                     _live_skip_until = 0.0
                     _live_pnl = 0.0  # Populated by live path; used for journal/attribution.
                     if LIVE_MODE and token_up_id:
@@ -889,7 +900,7 @@ async def main():
                                 "[LIVE] BUY still PENDING at close signal — waiting for fill "
                                 "(token=%s).", _close_tid[:20],
                             )
-                            _live_filled = await live_exec.wait_for_buy_fill(_close_tid, timeout_sec=5.0)
+                            _live_filled = await live_exec.wait_for_buy_fill(_close_tid, timeout_sec=2.0)
                         if _live_filled == 0:
                             await live_exec.wait_for_exit_readiness(_close_tid)
                             _live_filled = live_exec.filled_buy_shares(_close_tid)
@@ -929,6 +940,7 @@ async def main():
                                     strategy_name=decision.get("strategy_name") or "",
                                     performance_key=decision.get("performance_key"),
                                 )
+                                stats.record_slot_close(_live_pnl, _close_slot_ts)
                                 live_risk.update(_live_pnl)
                                 live_risk.log_status()
                             else:
@@ -969,6 +981,7 @@ async def main():
                     else:
                         # Paper mode: use engine-simulated PnL.
                         _live_pnl = float(decision.get("pnl", 0.0))
+                        stats.record_slot_close(_live_pnl, _close_slot_ts)
                         risk.on_trade_closed(_live_pnl, time.time())
                     _rs = strategy_hub.get_rsi_v5_state()
                     _perf_key = decision.get("performance_key")
