@@ -19,10 +19,11 @@ def load_runtime_env() -> None:
 
     Hierarchy (each layer overwrites the previous for keys it defines):
 
-    1. ``config/runtime.env``        — base defaults (weakest)
-    2. Day/Night session profile     — ``config/runtime_day.env`` or ``config/runtime_night.env``
-    3. ``config/sim_slippage.env``   — simulation slippage defaults
-    4. ``.env``                      — local overrides (strongest)
+    1. ``config/runtime.env``         — base defaults (weakest)
+    2. ``config/runtime_live.env``   — ``LIVE_*`` / CLOB execution defaults
+    3. Day/Night session profile     — ``config/runtime_day.env`` or ``config/runtime_night.env``
+    4. ``config/sim_slippage.env``   — simulation slippage defaults
+    5. ``.env``                       — local overrides (strongest)
 
     After all layers are merged, :func:`utils.env_unify.apply_sim_live_unify` aligns
     ``LIVE_ORDER_SIZE`` / ``LIVE_MAX_SPREAD`` with ``HFT_*`` when the former are unset.
@@ -33,20 +34,23 @@ def load_runtime_env() -> None:
     # 1. Base defaults (weakest)
     merge_env_file(root / "config" / "runtime.env", overwrite=True)
 
-    # 2. Day/Night session profile (applied at startup based on UTC time)
+    # 2. Live / CLOB execution defaults (LIVE_*)
+    merge_env_file(root / "config" / "runtime_live.env", overwrite=True)
+
+    # 3. Day/Night session profile (applied at startup based on UTC time)
     from core.session_profile import apply_profile
     apply_profile(force=True)
 
-    # 3. SIM slippage defaults
+    # 4. SIM slippage defaults
     merge_env_file(root / "config" / "sim_slippage.env", overwrite=True)
 
-    # 4. Local .env overrides (strongest)
+    # 5. Local .env overrides (strongest)
     merge_env_file(root / ".env", overwrite=True)
 
-    # 5. Unify SIM/LIVE params (fills LIVE_ORDER_SIZE from HFT_DEFAULT_TRADE_USD if unset)
+    # 6. Unify SIM/LIVE params (fills LIVE_ORDER_SIZE from HFT_DEFAULT_TRADE_USD if unset)
     apply_sim_live_unify()
 
-    # 6. Startup logging for diagnostics — confirms the effective sizing params
+    # 7. Startup logging for diagnostics — confirms the effective sizing params
     _log.info(
         "Startup sizing: LIVE_ORDER_SIZE=%s HFT_DEFAULT_TRADE_USD=%s HFT_MAX_POSITION_USD=%s LIVE_ACCOUNT_BALANCE=%s",
         os.environ.get("LIVE_ORDER_SIZE"),

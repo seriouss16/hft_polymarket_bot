@@ -55,6 +55,10 @@ Polymarket RTDS WS ──────┘
 - **PolyRTDS** — Polymarket oracle, typically lags CEX by hundreds of ms to seconds.
 - **Edge** — primary quantity for UP/DOWN decisions.
 
+## Configuration layering
+
+`bot_runtime.load_runtime_env()` merges (weakest → strongest): `config/runtime.env`, `config/runtime_live.env` (`LIVE_*` and related CLOB execution defaults), day/night session profile (`runtime_day.env` / `runtime_night.env`), `config/sim_slippage.env`, then root `.env`. `apply_sim_live_unify()` may fill `LIVE_ORDER_SIZE` / `LIVE_MAX_SPREAD` from `HFT_*` when unset.
+
 ## Repository history
 
 Extracted from monorepo `prjBJ_arb_polymarket` with `git filter-repo --subdirectory-filter hft_bot`: root is the former `hft_bot/` tree; history is preserved for commits touching that path. Tree mapping: monorepo `bd7ac4f8ee6005bf0d7f54392958cbd5020c5565` (`hft_bot/`) ≈ this repo `3638c01089b6ecdca2377c8647e6079c40e75e4f` (root).

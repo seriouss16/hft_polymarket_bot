@@ -5,7 +5,7 @@
 - **`LIVE_MODE=1`** in the environment.
 - Valid Polygon / Polymarket credentials (see root `README.md`).
 
-Without explicit live mode, the bot runs in simulation. There are no separate `--prod` / `--test` flags — only **`LIVE_MODE`** and loading `.env` / `config/runtime.env`.
+Without explicit live mode, the bot runs in simulation. There are no separate `--prod` / `--test` flags — only **`LIVE_MODE`** and layered env: `config/runtime.env`, `config/runtime_live.env`, session profile, then `.env`.
 
 ## Live configuration (summary)
 
@@ -56,4 +56,4 @@ Recommendation: avoid manually setting Polymarket API keys if the bot derives th
 | Balance | N/A | CTF check after BUY |
 | Shutdown | Report only | Emergency exit if a position is open |
 
-Full env reference: `config/runtime.env` and engine code comments.
+Full env reference: `config/runtime.env`, `config/runtime_live.env`, and engine code comments.
