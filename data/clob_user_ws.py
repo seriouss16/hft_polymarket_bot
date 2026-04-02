@@ -13,6 +13,7 @@ thread-safe cache so ``LiveExecutionEngine._get_order_fill`` can avoid HTTP poll
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -130,9 +131,11 @@ class ClobUserOrderCache:
     
     Implements a complete order state machine with:
     - Event-driven state transitions
-    - HTTP fallback tracking
+    - Sequence number tracking for gap detection
+    - Reconnection event buffering
     - Latency metrics collection
     - Comprehensive logging
+    - Order lifecycle tracking
     """
 
     def __init__(self, creds_getter: Callable[[], Any]) -> None:
@@ -156,6 +159,19 @@ class ClobUserOrderCache:
         
         # Event-driven waiting: order_id -> list of asyncio.Event to set on update
         self._order_events: dict[str, list[asyncio.Event]] = {}
+        
+        # Sequence number tracking for gap detection
+        self._sequence_number: int = 0
+        self._last_sequence_seen: int = 0
+        self._sequence_gaps_detected: int = 0
+        
+        # Reconnection event buffering
+        self._reconnect_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=1000)
+        self._is_reconnecting: bool = False
+        self._buffer_during_reconnect: bool = False
+        
+        # Order lifecycle tracking: order_id -> creation_time
+        self._pending_orders: dict[str, float] = {}
         
         # Metrics tracking
         self._ws_events_total: int = 0
@@ -528,7 +544,11 @@ class ClobUserOrderCache:
                     exc,
                     self._reconnect_sec,
                 )
+                # Start buffering during reconnection
+                self.start_reconnect_buffering()
                 await asyncio.sleep(self._reconnect_sec)
+                # Stop buffering and replay events
+                self.stop_reconnect_buffering()
         
         # Log final metrics
         self._log_metrics("shutdown")
@@ -631,3 +651,159 @@ class ClobUserOrderCache:
             metrics["active_orders"],
             metrics["events_by_type"],
         )
+
+    def _increment_sequence(self) -> int:
+        """Increment and return the new sequence number."""
+        with self._lock:
+            self._sequence_number += 1
+            return self._sequence_number
+
+    def _check_sequence_gap(self, seq: int) -> bool:
+        """Check for sequence gap, return True if gap detected."""
+        with self._lock:
+            if self._last_sequence_seen > 0 and seq > self._last_sequence_seen + 1:
+                gap = seq - self._last_sequence_seen - 1
+                self._sequence_gaps_detected += gap
+                logging.warning(
+                    "[WS] Sequence gap detected: expected=%d got=%d gap=%d total_gaps=%d",
+                    self._last_sequence_seen + 1, seq, gap, self._sequence_gaps_detected,
+                )
+                return True
+            self._last_sequence_seen = seq
+            return False
+
+    def _buffer_event(self, msg: dict[str, Any]) -> None:
+        """Buffer an event during reconnection."""
+        with self._lock:
+            if len(self._reconnect_buffer) >= self._reconnect_buffer.maxlen:
+                logging.warning(
+                    "[WS] Reconnect buffer full (%d), dropping oldest event",
+                    self._reconnect_buffer.maxlen,
+                )
+            self._reconnect_buffer.append(msg)
+
+    def _replay_buffered_events(self) -> int:
+        """Replay buffered events after reconnection. Returns count of replayed events."""
+        replayed = 0
+        with self._lock:
+            buffered = list(self._reconnect_buffer)
+            self._reconnect_buffer.clear()
+        
+        for msg in buffered:
+            try:
+                if isinstance(msg, dict):
+                    self._handle_message_dict(msg)
+                    replayed += 1
+            except Exception as exc:
+                logging.debug("[WS] Error replaying buffered event: %s", exc)
+        
+        if replayed > 0:
+            logging.info("[WS] Replayed %d buffered events after reconnection", replayed)
+        return replayed
+
+    def start_reconnect_buffering(self) -> None:
+        """Start buffering events during reconnection."""
+        with self._lock:
+            self._buffer_during_reconnect = True
+            self._is_reconnecting = True
+        logging.info("[WS] Started reconnection event buffering")
+
+    def stop_reconnect_buffering(self) -> int:
+        """Stop buffering and replay events. Returns count of replayed events."""
+        with self._lock:
+            self._buffer_during_reconnect = False
+            self._is_reconnecting = False
+        return self._replay_buffered_events()
+
+    def register_pending_order(self, order_id: str) -> None:
+        """Register a new pending order for lifecycle tracking."""
+        oid = _norm_oid(order_id)
+        with self._lock:
+            self._pending_orders[oid] = time.time()
+        logging.debug("[WS] Registered pending order: id=%s", oid[:20])
+
+    def complete_pending_order(self, order_id: str) -> None:
+        """Mark a pending order as completed (filled/cancelled/failed)."""
+        oid = _norm_oid(order_id)
+        with self._lock:
+            self._pending_orders.pop(oid, None)
+        logging.debug("[WS] Completed pending order: id=%s", oid[:20])
+
+    def get_pending_order_age(self, order_id: str) -> float | None:
+        """Get the age of a pending order in seconds, or None if not pending."""
+        oid = _norm_oid(order_id)
+        with self._lock:
+            created_at = self._pending_orders.get(oid)
+            if created_at is None:
+                return None
+            return time.time() - created_at
+
+    def get_stale_pending_orders(self, max_age_sec: float = 30.0) -> list[tuple[str, float]]:
+        """Get list of (order_id, age_sec) for orders exceeding max_age_sec."""
+        now = time.time()
+        stale = []
+        with self._lock:
+            for oid, created_at in list(self._pending_orders.items()):
+                age = now - created_at
+                if age > max_age_sec:
+                    stale.append((oid, age))
+        return stale
+
+    async def wait_for_fill_with_timeout(
+        self, order_id: str, timeout: float = 3.0
+    ) -> tuple[str, float] | None:
+        """Wait for a specific order to be filled with configurable timeout.
+        
+        Uses asyncio.wait_for() for efficient event-driven waiting.
+        Returns (status, filled_size) tuple when fill arrives, None on timeout.
+        """
+        oid = _norm_oid(order_id)
+        
+        # Check cache first
+        cached = self.get_order_fill(oid)
+        if cached is not None:
+            status, filled = cached
+            if status in ("matched", "filled", "partially_matched"):
+                return cached
+        
+        # Wait for event-driven update
+        event_received = await self.wait_for_order_update(oid, timeout=timeout)
+        if event_received:
+            return self.get_order_fill(oid)
+        
+        return None
+
+    def handle_ws_message_with_sequence(self, raw: str) -> None:
+        """Handle raw WS message with sequence number tracking."""
+        if not raw or raw.strip().upper() == "PONG":
+            return
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+        
+        # Add sequence number to parsed message
+        seq = self._increment_sequence()
+        if isinstance(parsed, dict):
+            parsed["_seq"] = seq
+        elif isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    item["_seq"] = seq
+        
+        # Check for sequence gaps
+        if isinstance(parsed, dict):
+            self._check_sequence_gap(seq)
+        
+        # Buffer during reconnection or process normally
+        with self._lock:
+            if self._buffer_during_reconnect:
+                self._buffer_event(parsed)
+                return
+        
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    self._handle_message_dict(item)
+        elif isinstance(parsed, dict):
+            self._handle_message_dict(parsed)
