@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
 from core.strategy_base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -23,6 +28,15 @@ class StrategyHub:
         self._strategies: dict[str, BaseStrategy] = {}
         self._active_name: str | None = None
         self._parallel_enabled = False
+        # Metrics counters
+        self._strategy_errors: int = 0
+        self._strategy_timeouts: int = 0
+        # Config flags (read from env at init)
+        self._use_gather: bool = os.getenv("HFT_USE_GATHER", "1") == "1"
+        timeout_ms = float(os.getenv("HFT_STRATEGY_TIMEOUT_MS", "100"))
+        self._strategy_timeout_sec: float | None = (
+            timeout_ms / 1000.0 if timeout_ms > 0 else None
+        )
 
     def register(self, strategy: BaseStrategy) -> None:
         """Register strategy instance by unique name."""
@@ -113,32 +127,118 @@ class StrategyHub:
                 slot_price_to_beat=slot_price_to_beat,
             )
 
+        # Execute strategies either concurrently (gather) or sequentially
+        raw_results: list[tuple[str, dict[str, Any] | None | Exception]] = []
+        
+        if self._use_gather:
+            # Concurrent execution: create tasks for all strategies
+            tasks = []
+            for name, strategy in self._strategies.items():
+                coro = strategy.process_tick(
+                    fast_price=fast_price,
+                    poly_orderbook=poly_orderbook,
+                    price_history=price_history,
+                    lstm_forecast=lstm_forecast,
+                    zscore=zscore,
+                    latency_ms=latency_ms,
+                    recent_pnl=recent_pnl,
+                    meta_enabled=meta_enabled,
+                    seconds_to_expiry=seconds_to_expiry,
+                    cex_bid_imbalance=cex_bid_imbalance,
+                    skew_ms=skew_ms,
+                    slot_price_to_beat=slot_price_to_beat,
+                )
+                if self._strategy_timeout_sec is not None:
+                    # Wrap with timeout; TimeoutError will be raised on timeout
+                    coro = asyncio.wait_for(coro, timeout=self._strategy_timeout_sec)
+                tasks.append((name, coro))
+            
+            # Gather all results, capturing exceptions (including TimeoutError)
+            task_coros = [coro for _, coro in tasks]
+            gathered = await asyncio.gather(*task_coros, return_exceptions=True)
+            raw_results = list(zip([name for name, _ in tasks], gathered))
+        else:
+            # Sequential execution: one strategy at a time
+            for name, strategy in self._strategies.items():
+                try:
+                    coro = strategy.process_tick(
+                        fast_price=fast_price,
+                        poly_orderbook=poly_orderbook,
+                        price_history=price_history,
+                        lstm_forecast=lstm_forecast,
+                        zscore=zscore,
+                        latency_ms=latency_ms,
+                        recent_pnl=recent_pnl,
+                        meta_enabled=meta_enabled,
+                        seconds_to_expiry=seconds_to_expiry,
+                        cex_bid_imbalance=cex_bid_imbalance,
+                        skew_ms=skew_ms,
+                        slot_price_to_beat=slot_price_to_beat,
+                    )
+                    if self._strategy_timeout_sec is not None:
+                        result = await asyncio.wait_for(coro, timeout=self._strategy_timeout_sec)
+                    else:
+                        result = await coro
+                    raw_results.append((name, result))
+                except asyncio.TimeoutError:
+                    self._strategy_timeouts += 1
+                    logger.warning("Strategy %s timed out after %.1fms", name, self._strategy_timeout_sec * 1000)
+                    raw_results.append((name, asyncio.TimeoutError()))
+                except Exception as exc:
+                    self._strategy_errors += 1
+                    logger.warning("Strategy %s raised exception: %s", name, exc)
+                    raw_results.append((name, exc))
+
+        # Process results: filter None, handle exceptions, build StrategyResult list
         results: list[StrategyResult] = []
-        for name, strategy in self._strategies.items():
-            payload = await strategy.process_tick(
-                fast_price=fast_price,
-                poly_orderbook=poly_orderbook,
-                price_history=price_history,
-                lstm_forecast=lstm_forecast,
-                zscore=zscore,
-                latency_ms=latency_ms,
-                recent_pnl=recent_pnl,
-                meta_enabled=meta_enabled,
-                seconds_to_expiry=seconds_to_expiry,
-                cex_bid_imbalance=cex_bid_imbalance,
-                skew_ms=skew_ms,
-                slot_price_to_beat=slot_price_to_beat,
-            )
-            if isinstance(payload, dict) and payload.get("event"):
-                results.append(StrategyResult(strategy=name, payload=payload))
+        for name, result in raw_results:
+            if isinstance(result, Exception):
+                # Check if it's a timeout
+                if isinstance(result, asyncio.TimeoutError):
+                    self._strategy_timeouts += 1
+                    logger.warning("Strategy %s timed out after %.1fms", name, self._strategy_timeout_sec * 1000)
+                else:
+                    self._strategy_errors += 1
+                    logger.warning("Strategy %s raised exception: %s", name, result)
+                continue
+            if result is None:
+                continue
+            if isinstance(result, dict) and result.get("event"):
+                results.append(StrategyResult(strategy=name, payload=result))
+
         if not results:
             return None
-        prioritized = sorted(
-            results,
-            key=lambda item: 0 if item.payload.get("event") == "CLOSE" else 1,
-        )[0]
-        payload = dict(prioritized.payload)
-        payload["strategy"] = prioritized.strategy
+
+        # Merge results: priority order: entry signals > exit signals > hold
+        # If multiple entry signals, pick highest confidence
+        return self._merge_strategy_results(results)
+
+    def _merge_strategy_results(
+        self, results: list[StrategyResult]
+    ) -> dict[str, Any]:
+        """Merge multiple strategy results into a single decision.
+
+        Priority: ENTRY > EXIT > HOLD.
+        For multiple ENTRY signals, select the one with highest confidence.
+        """
+        # Define event priority (lower number = higher priority)
+        event_priority = {"ENTRY": 0, "EXIT": 1, "CLOSE": 1, "HOLD": 2}
+
+        # Sort by priority first, then by confidence (descending) for ENTRY events
+        def sort_key(item: StrategyResult) -> tuple[int, float]:
+            event = item.payload.get("event", "HOLD").upper()
+            priority = event_priority.get(event, 2)
+            # For ENTRY events, use confidence as secondary sort key (desc)
+            # For others, confidence doesn't matter
+            if event == "ENTRY":
+                confidence = item.payload.get("confidence", 0.0)
+                return (priority, -confidence)
+            return (priority, 0)
+
+        sorted_results = sorted(results, key=sort_key)
+        best = sorted_results[0]
+        payload = dict(best.payload)
+        payload["strategy"] = best.strategy
         return payload
 
     def generate_live_signal(
