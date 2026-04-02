@@ -24,7 +24,7 @@ from data.providers import FastExchangeProvider
 from data.clob_market_ws import ClobMarketBookCache, sync_poly_book_from_cache
 from data.clob_user_ws import ClobUserOrderCache
 from data.poly_clob import PolyOrderBook, ClobAsyncHTTPClient
-from data.balance_cache import BalanceCache
+from data.balance_cache import BalanceCache, ConditionalAllowanceCache
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
 from utils.stats import StatsCollector
@@ -128,6 +128,7 @@ async def main():
     clob_user_task: asyncio.Task | None = None
     clob_async_http: ClobAsyncHTTPClient | None = None
     balance_cache: BalanceCache | None = None
+    allowance_cache: ConditionalAllowanceCache | None = None
     if LIVE_MODE:
         clob_user_cache = ClobUserOrderCache(lambda: live_exec.get_api_creds())
         live_exec.set_user_order_cache(clob_user_cache)
@@ -144,6 +145,10 @@ async def main():
             max_age_sec=_balance_cache_max_age_sec,
             conditional_max_age_sec=_balance_conditional_max_age_sec,
         )
+        
+        # Pre-emptive conditional allowance cache (eliminates blocking API calls from critical path)
+        allowance_cache = ConditionalAllowanceCache()
+        live_exec.set_allowance_cache(allowance_cache)
         
         # Async HTTP client for non-blocking order book fetches
         clob_async_http = ClobAsyncHTTPClient()
@@ -306,6 +311,78 @@ async def main():
                 logging.debug("Background balance refresh failed: %s", exc)
             await asyncio.sleep(_balance_refresh_interval)
 
+    # Background allowance refresh task (pre-emptive, non-blocking)
+    _allowance_refresh_task: asyncio.Task | None = None
+    _allowance_refresh_interval = float(os.getenv("ALLOWANCE_REFRESH_INTERVAL_SEC", "60"))
+
+    async def _run_allowance_refresh() -> None:
+        """Continuously refresh allowance cache in background.
+
+        This task runs every _allowance_refresh_interval seconds and pre-emptively
+        refreshes allowances for active tokens during BUY hold periods, ensuring
+        the allowance is fresh when SELL signals fire. Uses batch refresh when
+        both UP and DOWN tokens are active.
+        """
+        if allowance_cache is None:
+            return
+        while True:
+            try:
+                # Process scheduled refreshes from the queue
+                token_ids = allowance_cache.get_refresh_queue()
+
+                # Also refresh any active tokens
+                active_tokens = []
+                if token_up_id:
+                    active_tokens.append(token_up_id)
+                if token_down_id:
+                    active_tokens.append(token_down_id)
+
+                # Merge with scheduled tokens, deduplicate
+                all_tokens = list(set(token_ids + active_tokens))
+
+                if not all_tokens:
+                    await asyncio.sleep(_allowance_refresh_interval)
+                    continue
+
+                # Batch refresh if multiple tokens
+                if len(all_tokens) > 1:
+                    await _batch_refresh_allowances(all_tokens)
+                else:
+                    for tid in all_tokens:
+                        await _refresh_single_allowance(tid)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.debug("Background allowance refresh failed: %s", exc)
+            await asyncio.sleep(_allowance_refresh_interval)
+
+    async def _refresh_single_allowance(token_id: str) -> None:
+        """Refresh allowance for a single token in background."""
+        try:
+            await asyncio.to_thread(live_exec.ensure_conditional_allowance, token_id)
+            allowance_cache.record_refresh()
+            logging.debug("[ALLOWANCE] Refreshed allowance for token=%s", token_id[:20])
+        except Exception as exc:
+            logging.debug("[ALLOWANCE] Refresh failed for token=%s: %s", token_id[:20], exc)
+
+    async def _batch_refresh_allowances(token_ids: list[str]) -> None:
+        """Batch refresh allowances for multiple tokens.
+
+        Reduces API calls from N to 1 when trading both UP and DOWN tokens.
+        """
+        if not token_ids:
+            return
+        try:
+            # Refresh all tokens in parallel
+            async def _refresh_one(tid: str) -> None:
+                await asyncio.to_thread(live_exec.ensure_conditional_allowance, tid)
+
+            await asyncio.gather(*[_refresh_one(tid) for tid in token_ids], return_exceptions=True)
+            allowance_cache.record_batch_refresh()
+            logging.debug("[ALLOWANCE] Batch refreshed allowances for %d tokens", len(token_ids))
+        except Exception as exc:
+            logging.debug("[ALLOWANCE] Batch refresh failed: %s", exc)
+
     token_up_id = None
     token_down_id = None
     current_slug = None
@@ -461,10 +538,9 @@ async def main():
                 float(_sh),
                 float(_sh * _px),
             )
-        try:
-            await asyncio.to_thread(live_exec.ensure_conditional_allowance, _tid)
-        except Exception as _ea_exc:
-            logging.debug("[LIVE] reconcile ensure_conditional_allowance: %s", _ea_exc)
+        # Schedule allowance refresh via cache instead of blocking API call
+        if allowance_cache is not None:
+            allowance_cache.schedule_refresh(_tid)
 
     logging.info("🔥 System started. Waiting for first Polymarket slot...")
     if ENABLE_LSTM:
@@ -491,6 +567,8 @@ async def main():
             _orderbook_refresh_task = asyncio.create_task(_run_orderbook_refresh())
         if _balance_refresh_interval > 0 and balance_cache is not None:
             _balance_refresh_task = asyncio.create_task(_run_balance_refresh())
+        if _allowance_refresh_interval > 0 and allowance_cache is not None:
+            _allowance_refresh_task = asyncio.create_task(_run_allowance_refresh())
     
     try:
         while True:
@@ -1261,10 +1339,20 @@ async def main():
                                                 float(_filled_sh),
                                                 float(_filled_sh * _filled_px),
                                             )
-                                        # Refresh CTF allowance so the subsequent SELL is accepted.
-                                        await asyncio.to_thread(
-                                            live_exec.ensure_conditional_allowance, _live_tid
-                                        )
+                                        # Pre-emptive allowance refresh: schedule background refresh
+                                        # for the token we just bought. The background task will
+                                        # refresh it during the hold period, ensuring it's fresh
+                                        # when the SELL signal fires. Also schedule the opposite
+                                        # token if trading both sides.
+                                        if allowance_cache is not None:
+                                            allowance_cache.schedule_refresh(_live_tid)
+                                            # Also schedule opposite token for batch refresh
+                                            _opp_tid = (
+                                                token_down_id if _live_tid == token_up_id
+                                                else token_up_id
+                                            )
+                                            if _opp_tid:
+                                                allowance_cache.schedule_refresh(_opp_tid)
                                         journal.record_open(
                                             decision=decision,
                                             filled_shares=float(_filled_sh),
@@ -1366,6 +1454,8 @@ async def main():
             _orderbook_refresh_task.cancel()
         if _balance_refresh_task is not None and not _balance_refresh_task.done():
             _balance_refresh_task.cancel()
+        if _allowance_refresh_task is not None and not _allowance_refresh_task.done():
+            _allowance_refresh_task.cancel()
         if _heartbeat_task is not None and not _heartbeat_task.done():
             _heartbeat_task.cancel()
         clob_ws_cache.stop()

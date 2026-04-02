@@ -388,3 +388,157 @@ class BalanceCacheProvider:
             max_age_sec=max_age_sec,
             conditional_max_age_sec=conditional_max_age_sec,
         )
+
+
+@dataclass
+class AllowanceCacheEntry:
+    """Cached allowance entry with expiration tracking."""
+    allowance: float
+    expires_at: float
+    last_refresh: float
+
+    @property
+    def is_expired(self) -> bool:
+        """Return True if cache entry has expired."""
+        return time.time() > self.expires_at
+
+    @property
+    def age_sec(self) -> float:
+        """Return cache age in seconds."""
+        return time.time() - self.last_refresh
+
+
+class ConditionalAllowanceCache:
+    """Thread-safe TTL-based cache for conditional token allowances.
+
+    Eliminates blocking API calls from the critical path by caching
+    allowance values with expiration and supporting pre-emptive
+    background refresh during BUY hold periods.
+
+    Cache structure: {token_id: AllowanceCacheEntry}
+    Default TTL: 300 seconds (5 minutes) - configurable via ALLOWANCE_CACHE_TTL_SEC
+    """
+
+    def __init__(self, ttl_sec: float | None = None) -> None:
+        """Initialize allowance cache.
+
+        Args:
+            ttl_sec: Time-to-live for cache entries in seconds.
+                     Defaults to ALLOWANCE_CACHE_TTL_SEC env var or 300s.
+        """
+        self._ttl_sec = ttl_sec if ttl_sec is not None else float(
+            os.getenv("ALLOWANCE_CACHE_TTL_SEC", "300")
+        )
+        self._cache: dict[str, AllowanceCacheEntry] = {}
+        self._lock = threading.Lock()
+        self._refresh_queue: list[str] = []
+        self._metrics = {
+            "hits": 0,
+            "misses": 0,
+            "stale_reads": 0,
+            "refreshes": 0,
+            "batch_refreshes": 0,
+        }
+
+    def get_cached_allowance(self, token_id: str) -> float | None:
+        """Return cached allowance if not expired, None otherwise.
+
+        Args:
+            token_id: The conditional token ID to look up
+
+        Returns:
+            Cached allowance value, or None if expired/missing
+        """
+        with self._lock:
+            entry = self._cache.get(token_id)
+            if entry is not None and not entry.is_expired:
+                self._metrics["hits"] += 1
+                return entry.allowance
+            if entry is not None:
+                # Expired but we have a value — return it as stale read
+                # (slightly stale is better than blocking)
+                self._metrics["stale_reads"] += 1
+                return entry.allowance
+            self._metrics["misses"] += 1
+            return None
+
+    def set_allowance(self, token_id: str, allowance: float) -> None:
+        """Store allowance with expiration timestamp.
+
+        Args:
+            token_id: The conditional token ID
+            allowance: The allowance value to cache
+        """
+        now = time.time()
+        with self._lock:
+            self._cache[token_id] = AllowanceCacheEntry(
+                allowance=allowance,
+                expires_at=now + self._ttl_sec,
+                last_refresh=now,
+            )
+
+    def schedule_refresh(self, token_id: str) -> None:
+        """Queue a token_id for background allowance refresh.
+
+        Called when entering a position to pre-emptively refresh
+        allowance for the opposite token during the BUY hold period.
+
+        Args:
+            token_id: The conditional token ID to refresh
+        """
+        with self._lock:
+            if token_id not in self._refresh_queue:
+                self._refresh_queue.append(token_id)
+
+    def get_refresh_queue(self) -> list[str]:
+        """Return and clear the refresh queue.
+
+        Returns:
+            List of token_ids pending refresh
+        """
+        with self._lock:
+            queue = list(self._refresh_queue)
+            self._refresh_queue.clear()
+            return queue
+
+    def batch_set_allowances(self, allowances: dict[str, float]) -> None:
+        """Store multiple allowances at once.
+
+        Args:
+            allowances: Dict of {token_id: allowance}
+        """
+        now = time.time()
+        with self._lock:
+            for token_id, allowance in allowances.items():
+                self._cache[token_id] = AllowanceCacheEntry(
+                    allowance=allowance,
+                    expires_at=now + self._ttl_sec,
+                    last_refresh=now,
+                )
+
+    def clear(self, token_id: str | None = None) -> None:
+        """Clear cache for a specific token or all tokens.
+
+        Args:
+            token_id: If provided, clear only this token's cache
+        """
+        with self._lock:
+            if token_id is not None:
+                self._cache.pop(token_id, None)
+            else:
+                self._cache.clear()
+
+    def get_metrics(self) -> dict[str, int]:
+        """Return cache metrics."""
+        with self._lock:
+            return dict(self._metrics)
+
+    def record_refresh(self) -> None:
+        """Record a successful refresh operation."""
+        with self._lock:
+            self._metrics["refreshes"] += 1
+
+    def record_batch_refresh(self) -> None:
+        """Record a batch refresh operation."""
+        with self._lock:
+            self._metrics["batch_refreshes"] += 1

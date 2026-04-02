@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.balance_cache import BalanceCache, BalanceCacheEntry  # noqa: E402
+from data.balance_cache import BalanceCache, BalanceCacheEntry, ConditionalAllowanceCache, AllowanceCacheEntry  # noqa: E402
 
 
 def test_balance_cache_entry_is_fresh_method() -> None:
@@ -35,3 +35,115 @@ def test_conditional_cache_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     for i in range(4):
         c.get_conditional_balance(f"t{i}")
     assert len(c._conditional_caches) == 2
+
+
+# ---------------------------------------------------------------------------
+# ConditionalAllowanceCache tests
+# ---------------------------------------------------------------------------
+
+
+class TestConditionalAllowanceCache:
+    """TTL-based allowance cache for pre-emptive background refresh."""
+
+    def test_set_and_get_allowance(self) -> None:
+        """set_allowance stores value; get_cached_allowance returns it."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        cache.set_allowance("token_abc", 1.0)
+        assert cache.get_cached_allowance("token_abc") == 1.0
+
+    def test_get_cached_allowance_returns_none_for_missing(self) -> None:
+        """get_cached_allowance returns None for unknown token."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        assert cache.get_cached_allowance("unknown") is None
+
+    def test_expired_allowance_returns_stale_value(self) -> None:
+        """When TTL expires, get_cached_allowance still returns stale value."""
+        cache = ConditionalAllowanceCache(ttl_sec=0.01)  # 10ms TTL
+        cache.set_allowance("token_abc", 0.5)
+        time.sleep(0.02)
+        # Should return stale value (slightly stale is better than blocking)
+        result = cache.get_cached_allowance("token_abc")
+        assert result == 0.5
+
+    def test_schedule_refresh_and_get_refresh_queue(self) -> None:
+        """schedule_refresh queues token; get_refresh_queue returns and clears it."""
+        cache = ConditionalAllowanceCache()
+        cache.schedule_refresh("token_up")
+        cache.schedule_refresh("token_down")
+        queue = cache.get_refresh_queue()
+        assert set(queue) == {"token_up", "token_down"}
+        # Queue should be cleared after retrieval
+        assert cache.get_refresh_queue() == []
+
+    def test_batch_set_allowances(self) -> None:
+        """batch_set_allowances stores multiple values at once."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        cache.batch_set_allowances({"t1": 1.0, "t2": 2.0, "t3": 3.0})
+        assert cache.get_cached_allowance("t1") == 1.0
+        assert cache.get_cached_allowance("t2") == 2.0
+        assert cache.get_cached_allowance("t3") == 3.0
+
+    def test_clear_specific(self) -> None:
+        """clear(token_id) removes only that token's cache."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        cache.set_allowance("t1", 1.0)
+        cache.set_allowance("t2", 2.0)
+        cache.clear("t1")
+        assert cache.get_cached_allowance("t1") is None
+        assert cache.get_cached_allowance("t2") == 2.0
+
+    def test_clear_all(self) -> None:
+        """clear() without args removes all entries."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        cache.set_allowance("t1", 1.0)
+        cache.set_allowance("t2", 2.0)
+        cache.clear()
+        assert cache.get_cached_allowance("t1") is None
+        assert cache.get_cached_allowance("t2") is None
+
+    def test_metrics_tracking(self) -> None:
+        """Cache tracks hits, misses, and stale_reads."""
+        cache = ConditionalAllowanceCache(ttl_sec=300.0)
+        cache.set_allowance("t1", 1.0)
+        cache.get_cached_allowance("t1")  # hit
+        cache.get_cached_allowance("t1")  # hit
+        cache.get_cached_allowance("unknown")  # miss
+        metrics = cache.get_metrics()
+        assert metrics["hits"] == 2
+        assert metrics["misses"] == 1
+
+    def test_stale_read_metrics(self) -> None:
+        """Expired entries count as stale_reads."""
+        cache = ConditionalAllowanceCache(ttl_sec=0.01)
+        cache.set_allowance("t1", 1.0)
+        time.sleep(0.02)
+        cache.get_cached_allowance("t1")  # stale read
+        metrics = cache.get_metrics()
+        assert metrics["stale_reads"] == 1
+
+    def test_refresh_and_batch_refresh_metrics(self) -> None:
+        """record_refresh and record_batch_refresh update metrics."""
+        cache = ConditionalAllowanceCache()
+        cache.record_refresh()
+        cache.record_refresh()
+        cache.record_batch_refresh()
+        metrics = cache.get_metrics()
+        assert metrics["refreshes"] == 2
+        assert metrics["batch_refreshes"] == 1
+
+    def test_allowance_cache_entry_properties(self) -> None:
+        """AllowanceCacheEntry has correct is_expired and age_sec."""
+        now = time.time()
+        entry = AllowanceCacheEntry(allowance=1.0, expires_at=now + 100, last_refresh=now)
+        assert entry.is_expired is False
+        assert entry.age_sec < 1.0
+
+        expired = AllowanceCacheEntry(allowance=1.0, expires_at=now - 1, last_refresh=now - 200)
+        assert expired.is_expired is True
+        assert expired.age_sec > 100.0
+
+    def test_default_ttl_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """TTL defaults to ALLOWANCE_CACHE_TTL_SEC env var."""
+        monkeypatch.setenv("ALLOWANCE_CACHE_TTL_SEC", "600")
+        cache = ConditionalAllowanceCache()
+        assert cache._ttl_sec == 600.0

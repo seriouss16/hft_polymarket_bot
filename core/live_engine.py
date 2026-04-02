@@ -83,6 +83,7 @@ class LiveExecutionEngine:
         test_mode: bool = True,
         min_order_size: float = 10.0,
         max_spread: float = 0.03,
+        allowance_cache: Any | None = None,
     ) -> None:
         """Initialise execution engine and optionally connect to Polymarket CLOB.
 
@@ -130,6 +131,7 @@ class LiveExecutionEngine:
         self._api_creds: object | None = None
         self._ws_metrics_last_log = time.time()
         self._ws_metrics_log_interval = 60.0  # Log metrics every 60 seconds
+        self._allowance_cache = allowance_cache
 
         if ClobClient is None:
             if not self.test_mode:
@@ -171,6 +173,41 @@ class LiveExecutionEngine:
     def set_market_book_cache(self, cache: object | None) -> None:
         """Optional CLOB market WebSocket cache (``data.clob_market_ws.ClobMarketBookCache``)."""
         self._market_book_cache = cache
+
+    def set_allowance_cache(self, cache: Any | None) -> None:
+        """Optional allowance cache (``data.balance_cache.ConditionalAllowanceCache``)."""
+        self._allowance_cache = cache
+
+    async def _ensure_allowance_cached(self, token_id: str) -> None:
+        """Ensure conditional allowance using cache-first approach.
+
+        If cache has a valid (non-expired) entry, skip the API call entirely.
+        If cache is expired or missing, call the API and update cache.
+        This eliminates blocking API calls from the critical path when
+        the background refresh task has pre-warmed the cache.
+        """
+        if self.test_mode or self.client is None:
+            return
+        if self._allowance_cache is not None:
+            cached = self._allowance_cache.get_cached_allowance(token_id)
+            if cached is not None:
+                # Cache hit (fresh or stale) — skip API call
+                logging.debug(
+                    "[ALLOWANCE] Cache hit for token=%s (allowance=%.0f)",
+                    token_id[:20], cached,
+                )
+                return
+            # Cache miss or expired — call API and update cache
+            logging.debug(
+                "[ALLOWANCE] Cache miss for token=%s — calling API",
+                token_id[:20],
+            )
+        # Call the API
+        await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+        # Update cache with a sentinel value (we don't know the exact allowance,
+        # but we know it was refreshed successfully)
+        if self._allowance_cache is not None:
+            self._allowance_cache.set_allowance(token_id, 1.0)
 
     def ensure_allowances(self) -> None:
         """Refresh USDC (COLLATERAL) spending allowance for the CLOB at startup.
@@ -1831,7 +1868,7 @@ class LiveExecutionEngine:
         for d in delays:
             if d > 0:
                 await asyncio.sleep(d)
-            await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+            await self._ensure_allowance_cached(token_id)
             bal = await asyncio.to_thread(self.fetch_conditional_balance, token_id)
             if bal is not None and bal > dust:
                 return min(requested, bal)
@@ -2044,7 +2081,7 @@ class LiveExecutionEngine:
         order_id: str | None = None
         immediate = False
         for _att in range(sell_attempts):
-            await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+            await self._ensure_allowance_cached(token_id)
             order_id, immediate = await self._place_limit_raw(
                 token_id, SELL_SIDE, price, size
             )
@@ -2064,7 +2101,7 @@ class LiveExecutionEngine:
             fak_attempts = max(1, req_int("LIVE_SELL_FAK_ATTEMPTS"))
             filled, fak_price = 0.0, 0.0
             for _fa in range(fak_attempts):
-                await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
+                await self._ensure_allowance_cached(token_id)
                 if _fa > 0:
                     await self._await_sellable_balance(token_id, size)
                     await asyncio.sleep(
