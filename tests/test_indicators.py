@@ -16,6 +16,7 @@ from ml.indicators import (
     compute_rsi,
     ema_series,
 )
+from data.aggregator import IncrementalZScore
 
 
 class TestReactionAndMacd(unittest.TestCase):
@@ -310,6 +311,248 @@ class TestIncrementalADX(unittest.TestCase):
         result = inc_adx.get_last_adx()
         # Flat market should have very low ADX
         self.assertLess(result, 5.0)
+
+
+class TestIncrementalZScore(unittest.TestCase):
+    """Test IncrementalZScore matches full-window z-score and handles edge cases."""
+
+    def _compute_zscore_direct(self, values: list[float], window: int) -> float:
+        """Helper: compute z-score using numpy on last window values."""
+        if len(values) < 2:
+            return 0.0
+        window_vals = values[-window:] if len(values) > window else values
+        arr = np.array(window_vals, dtype=np.float64)
+        if arr.size < 2:
+            return 0.0
+        mean = float(arr.mean())
+        std = float(arr.std()) + 1e-9
+        return float((arr[-1] - mean) / std)
+
+    def test_incremental_zscore_matches_full_window(self):
+        """Incremental z-score should match full-window numpy computation."""
+        window = 96
+        np.random.seed(42)
+        prices = 100.0 + np.random.normal(0, 1.0, 150)
+        
+        inc_z = IncrementalZScore(window_size=window)
+        history = []
+        
+        for price in prices:
+            inc_z.update(price)
+            history.append(price)
+            
+            # Only compare when we have at least 2 values for both methods
+            if len(history) >= 2:
+                expected = self._compute_zscore_direct(history, window)
+                result = inc_z.get_zscore()
+                
+                # When window is not yet full, both should still produce valid comparisons
+                # After window fills, results should match closely
+                if len(history) >= window:
+                    self.assertFalse(np.isnan(result), f"NaN result at price {price}")
+                    self.assertTrue(np.isfinite(result), f"Infinite result at price {price}")
+                    self.assertAlmostEqual(result, expected, places=5,
+                        msg=f"Mismatch at price {price}: inc={result}, full={expected}")
+
+    def test_incremental_zscore_warmup_returns_0(self):
+        """With fewer than 2 values, z-score should return 0.0."""
+        inc_z = IncrementalZScore(window_size=96)
+        inc_z.update(100.0)
+        self.assertEqual(inc_z.get_zscore(), 0.0)
+        
+        inc_z.update(101.0)
+        # Now we have 2 values, should produce a finite z-score
+        z = inc_z.get_zscore()
+        self.assertTrue(np.isfinite(z))
+        self.assertNotEqual(z, 0.0)  # Should be non-zero for different values
+
+    def test_incremental_zscore_constant_price(self):
+        """Z-score should be 0 for constant price series (zero std)."""
+        inc_z = IncrementalZScore(window_size=10)
+        constant = 100.0
+        for _ in range(15):
+            inc_z.update(constant)
+        z = inc_z.get_zscore()
+        self.assertAlmostEqual(z, 0.0, places=5)
+
+    def test_incremental_zscore_sliding_window(self):
+        """Test that old values drop out of the window correctly."""
+        window = 5
+        inc_z = IncrementalZScore(window_size=window)
+        
+        # Feed exactly window values
+        values1 = [100.0, 101.0, 102.0, 103.0, 104.0]
+        for v in values1:
+            inc_z.update(v)
+        
+        expected1 = self._compute_zscore_direct(values1, window)
+        z1 = inc_z.get_zscore()
+        self.assertAlmostEqual(z1, expected1, places=5)
+        
+        # Add more values to push out old ones
+        values2 = [105.0, 106.0, 107.0]
+        for v in values2:
+            inc_z.update(v)
+        
+        # After adding 3 more, total 8 values, window should contain last 5: [103,104,105,106,107]
+        all_values = values1 + values2
+        expected2 = self._compute_zscore_direct(all_values, window)
+        z2 = inc_z.get_zscore()
+        self.assertAlmostEqual(z2, expected2, places=5)
+
+    def test_incremental_zscore_numerical_stability_large_values(self):
+        """Test stability with large price values (e.g., BTC at 80000)."""
+        window = 50
+        inc_z = IncrementalZScore(window_size=window)
+        
+        # Simulate BTC prices around 80000
+        np.random.seed(42)
+        prices = 80000.0 + np.random.normal(0, 100.0, 100)
+        
+        for price in prices:
+            inc_z.update(price)
+            z = inc_z.get_zscore()
+            self.assertTrue(np.isfinite(z), f"Non-finite z-score at price {price}")
+            # Z-score should be within reasonable range for a stable series
+            self.assertLess(abs(z), 10.0, f"Extreme z-score: {z}")
+
+    def test_incremental_zscore_reset(self):
+        """Reset should clear state and allow reuse."""
+        window = 10
+        inc_z = IncrementalZScore(window_size=window)
+        
+        # Feed some data
+        for i in range(20):
+            inc_z.update(100.0 + i)
+        
+        z1 = inc_z.get_zscore()
+        self.assertTrue(np.isfinite(z1))
+        
+        # Reset
+        inc_z.reset()
+        self.assertEqual(inc_z.count, 0)
+        self.assertEqual(inc_z.sum_x, 0.0)
+        self.assertEqual(inc_z.sum_x2, 0.0)
+        self.assertEqual(inc_z.get_zscore(), 0.0)
+        
+        # Re-feed data and verify same result
+        for i in range(20):
+            inc_z.update(100.0 + i)
+        z2 = inc_z.get_zscore()
+        self.assertAlmostEqual(z1, z2, places=5)
+
+    def test_incremental_zscore_single_value_after_warmup(self):
+        """After warm-up, single value updates should produce valid z-scores."""
+        window = 10
+        inc_z = IncrementalZScore(window_size=window)
+        
+        # Fill window
+        base = 100.0
+        for _ in range(window):
+            inc_z.update(base)
+        
+        # Z-score should be 0 (all same)
+        z = inc_z.get_zscore()
+        self.assertAlmostEqual(z, 0.0, places=5)
+        
+        # Add a spike
+        inc_z.update(base + 10.0)
+        z_spike = inc_z.get_zscore()
+        self.assertTrue(np.isfinite(z_spike))
+        self.assertGreater(z_spike, 0.0)  # Positive z-score for above-mean
+
+    def test_incremental_zscore_negative_and_fractional_prices(self):
+        """Test with fractional and negative values (if allowed by the system)."""
+        window = 20
+        inc_z = IncrementalZScore(window_size=window)
+        
+        values = [0.01, 0.02, 0.015, 0.03, 0.025] * 10
+        
+        for v in values:
+            inc_z.update(v)
+        
+        z = inc_z.get_zscore()
+        self.assertTrue(np.isfinite(z))
+
+    def test_incremental_zscore_matches_full_on_random_walk(self):
+        """Test against full computation on random walk data."""
+        window = 96
+        inc_z = IncrementalZScore(window_size=window)
+        
+        # Generate random walk
+        np.random.seed(42)
+        prices = 100.0 + np.cumsum(np.random.normal(0, 0.1, 300))
+        history = []
+        
+        for price in prices:
+            inc_z.update(price)
+            history.append(price)
+            
+            if len(history) >= 2:
+                expected = self._compute_zscore_direct(history, window)
+                result = inc_z.get_zscore()
+                # Only assert when window is full and expected is computed
+                if len(history) >= window and np.isfinite(expected):
+                    self.assertAlmostEqual(result, expected, places=5,
+                        msg=f"Mismatch at step {len(history)}")
+
+    def test_incremental_zscore_fastpriceaggregator_integration(self):
+        """Test FastPriceAggregator uses incremental z-score correctly."""
+        from data.aggregator import FastPriceAggregator
+        import os
+        
+        # Force incremental mode
+        os.environ["HFT_USE_INCREMENTAL_ZSCORE"] = "1"
+        # Use small window for testing
+        os.environ["HFT_ZSCORE_WINDOW"] = "10"
+        
+        agg = FastPriceAggregator()
+        self.assertTrue(agg.use_incremental)
+        self.assertIsNotNone(agg._zscore_calculator)
+        
+        # Feed 60 prices to satisfy the 50-tick threshold in get_zscore
+        prices = [100.0 + i * 0.1 for i in range(60)]
+        for i, p in enumerate(prices):
+            # Provide a timestamp to avoid asyncio loop requirement
+            agg.update("coinbase", p, ts=float(i))
+        
+        z = agg.get_zscore()
+        self.assertTrue(np.isfinite(z))
+        
+        # Compare with direct computation on the last 10 values
+        expected = self._compute_zscore_direct(prices, 10)
+        self.assertAlmostEqual(z, expected, places=5)
+        
+        # Clean up
+        del os.environ["HFT_USE_INCREMENTAL_ZSCORE"]
+        del os.environ["HFT_ZSCORE_WINDOW"]
+
+    def test_incremental_zscore_disable_incremental_falls_back_to_original(self):
+        """Test that disabling incremental mode falls back to original O(n) implementation."""
+        from data.aggregator import FastPriceAggregator
+        import os
+        
+        # Disable incremental mode
+        os.environ["HFT_USE_INCREMENTAL_ZSCORE"] = "0"
+        # Use small window for testing
+        os.environ["HFT_ZSCORE_WINDOW"] = "10"
+        
+        agg = FastPriceAggregator()
+        self.assertFalse(agg.use_incremental)
+        self.assertIsNone(agg._zscore_calculator)
+        
+        # Feed 60 prices to satisfy the 50-tick threshold
+        prices = [100.0 + i * 0.1 for i in range(60)]
+        for i, p in enumerate(prices):
+            # Provide a timestamp to avoid asyncio loop requirement
+            agg.update("coinbase", p, ts=float(i))
+        
+        z = agg.get_zscore()
+        self.assertTrue(np.isfinite(z))
+        
+        # Clean up
+        del os.environ["HFT_USE_INCREMENTAL_ZSCORE"]
+        del os.environ["HFT_ZSCORE_WINDOW"]
 
 
 if __name__ == "__main__":

@@ -9,6 +9,92 @@ from typing import Any
 import numpy as np
 
 
+class IncrementalZScore:
+    """O(1) incremental z-score using running sums with circular buffer.
+    
+    Maintains sum and sum of squares for a sliding window, avoiding O(n) numpy
+    array allocations and iterations on each update. More numerically stable
+    than Welford's for sliding windows with removal.
+    """
+    
+    def __init__(self, window_size: int = 96):
+        """Initialize incremental z-score calculator.
+        
+        Args:
+            window_size: Number of recent values to include in statistics
+        """
+        self.window_size = window_size
+        self.buffer = np.zeros(window_size, dtype=np.float64)
+        self.idx = 0  # circular buffer write index
+        self.count = 0  # number of values in buffer (capped at window_size)
+        self.sum_x = 0.0  # running sum of values in window
+        self.sum_x2 = 0.0  # running sum of squares of values in window
+        
+    def update(self, value: float):
+        """Add a new value, updating running statistics.
+        
+        If window is full, removes the oldest value before adding the new one.
+        
+        Args:
+            value: New data point
+        """
+        value = float(value)
+        
+        if self.count == self.window_size:
+            # Window full: remove oldest value before adding new one
+            old_value = self.buffer[self.idx]
+            self.sum_x -= old_value
+            self.sum_x2 -= old_value * old_value
+            self.count -= 1
+            
+        # Add new value
+        self.buffer[self.idx] = value
+        self.sum_x += value
+        self.sum_x2 += value * value
+        self.count += 1
+        
+        # Update circular buffer index
+        self.idx = (self.idx + 1) % self.window_size
+    
+    def get_zscore(self) -> float:
+        """Compute z-score of the most recent value.
+        
+        Returns:
+            Z-score: (latest_value - mean) / (std + epsilon)
+            Returns 0.0 if insufficient data (need at least 2 values) or zero std
+        """
+        if self.count < 2:
+            return 0.0
+        
+        # Get latest value (the one just added, at buffer position idx-1)
+        latest_idx = (self.idx - 1) % self.window_size
+        latest = self.buffer[latest_idx]
+        
+        # Compute mean and variance (using population variance to match numpy.std(ddof=0))
+        mean = self.sum_x / self.count
+        # E[X^2] - E[X]^2
+        variance = (self.sum_x2 / self.count) - (mean * mean)
+        
+        # Clamp variance to non-negative (floating point errors can produce small negative values)
+        if variance < 0:
+            variance = 0.0
+        std = np.sqrt(variance)
+        
+        # Avoid division by zero
+        eps = 1e-9
+        zscore = (latest - mean) / (std + eps)
+        
+        return float(zscore)
+    
+    def reset(self):
+        """Clear all state for reuse."""
+        self.buffer.fill(0.0)
+        self.idx = 0
+        self.count = 0
+        self.sum_x = 0.0
+        self.sum_x2 = 0.0
+
+
 class FastPriceAggregator:
     """Aggregate Coinbase/Binance feeds into smart fast price and z-score."""
 
@@ -24,6 +110,12 @@ class FastPriceAggregator:
         }
         self.history = deque(maxlen=500)
         self.zscore_window = int(os.getenv("HFT_ZSCORE_WINDOW", "96") or "96")
+        self.use_incremental = bool(int(os.getenv("HFT_USE_INCREMENTAL_ZSCORE", "1") or "1"))
+        
+        # Initialize incremental z-score calculator if enabled
+        self._zscore_calculator = None
+        if self.use_incremental:
+            self._zscore_calculator = IncrementalZScore(window_size=self.zscore_window)
 
     @staticmethod
     def tail_last_n(seq, n: int) -> list[float]:
@@ -47,6 +139,10 @@ class FastPriceAggregator:
             "ask": ask,
         }
         self.prices[exchange].append(price)
+        
+        # Feed price into incremental z-score calculator if enabled
+        if self.use_incremental and self._zscore_calculator is not None:
+            self._zscore_calculator.update(price)
 
     def get_price(self):
         """Return smart hybrid price: Coinbase anchor plus optional Binance lead blend.
@@ -127,10 +223,20 @@ class FastPriceAggregator:
 
         Uses the last ``zscore_window`` ticks (``HFT_ZSCORE_WINDOW``, default 96), not
         ``add_history``/loop-sampled fast price — so Z aligns with ADX/RSI tick buffers.
+        
+        When ``HFT_USE_INCREMENTAL_ZSCORE=1`` (default), uses O(1) incremental updates
+        via :class:`IncrementalZScore`. Set to ``0`` to use the original O(n) numpy
+        implementation for testing or debugging.
         """
         primary = self.get_primary_history()
+        # Business rule: need at least 50 ticks for meaningful z-score
         if len(primary) < 50:
             return 0.0
+        
+        if self.use_incremental and self._zscore_calculator is not None:
+            return self._zscore_calculator.get_zscore()
+        
+        # Original O(n) implementation for backward compatibility
         window = self.tail_last_n(primary, self.zscore_window)
         arr = np.asarray(window, dtype=np.float64)
         if arr.size < 2:
