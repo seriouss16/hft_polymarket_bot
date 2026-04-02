@@ -5,11 +5,13 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Any
+from typing import Any, Deque
 
 import numpy as np
 
 from ml.indicators import (
+    IncrementalADX,
+    IncrementalRSI,
     compute_adx_last,
     compute_ema_last,
     compute_macd_last,
@@ -180,6 +182,12 @@ class HFTEngine:
         self.micro_trend_stale_sec = _env_float_default("HFT_MICRO_TREND_STALE_SEC", 14.0)
         self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN"))
         self._last_rsi = 50.0
+        
+        # --- Incremental indicator calculators ---
+        self.use_incremental_indicators = os.getenv("HFT_USE_INCREMENTAL_INDICATORS", "1") == "1"
+        self._rsi_calculator = IncrementalRSI(period=self.rsi_period) if self.use_incremental_indicators else None
+        self._adx_calculator = IncrementalADX(period=self.adx_period) if self.use_incremental_indicators else None
+        self._indicators_dirty = True  # Set when price history changes, cleared after update
         self.rsi_entry_up_low = float(
             os.getenv("HFT_RSI_ENTRY_UP_LOW") or os.getenv("HFT_RSI_ENTRY_YES_LOW")
         )
@@ -741,6 +749,14 @@ class HFTEngine:
         """Clamp RSI for exit logic to limit spurious 100/0 from short price history."""
         return clamp_exit_rsi(rsi, self.rsi_exit_clamp_high, self.rsi_exit_clamp_low)
 
+    def get_cached_rsi(self) -> float:
+        """Return the most recently computed RSI value (cached from last tick)."""
+        return self._last_rsi
+
+    def get_cached_adx(self) -> float:
+        """Return the most recently computed ADX value (cached from last tick)."""
+        return self._last_adx
+
     def _rsi_range_exit_triggered(
         self, position_side, current_rsi, unrealized, hold_sec: float = 0.0
     ):
@@ -851,6 +867,11 @@ class HFTEngine:
         self._last_filter_diag_log_ts = time.time()
         self.last_close_time = 0.0
         self._live_entry_sync_pending = False
+        self._indicators_dirty = True  # Indicators need recalculation after market reset
+        if self._rsi_calculator:
+            self._rsi_calculator.reset(period=self.rsi_period)
+        if self._adx_calculator:
+            self._adx_calculator.reset(period=self.adx_period)
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -1262,9 +1283,35 @@ class HFTEngine:
             return
         _ = lstm_forecast
 
+        # Mark indicators as dirty when new price data arrives
+        self._indicators_dirty = True
+
         px = price_array_for_rsi(price_history, self.rsi_price_len)
         px_adx = price_array_for_rsi(price_history, self.adx_tick_len)
-        self._last_adx = float(compute_adx_last(px_adx, period=self.adx_period))
+        
+        # Incremental ADX calculation (or cached if not dirty)
+        if self.use_incremental_indicators and self._adx_calculator:
+            if self._indicators_dirty:
+                # Reset calculator
+                self._adx_calculator.reset(period=self.adx_period)
+                # Maintain rolling window for synthetic OHLC (window = adx_period)
+                adx_window = deque(maxlen=self.adx_period)
+                # Process all prices in the window
+                for i, price in enumerate(px_adx):
+                    adx_window.append(price)
+                    if i == 0:
+                        # First bar - just initialize with single price
+                        high_i = low_i = close_i = price
+                    else:
+                        # Synthetic bar: high/low over the rolling window, close = current price
+                        high_i = max(adx_window)
+                        low_i = min(adx_window)
+                        close_i = price
+                    self._adx_calculator.update(high_i, low_i, close_i)
+                self._last_adx = self._adx_calculator.get_last_adx()
+                self._indicators_dirty = False
+        else:
+            self._last_adx = float(compute_adx_last(px_adx, period=self.adx_period))
 
         if self.pnl.inventory == 0 and not self._regime_allows_new_entries():
             self._diag_inc("entry_block_regime")
@@ -1279,8 +1326,18 @@ class HFTEngine:
                 self._last_regime_skip_log_ts = _now
             return None
 
-        raw_rsi = float(compute_rsi(px, period=self.rsi_period))
-        self._last_rsi_raw = raw_rsi
+        # Incremental RSI calculation (or full recompute if not using incremental)
+        if self.use_incremental_indicators and self._rsi_calculator:
+            if self._indicators_dirty:
+                self._rsi_calculator.reset(period=self.rsi_period)
+                for price in px:
+                    self._rsi_calculator.update(price)
+                self._last_rsi_raw = self._rsi_calculator.get_last_rsi()
+                self._indicators_dirty = False
+        else:
+            raw_rsi = float(compute_rsi(px, period=self.rsi_period))
+            self._last_rsi_raw = raw_rsi
+        
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
         _ml, _ms, _mh = compute_macd_last(
             px,

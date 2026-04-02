@@ -325,9 +325,16 @@ class TradeJournal:
         **Return value:** :attr:`_queue_dropped_count` — the cumulative number of journal
         rows dropped because the bounded queue was full (not the number of rows flushed
         to disk). Callers use this for logging (e.g. ``Journal: N entries dropped…``).
+
+        When :attr:`_shutdown_event` is ``None`` (``start_async_writer()`` was never
+        called), rows may still be present in :attr:`_write_queue` from
+        :meth:`queue_close` / :meth:`queue_open`; :meth:`_flush_queue` runs synchronously
+        to drain them before returning. Same single-threaded asyncio assumption as the
+        rest of this class (no lock on the deque).
         """
         if self._shutdown_event is None:
-            return 0
+            self._flush_queue()
+            return self._queue_dropped_count
         self._shutdown_event.set()
         if self._async_writer_task is not None:
             try:

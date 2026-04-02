@@ -3,10 +3,260 @@
 from __future__ import annotations
 
 import math
+from collections import deque
+from typing import Deque
 
 import numpy as np
 
 
+class IncrementalRSI:
+    """Incremental RSI calculator using Wilder smoothing for O(1) per-tick updates.
+    
+    Maintains internal state to avoid recalculating over full price history on each tick.
+    Matches the behavior of compute_rsi() when using the same period.
+    """
+    
+    def __init__(self, period: int = 14):
+        self.period = int(period)
+        self._avg_gain = 0.0
+        self._avg_loss = 0.0
+        self._prev_price = None
+        self._initialized = False
+        self._last_rsi = 50.0
+    
+    def reset(self, period: int | None = None) -> None:
+        """Reset calculator state, optionally with a new period."""
+        if period is not None:
+            self.period = int(period)
+        self._avg_gain = 0.0
+        self._avg_loss = 0.0
+        self._prev_price = None
+        self._initialized = False
+        self._last_rsi = 50.0
+        # Drop warmup deque so the next update() creates deque(maxlen=self.period);
+        # avoids reusing a deque with a stale maxlen after reset(period=...).
+        if hasattr(self, "_warmup_deltas"):
+            delattr(self, "_warmup_deltas")
+
+    def update(self, price: float) -> float:
+        """Process a new price and return the current RSI value.
+        
+        Args:
+            price: The latest price value.
+            
+        Returns:
+            The RSI value (0-100). Returns 50.0 during warm-up period.
+        """
+        price = float(price)
+        
+        if self._prev_price is None:
+            self._prev_price = price
+            return self._last_rsi
+        
+        # Calculate price change
+        delta = price - self._prev_price
+        self._prev_price = price
+        
+        if not self._initialized:
+            # Warm-up: collect period deltas before using Wilder smoothing
+            if not hasattr(self, '_warmup_deltas'):
+                self._warmup_deltas: Deque[float] = deque(maxlen=self.period)
+            
+            self._warmup_deltas.append(delta)
+            
+            if len(self._warmup_deltas) < self.period:
+                return self._last_rsi
+            
+            # Initialize with simple average of first period deltas
+            warmup_arr = np.array(self._warmup_deltas, dtype=np.float64)
+            up = warmup_arr[warmup_arr >= 0].sum() / self.period
+            down = -warmup_arr[warmup_arr < 0].sum() / self.period
+            self._avg_gain = up
+            self._avg_loss = down
+            self._initialized = True
+            delattr(self, '_warmup_deltas')
+        else:
+            # Incremental Wilder smoothing
+            if delta > 0:
+                up_val = delta
+                down_val = 0.0
+            else:
+                up_val = 0.0
+                down_val = -delta
+            
+            self._avg_gain = (self._avg_gain * (self.period - 1) + up_val) / self.period
+            self._avg_loss = (self._avg_loss * (self.period - 1) + down_val) / self.period
+        
+        # Calculate RSI
+        if self._avg_loss <= 1e-12:
+            rsi = 100.0
+        else:
+            rs = self._avg_gain / self._avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+        
+        self._last_rsi = float(np.clip(rsi, 0.0, 100.0))
+        return self._last_rsi
+    
+    def get_last_rsi(self) -> float:
+        """Return the most recently computed RSI value."""
+        return self._last_rsi
+
+
+class IncrementalADX:
+    """Incremental ADX calculator using Wilder RMA for O(1) per-tick updates.
+    
+    Maintains state for True Range, +DM, -DM, and computes DI+, DI-, DX, ADX.
+    Matches compute_adx_last() behavior for the last value of a price series.
+    """
+    
+    def __init__(self, period: int = 14):
+        self.period = int(period)
+        self._prev_high = None
+        self._prev_low = None
+        self._prev_close = None
+        
+        # Wilder smoothed values (RMA)
+        self._atr = None
+        self._pdm = None
+        self._mdm = None
+        self._adx = None
+        
+        # Buffers for initialization and smoothing
+        self._tr_buffer = deque(maxlen=self.period)
+        self._pdm_buffer = deque(maxlen=self.period)
+        self._mdm_buffer = deque(maxlen=self.period)
+        self._dx_buffer = deque(maxlen=self.period)  # holds last period DX values (including zeros for early bars)
+        
+        self._bar_count = 0  # number of bars processed after the first (i.e., number of TR computed)
+        self._last_adx = float("nan")
+    
+    def reset(self, period: int | None = None) -> None:
+        """Reset calculator state, optionally with a new period."""
+        if period is not None:
+            self.period = int(period)
+        self._prev_high = None
+        self._prev_low = None
+        self._prev_close = None
+        self._atr = None
+        self._pdm = None
+        self._mdm = None
+        self._adx = None
+        # New deques so maxlen matches self.period (clear() leaves stale maxlen).
+        self._tr_buffer = deque(maxlen=self.period)
+        self._pdm_buffer = deque(maxlen=self.period)
+        self._mdm_buffer = deque(maxlen=self.period)
+        self._dx_buffer = deque(maxlen=self.period)
+        self._bar_count = 0
+        self._last_adx = float("nan")
+    
+    def update(self, high: float, low: float, close: float) -> float:
+        """Process a new bar (high, low, close) and return the current ADX value.
+        
+        For tick data without explicit OHLC, use rolling high/low over a window
+        to construct synthetic bars, as done in compute_adx_last().
+        
+        Args:
+            high: Bar high price (or rolling high over window)
+            low: Bar low price (or rolling low over window)
+            close: Bar close price
+            
+        Returns:
+            The ADX value (0-100). Returns NaN until fully initialized (after 2*period bars).
+        """
+        high = float(high)
+        low = float(low)
+        close = float(close)
+        
+        if self._prev_close is None:
+            # First bar - store and return, no calculations yet
+            self._prev_high = high
+            self._prev_low = low
+            self._prev_close = close
+            return self._last_adx
+        
+        # Calculate True Range
+        tr = max(
+            high - low,
+            abs(high - self._prev_close),
+            abs(low - self._prev_close)
+        )
+        
+        # Calculate +DM and -DM
+        up_move = high - self._prev_high
+        down_move = self._prev_low - low
+        
+        pdm = up_move if (up_move > down_move and up_move > 0) else 0.0
+        mdm = down_move if (down_move > up_move and down_move > 0) else 0.0
+        
+        # Update previous values for next iteration
+        self._prev_high = high
+        self._prev_low = low
+        self._prev_close = close
+        
+        self._bar_count += 1
+        
+        # Update ATR, PDM, MDM
+        if self._bar_count <= self.period:
+            # Collecting initial period values
+            self._tr_buffer.append(tr)
+            self._pdm_buffer.append(pdm)
+            self._mdm_buffer.append(mdm)
+            if self._bar_count < self.period:
+                # Not enough for ATR yet
+                self._atr = None
+                self._pdm = None
+                self._mdm = None
+            else:
+                # Initialize as simple averages
+                self._atr = sum(self._tr_buffer) / self.period
+                self._pdm = sum(self._pdm_buffer) / self.period
+                self._mdm = sum(self._mdm_buffer) / self.period
+        else:
+            # Wilder smoothing
+            self._atr = (self._atr * (self.period - 1) + tr) / self.period
+            self._pdm = (self._pdm * (self.period - 1) + pdm) / self.period
+            self._mdm = (self._mdm * (self.period - 1) + mdm) / self.period
+        
+        # Compute current DX if we have ATR, else 0
+        if self._atr is None:
+            dx = 0.0
+        else:
+            eps = 1e-12
+            if self._atr > eps:
+                pdi = 100.0 * self._pdm / self._atr
+                mdi = 100.0 * self._mdm / self._atr
+                denom = pdi + mdi
+                if denom > eps:
+                    dx = 100.0 * abs(pdi - mdi) / denom
+                else:
+                    dx = 0.0
+            else:
+                dx = 0.0
+        
+        # Always append DX to buffer (maintains last period values, including zeros)
+        self._dx_buffer.append(dx)
+        
+        # Compute ADX
+        if len(self._dx_buffer) < self.period:
+            # Not enough DX values yet
+            self._last_adx = float("nan")
+        elif self._adx is None:
+            # First ADX: simple average of the period DX values in buffer
+            self._adx = sum(self._dx_buffer) / self.period
+            self._last_adx = float(np.clip(self._adx, 0.0, 100.0))
+        else:
+            # Wilder smoothing of DX
+            self._adx = (self._adx * (self.period - 1) + dx) / self.period
+            self._last_adx = float(np.clip(self._adx, 0.0, 100.0))
+        
+        return self._last_adx
+    
+    def get_last_adx(self) -> float:
+        """Return the most recently computed ADX value."""
+        return self._last_adx
+
+
+# Backward compatibility: keep original functions
 def compute_adx_last(prices, period: int = 14) -> float:
     """Wilder ADX (0–100) at the last bar of ``prices`` (close-only mid series).
 

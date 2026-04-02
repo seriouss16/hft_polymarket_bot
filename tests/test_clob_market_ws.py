@@ -1,5 +1,6 @@
 """Unit tests for CLOB market WebSocket book cache (no network)."""
 
+import math
 import os
 import sys
 
@@ -211,3 +212,11 @@ def test_sync_poly_book_up_only_when_no_down_token() -> None:
     assert sync_poly_book_from_cache(pb, c, "u", None, loop_ts=1.0) is True
     assert float(pb["bid"]) == 0.4
     assert "down_bid" not in pb
+
+
+def test_health_metrics_no_timestamps_last_message_age_inf() -> None:
+    """Empty _last_ts must not report 0s age (would look falsely fresh)."""
+    c = ClobMarketBookCache()
+    c.enabled = False
+    m = c.get_health_metrics()
+    assert m["last_message_age_sec"] == math.inf

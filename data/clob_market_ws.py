@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -210,19 +211,22 @@ class ClobMarketBookCache:
         else:
             msg_rate = 0.0
         
-        # Last message age
+        # Last message age: inf when no WS/book timestamps yet (not "fresh" at 0s).
         with self._lock:
             if self._last_ts:
                 latest_ts = max(self._last_ts.values())
                 last_msg_age = now - latest_ts
             else:
-                last_msg_age = 0.0
+                last_msg_age = math.inf
         
+        last_age_out: float = (
+            round(last_msg_age, 2) if math.isfinite(last_msg_age) else last_msg_age
+        )
         return {
             "uptime_sec": round(uptime, 2),
             "reconnect_count": self._total_reconnects,
             "messages_per_sec": round(msg_rate, 2),
-            "last_message_age_sec": round(last_msg_age, 2),
+            "last_message_age_sec": last_age_out,
             "is_reconnecting": self._reconnecting,
             "backup_active": self._backup_connected,
         }
@@ -234,12 +238,14 @@ class ClobMarketBookCache:
             return
         
         metrics = self.get_health_metrics()
+        lma = metrics["last_message_age_sec"]
+        lma_s = f"{lma:.2f}" if isinstance(lma, float) and math.isfinite(lma) else "inf"
         logging.info(
-            "[WS_HEALTH] uptime=%.1fs reconnects=%d msg_rate=%.2f/s last_msg_age=%.2fs reconnecting=%s backup=%s",
+            "[WS_HEALTH] uptime=%.1fs reconnects=%d msg_rate=%.2f/s last_msg_age=%ss reconnecting=%s backup=%s",
             metrics["uptime_sec"],
             metrics["reconnect_count"],
             metrics["messages_per_sec"],
-            metrics["last_message_age_sec"],
+            lma_s,
             metrics["is_reconnecting"],
             metrics["backup_active"],
         )
@@ -429,11 +435,12 @@ class ClobMarketBookCache:
                         max_size=10 * 1024 * 1024,
                     ) as ws:
                         self._ws = ws
-                        self._connection_start_time = time.time()
-                        self._reconnect_attempt = 0
-                        self._reconnecting = False
-                        self._reconnect_start_time = None
-                        
+                        if self._backup_connected and backup_url:
+                            logging.info("CLOB market WS connected to backup endpoint: %s", backup_url)
+                            # Reset flag so next disconnect attempts primary first
+                            self._backup_connected = False
+                        else:
+                            logging.info("CLOB market WS connected: %s", url)
                         # Log connection success
                         if self._backup_connected and backup_url:
                             logging.info("CLOB market WS reverted to primary endpoint")
