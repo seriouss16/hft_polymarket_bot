@@ -118,6 +118,27 @@ async def _pulse_logging_task(
     use_smart_fast: bool = False,
 ) -> None:
     """Periodic background task for pulse logging."""
+    import os
+    
+    # Check if pulse logging is enabled (default disabled for simulation)
+    pulse_enabled = os.getenv("HFT_PULSE_LOG_ENABLED", "0") == "1"
+    
+    # Pre-formatted template (uses % formatting for lazy evaluation)
+    _log_template = (
+        "Fast: %.2f (CB %s BNC %s smart=%s) | "
+        "PolyRTDS: %.2f | "
+        "Diff: %+.2f | Z: %+.2f | "
+        "Trend: %s s=%+.2f d=%.2f a=%.1fs adx=%s micro=%s tt=%s eta=%s stale=%s | "
+        "Book: %s | "
+        "%s | "
+        "Imb: %.2f | uPnL: %+.2f$ | "
+        "Stale: %.0fms skew: %+.0f (cb %.0f poly %.0f bn %.0f) | "
+        "DD: %.2f%% | "
+        "Regime: %s | "
+        "priceToBeat: %.2f Δ=%+.2f | "
+        "Forecast: %.2f%s"
+    )
+    
     while not shutdown_event.is_set():
         try:
             poly_book = poly_book_ref[0] if poly_book_ref else None
@@ -132,6 +153,11 @@ async def _pulse_logging_task(
             )
             fast_price = aggregator.get_weighted_price() if use_smart_fast else aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             if fast_price is None or poly_btc <= 0:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+                continue
+
+            # Skip expensive formatting if pulse logging is disabled
+            if not pulse_enabled:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
                 continue
 
@@ -198,24 +224,21 @@ async def _pulse_logging_task(
             skew_ms = float(_ft["skew_ms"])
             slot_price_to_beat = float(poly_btc)  # Approximation for pulse log
 
+            # Use lazy % formatting for logging
             logging.info(
-                f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={use_smart_fast}) | "
-                f"PolyRTDS: {poly_btc:.2f} | "
-                f"Diff: {diff:+.2f} | Z: {aggregator.get_zscore():+.2f} | "
-                f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} "
-                f"a={trend['age']:.1f}s adx={_pulse_adx_s} "
-                f"micro={_pm_s} tt={_tt_s} eta={_eta_s} stale={_stale_s} | "
-                f"Book: {book_focus} | "
-                f"{_rsi_line} | "
-                f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
-                f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
-                f"(cb {float(_ft['coinbase_age_ms']):.0f} "
-                f"poly {float(_ft['poly_age_ms']):.0f} "
-                f"bn {float(_ft['binance_age_ms']):.0f}) | "
-                f"DD: {risk.drawdown_pct(pnl.balance + upnl)*100:.2f}% | "
-                f"Regime: {regime_detector.get_regime()} | "
-                f"priceToBeat: {slot_price_to_beat:.2f} Δ={fast_price - slot_price_to_beat:+.2f} | "
-                f"Forecast: {fast_price:.2f}{profile_suffix}",
+                _log_template,
+                fast_price, cb_s, bn_s, use_smart_fast,
+                poly_btc,
+                diff, aggregator.get_zscore(),
+                trend['trend'], trend['speed'], trend['depth'], trend['age'], _pulse_adx_s, _pm_s, _tt_s, _eta_s, _stale_s,
+                book_focus,
+                _rsi_line,
+                imbalance, upnl,
+                latency_ms, skew_ms, float(_ft['coinbase_age_ms']), float(_ft['poly_age_ms']), float(_ft['binance_age_ms']),
+                risk.drawdown_pct(pnl.balance + upnl)*100,
+                regime_detector.get_regime(),
+                slot_price_to_beat, fast_price - slot_price_to_beat,
+                fast_price, profile_suffix,
             )
         except Exception as exc:
             logging.debug("Pulse logging task error: %s", exc)

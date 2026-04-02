@@ -132,10 +132,9 @@ class OrderStatus(str, Enum):
     FAILED = "failed"
 
 
-@dataclass
+@dataclass(slots=True)
 class TrackedOrder:
     """Single tracked CLOB order with lifecycle metadata."""
-
     order_id: str
     token_id: str
     side: str
@@ -349,10 +348,9 @@ def _paper_aligned_buy_price_allows(signal: str, best_ask: float, max_entry_ask:
     return False
 
 
-@dataclass
+@dataclass(slots=True)
 class LiveRiskManager:
     """Session realized-PnL guard and trade counter (bot process lifetime)."""
-
     max_session_loss: float = -50.0
     pnl: float = 0.0
     trades: int = 0

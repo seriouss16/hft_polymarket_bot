@@ -53,7 +53,7 @@ class OrderEventType(Enum):
     STATUS_CHANGE = "status_change"
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderEvent:
     """Represents an order event from WebSocket."""
     order_id: str
@@ -65,7 +65,7 @@ class OrderEvent:
     ws_latency_ms: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class OrderStateInfo:
     """Complete order state information with event history."""
     order_id: str

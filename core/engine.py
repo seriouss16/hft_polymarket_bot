@@ -351,7 +351,16 @@ class HFTEngine:
         self._speed_samples = deque(maxlen=12)
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
-        self.entry_context = {}
+        
+        # --- HFT Optimization: Reusable entry_context dict ---
+        self._entry_context: dict[str, Any] = {}
+        self._entry_context_ready = False
+        self.entry_context = {}  # Exposed read-only property (populated from _entry_context)
+        
+        # --- HFT Optimization: Cached trend state ---
+        self._trend_state: dict[str, Any] = {}
+        self._trend_state_dirty = True  # Set to True when underlying data changes
+        
         self._last_entry_noise_log_ts = 0.0
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
@@ -642,6 +651,8 @@ class HFTEngine:
         self.entry_poly_mid = None
         self.entry_outcome_mid = None
         self.entry_fast_price = None
+        self._entry_context.clear()
+        self._entry_context_ready = False
         self.entry_context = {}
         self.position_trend = "FLAT"
         self._reset_trailing_state()
@@ -968,6 +979,8 @@ class HFTEngine:
         self.entry_fast_price = None
         self.entry_time = 0.0
         self.position_trend = "FLAT"
+        self._entry_context.clear()
+        self._entry_context_ready = False
         self.entry_context = {}
         self._book_stall_ticks = 0
         self._prev_up_mid = None
@@ -1228,7 +1241,10 @@ class HFTEngine:
         )
 
     def get_trend_state(self):
-        """Expose latest trend analytics for debug output."""
+        """Expose latest trend analytics for debug output (cached)."""
+        if not self._trend_state_dirty:
+            return self._trend_state
+        
         now = time.time()
         speed = 0.0
         edge = 0.0
@@ -1250,7 +1266,10 @@ class HFTEngine:
             window_sec=self.micro_trend_window_sec,
         )
         trend_stale = bool(age > self.micro_trend_stale_sec)
-        out = {
+        
+        # Update cached dict in-place to avoid allocation
+        self._trend_state.clear()
+        self._trend_state.update({
             "trend": self.trend_dir,
             "edge": edge,
             "speed": speed,
@@ -1258,9 +1277,14 @@ class HFTEngine:
             "age": age,
             "adx": adx_f if np.isfinite(adx_f) else None,
             "trend_stale": trend_stale,
-        }
-        out.update(micro)
-        return out
+        })
+        self._trend_state.update(micro)
+        self._trend_state_dirty = False
+        return self._trend_state
+
+    def invalidate_trend_state(self):
+        """Mark trend state cache as dirty (needs recompute)."""
+        self._trend_state_dirty = True
 
     async def process_tick(
         self,
@@ -1401,6 +1425,7 @@ class HFTEngine:
         )
 
         self.update_trend(fast_price, poly_mid)
+        self.invalidate_trend_state()  # Mark trend cache as dirty since update_trend modified state
         trend = self.get_trend_state()
         edge_now = trend["edge"]
         spread_up = max(0.0, up_ask - up_bid)
@@ -1649,7 +1674,9 @@ class HFTEngine:
                 else:
                     self._live_entry_sync_pending = True
                 self.position_trend = trend["trend"]
-                self.entry_context = {
+                # Reuse entry_context dict to avoid allocation
+                self._entry_context.clear()
+                self._entry_context.update({
                     "entry_edge": fast_price - poly_mid,
                     "entry_trend": trend["trend"],
                     "entry_speed": trend["speed"],
@@ -1668,7 +1695,9 @@ class HFTEngine:
                     "entry_down_ask": down_ask,
                     "strategy_name": self._display_strategy_name(),
                     "entry_profile": self.get_active_profile(),
-                }
+                })
+                self._entry_context_ready = True
+                self.entry_context = self._entry_context
                 logging.info(
                     "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
                     "strategy=%s profile=%s",
@@ -1736,7 +1765,9 @@ class HFTEngine:
                 else:
                     self._live_entry_sync_pending = True
                 self.position_trend = trend["trend"]
-                self.entry_context = {
+                # Reuse entry_context dict to avoid allocation
+                self._entry_context.clear()
+                self._entry_context.update({
                     "entry_edge": fast_price - poly_mid,
                     "entry_trend": trend["trend"],
                     "entry_speed": trend["speed"],
@@ -1755,7 +1786,9 @@ class HFTEngine:
                     "entry_down_ask": down_ask,
                     "strategy_name": self._display_strategy_name(),
                     "entry_profile": self.get_active_profile(),
-                }
+                })
+                self._entry_context_ready = True
+                self.entry_context = self._entry_context
                 logging.info(
                     "🧭 Entry context: side=BUY_DOWN poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
                     "strategy=%s profile=%s",
@@ -2068,6 +2101,8 @@ class HFTEngine:
                 self.entry_fast_price = None
                 self.entry_time = 0.0
                 self.position_trend = "FLAT"
+                self._entry_context.clear()
+                self._entry_context_ready = False
                 self.entry_context = {}
                 self._book_stall_ticks = 0
                 self._prev_up_mid = None

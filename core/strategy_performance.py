@@ -5,19 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class StrategyPerformanceSlice:
     """Cumulative stats for one attribution key (e.g. phase_router:soft_flow)."""
-
     trades: int = 0
     wins: int = 0
     pnl_sum: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class StrategyPerformanceBook:
     """Track closed-trade PnL by performance_key across a session."""
-
     slices: dict[str, StrategyPerformanceSlice] = field(default_factory=dict)
 
     def record_close(self, performance_key: str | None, pnl: float) -> None:

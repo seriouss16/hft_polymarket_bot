@@ -8,10 +8,9 @@ from typing import Any
 from core.strategy_base import BaseStrategy
 
 
-@dataclass
+@dataclass(slots=True)
 class StrategyResult:
     """Represent a result emitted by a named strategy."""
-
     strategy: str
     payload: dict[str, Any]
 
