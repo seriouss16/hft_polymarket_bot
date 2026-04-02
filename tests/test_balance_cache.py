@@ -56,12 +56,21 @@ class TestConditionalAllowanceCache:
         cache = ConditionalAllowanceCache(ttl_sec=300.0)
         assert cache.get_cached_allowance("unknown") is None
 
-    def test_expired_allowance_returns_stale_value(self) -> None:
+    def test_expired_allowance_returns_stale_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """When TTL expires, get_cached_allowance still returns stale value."""
-        cache = ConditionalAllowanceCache(ttl_sec=0.01)  # 10ms TTL
+        t0 = 1_000_000.0
+        ttl_sec = 300.0
+        clock = {"t": t0}
+
+        def fake_time() -> float:
+            return clock["t"]
+
+        monkeypatch.setattr(time, "time", fake_time)
+        cache = ConditionalAllowanceCache(ttl_sec=ttl_sec)
         cache.set_allowance("token_abc", 0.5)
-        time.sleep(0.02)
-        # Should return stale value (slightly stale is better than blocking)
+        clock["t"] = t0 + ttl_sec + 1.0
         result = cache.get_cached_allowance("token_abc")
         assert result == 0.5
 
@@ -74,6 +83,22 @@ class TestConditionalAllowanceCache:
         assert set(queue) == {"token_up", "token_down"}
         # Queue should be cleared after retrieval
         assert cache.get_refresh_queue() == []
+
+    def test_schedule_refresh_queue_bounded_fifo_eviction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When over MAX_REFRESH_QUEUE_SIZE, oldest entries are evicted (FIFO)."""
+        import data.balance_cache as bc
+
+        monkeypatch.setattr(bc, "MAX_REFRESH_QUEUE_SIZE", 3)
+        cache = ConditionalAllowanceCache()
+        cache.schedule_refresh("t0")
+        cache.schedule_refresh("t1")
+        cache.schedule_refresh("t2")
+        cache.schedule_refresh("t_new")
+        q = cache.get_refresh_queue()
+        assert q == ["t1", "t2", "t_new"]
+        assert "t0" not in q
 
     def test_batch_set_allowances(self) -> None:
         """batch_set_allowances stores multiple values at once."""
@@ -112,11 +137,19 @@ class TestConditionalAllowanceCache:
         assert metrics["hits"] == 2
         assert metrics["misses"] == 1
 
-    def test_stale_read_metrics(self) -> None:
+    def test_stale_read_metrics(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Expired entries count as stale_reads."""
-        cache = ConditionalAllowanceCache(ttl_sec=0.01)
+        t0 = 2_000_000.0
+        ttl_sec = 60.0
+        clock = {"t": t0}
+
+        def fake_time() -> float:
+            return clock["t"]
+
+        monkeypatch.setattr(time, "time", fake_time)
+        cache = ConditionalAllowanceCache(ttl_sec=ttl_sec)
         cache.set_allowance("t1", 1.0)
-        time.sleep(0.02)
+        clock["t"] = t0 + ttl_sec + 1.0
         cache.get_cached_allowance("t1")  # stale read
         metrics = cache.get_metrics()
         assert metrics["stale_reads"] == 1

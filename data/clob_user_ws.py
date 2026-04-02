@@ -108,6 +108,24 @@ def _float(x: Any) -> float:
         return 0.0
 
 
+def _extract_server_sequence(msg: dict[str, Any]) -> int | None:
+    """Return Polymarket (or future) server stream sequence if present in the payload.
+
+    Public docs do not guarantee a field; when absent, gap detection is skipped.
+    """
+    for key in ("seq", "sequence", "sequence_number", "sequenceNumber", "msg_seq"):
+        v = msg.get(key)
+        if v is None:
+            continue
+        try:
+            n = int(str(v).strip())
+        except (TypeError, ValueError):
+            continue
+        if n >= 0:
+            return n
+    return None
+
+
 def _auth_dict(creds: Any) -> dict[str, str] | None:
     if creds is None:
         return None
@@ -131,7 +149,7 @@ class ClobUserOrderCache:
     
     Implements a complete order state machine with:
     - Event-driven state transitions
-    - Sequence number tracking for gap detection
+    - Server sequence gap detection when the feed includes a sequence field
     - Reconnection event buffering
     - Latency metrics collection
     - Comprehensive logging
@@ -160,10 +178,10 @@ class ClobUserOrderCache:
         # Event-driven waiting: order_id -> list of asyncio.Event to set on update
         self._order_events: dict[str, list[asyncio.Event]] = {}
         
-        # Sequence number tracking for gap detection
-        self._sequence_number: int = 0
+        # Server-side stream sequence (gap detection when payloads include a seq field)
         self._last_sequence_seen: int = 0
         self._sequence_gaps_detected: int = 0
+        self._client_annotation_seq: int = 0  # optional _seq stamp; not used for gap logic
         
         # Reconnection event buffering
         self._reconnect_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=1000)
@@ -460,19 +478,8 @@ class ClobUserOrderCache:
             logging.debug("CLOB user WS: skip message: %s", exc)
 
     def _handle_raw(self, raw: str) -> None:
-        if not raw or raw.strip().upper() == "PONG":
-            return
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            return
-        if isinstance(parsed, list):
-            for item in parsed:
-                if isinstance(item, dict):
-                    self._handle_message_dict(item)
-            return
-        if isinstance(parsed, dict):
-            self._handle_message_dict(parsed)
+        """Alias for :meth:`handle_ws_message_with_sequence` (tests and legacy callers)."""
+        self.handle_ws_message_with_sequence(raw)
 
     async def _send_subscribe(self, ws: Any) -> None:
         creds = self._creds_getter()
@@ -530,6 +537,7 @@ class ClobUserOrderCache:
                 ) as ws:
                     self._ws = ws
                     await self._send_subscribe(ws)
+                    self.stop_reconnect_buffering()
                     ping_task = asyncio.create_task(self._ping_loop(ws))
                     try:
                         async for message in ws:
@@ -537,7 +545,7 @@ class ClobUserOrderCache:
                                 break
                             if isinstance(message, bytes):
                                 message = message.decode("utf-8", errors="replace")
-                            self._handle_raw(message)
+                            self.handle_ws_message_with_sequence(message)
                     finally:
                         ping_task.cancel()
                         try:
@@ -553,11 +561,9 @@ class ClobUserOrderCache:
                     exc,
                     self._reconnect_sec,
                 )
-                # Start buffering during reconnection
+                # Buffer until subscribe completes on the next connection (see stop after _send_subscribe).
                 self.start_reconnect_buffering()
                 await asyncio.sleep(self._reconnect_sec)
-                # Stop buffering and replay events
-                self.stop_reconnect_buffering()
         
         # Log final metrics
         self._log_metrics("shutdown")
@@ -642,7 +648,7 @@ class ClobUserOrderCache:
                     for k, v in self._state_transitions.items()
                 },
                 "active_orders": len(self._state_machine),
-                "sequence_number": self._sequence_number,
+                "sequence_number": self._last_sequence_seen,
                 "sequence_gaps_detected": self._sequence_gaps_detected,
                 "pending_orders": len(self._pending_orders),
                 "reconnect_buffer_size": len(self._reconnect_buffer),
@@ -665,25 +671,41 @@ class ClobUserOrderCache:
             metrics["events_by_type"],
         )
 
-    def _increment_sequence(self) -> int:
-        """Increment and return the new sequence number."""
+    def _next_client_annotation_seq(self) -> int:
+        """Monotonic id for optional ``_seq`` on decoded payloads (debug only)."""
         with self._lock:
-            self._sequence_number += 1
-            return self._sequence_number
+            self._client_annotation_seq += 1
+            return self._client_annotation_seq
+
+    def _track_server_sequences_in_payload(self, parsed: Any) -> None:
+        """Run gap detection using server-provided sequence fields on each event dict."""
+        if isinstance(parsed, dict):
+            seq = _extract_server_sequence(parsed)
+            if seq is not None:
+                self._check_sequence_gap(seq)
+            return
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    seq = _extract_server_sequence(item)
+                    if seq is not None:
+                        self._check_sequence_gap(seq)
 
     def _check_sequence_gap(self, seq: int) -> bool:
-        """Check for sequence gap, return True if gap detected."""
+        """Compare *server* stream sequence to the last seen value; return True if a gap was detected."""
         with self._lock:
-            if self._last_sequence_seen > 0 and seq > self._last_sequence_seen + 1:
+            gap_detected = (
+                self._last_sequence_seen > 0 and seq > self._last_sequence_seen + 1
+            )
+            if gap_detected:
                 gap = seq - self._last_sequence_seen - 1
                 self._sequence_gaps_detected += gap
                 logging.warning(
                     "[WS] Sequence gap detected: expected=%d got=%d gap=%d total_gaps=%d",
                     self._last_sequence_seen + 1, seq, gap, self._sequence_gaps_detected,
                 )
-                return True
             self._last_sequence_seen = seq
-            return False
+            return gap_detected
 
     def _buffer_event(self, msg: dict[str, Any]) -> None:
         """Buffer an event during reconnection."""
@@ -705,6 +727,9 @@ class ClobUserOrderCache:
         for msg in buffered:
             try:
                 if isinstance(msg, dict):
+                    srv = _extract_server_sequence(msg)
+                    if srv is not None:
+                        self._check_sequence_gap(srv)
                     self._handle_message_dict(msg)
                     replayed += 1
             except Exception as exc:
@@ -715,14 +740,14 @@ class ClobUserOrderCache:
         return replayed
 
     def start_reconnect_buffering(self) -> None:
-        """Start buffering events during reconnection."""
+        """Begin buffering: call when the socket is down, before reconnect delay/connect."""
         with self._lock:
             self._buffer_during_reconnect = True
             self._is_reconnecting = True
         logging.info("[WS] Started reconnection event buffering")
 
     def stop_reconnect_buffering(self) -> int:
-        """Stop buffering and replay events. Returns count of replayed events."""
+        """End buffering, replay queued dict events. Call after (re)subscribe on the new socket."""
         with self._lock:
             self._buffer_during_reconnect = False
             self._is_reconnecting = False
@@ -787,7 +812,11 @@ class ClobUserOrderCache:
         return None
 
     def handle_ws_message_with_sequence(self, raw: str) -> None:
-        """Handle raw WS message with sequence number tracking."""
+        """Single entry point for each user-channel WebSocket text frame (used by ``run_forever``).
+
+        Skips heartbeats, applies reconnect buffering (per-event dict), server sequence gap
+        tracking, optional client ``_seq`` stamp, then dispatches to ``_handle_message_dict``.
+        """
         if not raw or raw.strip().upper() == "PONG":
             return
         try:
@@ -795,25 +824,29 @@ class ClobUserOrderCache:
         except json.JSONDecodeError:
             return
         
-        # Add sequence number to parsed message
-        seq = self._increment_sequence()
+        # Buffer during reconnection (one deque entry per event dict; replay expects dicts).
+        with self._lock:
+            buffering = self._buffer_during_reconnect
+        if buffering:
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        self._buffer_event(item)
+                return
+            if isinstance(parsed, dict):
+                self._buffer_event(parsed)
+            return
+
+        self._track_server_sequences_in_payload(parsed)
+
+        ann = self._next_client_annotation_seq()
         if isinstance(parsed, dict):
-            parsed["_seq"] = seq
+            parsed["_seq"] = ann
         elif isinstance(parsed, list):
             for item in parsed:
                 if isinstance(item, dict):
-                    item["_seq"] = seq
-        
-        # Check for sequence gaps
-        if isinstance(parsed, dict):
-            self._check_sequence_gap(seq)
-        
-        # Buffer during reconnection or process normally
-        with self._lock:
-            if self._buffer_during_reconnect:
-                self._buffer_event(parsed)
-                return
-        
+                    item["_seq"] = ann
+
         if isinstance(parsed, list):
             for item in parsed:
                 if isinstance(item, dict):

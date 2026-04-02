@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from data.clob_user_ws import ClobUserOrderCache
+from data.clob_user_ws import ClobUserOrderCache, _extract_server_sequence
 
 
 class _Creds:
@@ -66,6 +66,54 @@ def test_trade_without_event_type(cache: ClobUserOrderCache):
     st, filled = cache.get_order_fill("0xt")
     assert st == "matched"
     assert abs(filled - 2.0) < 1e-9
+
+
+def test_extract_server_sequence_common_keys() -> None:
+    assert _extract_server_sequence({"seq": "42"}) == 42
+    assert _extract_server_sequence({"sequence_number": 7}) == 7
+    assert _extract_server_sequence({"event_type": "order"}) is None
+
+
+def test_server_sequence_gap_detected_on_handle_raw(cache: ClobUserOrderCache):
+    cache._handle_raw(
+        '{"event_type":"order","type":"UPDATE","id":"0xs1","seq":1,'
+        '"size_matched":"0","original_size":"1"}'
+    )
+    cache._handle_raw(
+        '{"event_type":"order","type":"UPDATE","id":"0xs2","seq":3,'
+        '"size_matched":"0","original_size":"1"}'
+    )
+    m = cache.get_metrics()
+    assert m["sequence_gaps_detected"] == 1
+    assert m["sequence_number"] == 3
+
+
+def test_reconnect_buffer_replays_after_stop(cache: ClobUserOrderCache):
+    cache.start_reconnect_buffering()
+    cache.handle_ws_message_with_sequence(
+        '{"event_type":"order","type":"UPDATE","id":"0xbuf","size_matched":"1",'
+        '"original_size":"10"}'
+    )
+    assert cache.get_order_fill("0xbuf") is None
+    replayed = cache.stop_reconnect_buffering()
+    assert replayed == 1
+    st, filled = cache.get_order_fill("0xbuf")
+    assert st == "partially_matched"
+    assert abs(filled - 1.0) < 1e-9
+
+
+def test_reconnect_buffer_json_array_replays_both_orders(cache: ClobUserOrderCache):
+    cache.start_reconnect_buffering()
+    cache.handle_ws_message_with_sequence(
+        "["
+        '{"event_type":"order","type":"UPDATE","id":"0xa1","size_matched":"1","original_size":"2"},'
+        '{"event_type":"order","type":"UPDATE","id":"0xa2","size_matched":"0","original_size":"1"}'
+        "]"
+    )
+    assert cache.get_order_fill("0xa1") is None
+    assert cache.stop_reconnect_buffering() == 2
+    assert cache.get_order_fill("0xa1") is not None
+    assert cache.get_order_fill("0xa2") is not None
 
 
 def test_order_cache_bounded(monkeypatch):

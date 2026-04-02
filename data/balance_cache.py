@@ -27,6 +27,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+# Cap for ConditionalAllowanceCache._refresh_queue (FIFO eviction when full).
+MAX_REFRESH_QUEUE_SIZE = max(1, int(os.getenv("ALLOWANCE_REFRESH_QUEUE_MAX", "64")))
+# Max distinct token_ids in ConditionalAllowanceCache._cache (after expired prune).
+_DEFAULT_ALLOWANCE_CACHE_MAX_ENTRIES = 256
+
 
 @dataclass
 class BalanceCacheEntry:
@@ -429,6 +434,14 @@ class ConditionalAllowanceCache:
         self._ttl_sec = ttl_sec if ttl_sec is not None else float(
             os.getenv("ALLOWANCE_CACHE_TTL_SEC", "300")
         )
+        self._max_allowance_entries = max(
+            1,
+            int(os.getenv("ALLOWANCE_CACHE_MAX_ENTRIES", str(_DEFAULT_ALLOWANCE_CACHE_MAX_ENTRIES))),
+        )
+        self._clean_interval_sec = max(
+            5.0,
+            float(os.getenv("ALLOWANCE_CACHE_CLEAN_INTERVAL_SEC", "60")),
+        )
         self._cache: dict[str, AllowanceCacheEntry] = {}
         self._lock = threading.Lock()
         self._refresh_queue: list[str] = []
@@ -438,7 +451,46 @@ class ConditionalAllowanceCache:
             "stale_reads": 0,
             "refreshes": 0,
             "batch_refreshes": 0,
+            "evictions": 0,
         }
+        self._stop_cleaner = threading.Event()
+        self._cleaner_thread = threading.Thread(
+            target=self._allowance_cache_cleaner_loop,
+            name="allowance-cache-trim",
+            daemon=True,
+        )
+        self._cleaner_thread.start()
+
+    def _allowance_cache_cleaner_loop(self) -> None:
+        """Periodic expired/size trim while the process runs."""
+        while not self._stop_cleaner.wait(timeout=self._clean_interval_sec):
+            with self._lock:
+                self._trim_conditional_locked()
+
+    def _trim_conditional_locked(self) -> None:
+        """Drop expired entries then enforce max size (oldest ``last_refresh`` first).
+
+        Caller must hold :attr:`_lock`. Increments ``metrics['evictions']`` by the
+        number of removed rows.
+        """
+        now = time.time()
+        removed = 0
+        expired_tids = [tid for tid, e in self._cache.items() if e.expires_at <= now]
+        for tid in expired_tids:
+            del self._cache[tid]
+            removed += 1
+        n = len(self._cache)
+        if n > self._max_allowance_entries:
+            excess = n - self._max_allowance_entries
+            oldest = sorted(
+                self._cache.items(),
+                key=lambda kv: kv[1].last_refresh,
+            )
+            for tid, _ in oldest[:excess]:
+                del self._cache[tid]
+                removed += 1
+        if removed:
+            self._metrics["evictions"] += removed
 
     def get_cached_allowance(self, token_id: str) -> float | None:
         """Return cached allowance if not expired, None otherwise.
@@ -476,6 +528,7 @@ class ConditionalAllowanceCache:
                 expires_at=now + self._ttl_sec,
                 last_refresh=now,
             )
+            self._trim_conditional_locked()
 
     def schedule_refresh(self, token_id: str) -> None:
         """Queue a token_id for background allowance refresh.
@@ -483,12 +536,24 @@ class ConditionalAllowanceCache:
         Called when entering a position to pre-emptively refresh
         allowance for the opposite token during the BUY hold period.
 
+        The queue is deduplicated and bounded by :data:`MAX_REFRESH_QUEUE_SIZE`;
+        when full, the oldest scheduled token_id is dropped (FIFO) before appending.
+
         Args:
             token_id: The conditional token ID to refresh
         """
         with self._lock:
-            if token_id not in self._refresh_queue:
-                self._refresh_queue.append(token_id)
+            if token_id in self._refresh_queue:
+                return
+            while len(self._refresh_queue) >= MAX_REFRESH_QUEUE_SIZE:
+                dropped = self._refresh_queue.pop(0)
+                logging.warning(
+                    "[ALLOWANCE] Refresh queue full (max=%d), evicting oldest token_id=%s",
+                    MAX_REFRESH_QUEUE_SIZE,
+                    dropped[:20],
+                )
+            self._refresh_queue.append(token_id)
+            self._trim_conditional_locked()
 
     def get_refresh_queue(self) -> list[str]:
         """Return and clear the refresh queue.
@@ -515,6 +580,7 @@ class ConditionalAllowanceCache:
                     expires_at=now + self._ttl_sec,
                     last_refresh=now,
                 )
+            self._trim_conditional_locked()
 
     def clear(self, token_id: str | None = None) -> None:
         """Clear cache for a specific token or all tokens.

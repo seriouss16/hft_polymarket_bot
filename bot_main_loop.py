@@ -360,6 +360,8 @@ async def main():
         """Refresh allowance for a single token in background."""
         try:
             await asyncio.to_thread(live_exec.ensure_conditional_allowance, token_id)
+            if allowance_cache is None:
+                return
             allowance_cache.record_refresh()
             logging.debug("[ALLOWANCE] Refreshed allowance for token=%s", token_id[:20])
         except Exception as exc:
@@ -373,11 +375,27 @@ async def main():
         if not token_ids:
             return
         try:
-            # Refresh all tokens in parallel
             async def _refresh_one(tid: str) -> None:
                 await asyncio.to_thread(live_exec.ensure_conditional_allowance, tid)
 
-            await asyncio.gather(*[_refresh_one(tid) for tid in token_ids], return_exceptions=True)
+            results = await asyncio.gather(
+                *[_refresh_one(tid) for tid in token_ids],
+                return_exceptions=True,
+            )
+            failed: list[tuple[str, BaseException]] = []
+            for tid, res in zip(token_ids, results):
+                if isinstance(res, BaseException):
+                    failed.append((tid, res))
+            if failed:
+                for tid, exc in failed:
+                    logging.debug(
+                        "[ALLOWANCE] ensure_conditional_allowance failed in batch_refresh "
+                        "for token=%s: %s",
+                        tid[:20],
+                        exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+                return
             allowance_cache.record_batch_refresh()
             logging.debug("[ALLOWANCE] Batch refreshed allowances for %d tokens", len(token_ids))
         except Exception as exc:
