@@ -118,6 +118,26 @@ class ClobMarketBookCache:
         self._asset_ids: list[str] = []
         self._ws: Any = None
         self._stop = asyncio.Event()
+        
+        # --- HFT Optimization: Cached snapshot with dirty flag ---
+        self._cache_enabled = os.getenv("HFT_CACHE_BOOK_SNAPSHOT", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._top_n = int(os.getenv("HFT_BOOK_TOP_N", "5"))
+        self._incremental_imbalance = os.getenv("HFT_INCREMENTAL_IMBALANCE", "1").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._cached_snapshot: dict[str, dict[str, Any] | None] = {}
+        self._snapshot_dirty: dict[str, bool] = {}
+        self._cached_imbalance: dict[str, float] = {}
+        self._cached_top_bids: dict[str, list[tuple[float, float]]] = {}
+        self._cached_top_asks: dict[str, list[tuple[float, float]]] = {}
+        self._total_bid_volume: dict[str, float] = {}
+        self._total_ask_volume: dict[str, float] = {}
 
     def set_asset_ids(self, ids: list[str]) -> None:
         """Replace subscribed token ids (call from any thread before async close)."""
@@ -128,6 +148,15 @@ class ClobMarketBookCache:
                     self._bids.pop(k, None)
                     self._asks.pop(k, None)
                     self._last_ts.pop(k, None)
+                    # Clear cache entries for removed assets
+                    if self._cache_enabled:
+                        self._snapshot_dirty.pop(k, None)
+                        self._cached_snapshot.pop(k, None)
+                        self._cached_top_bids.pop(k, None)
+                        self._cached_top_asks.pop(k, None)
+                        self._cached_imbalance.pop(k, None)
+                        self._total_bid_volume.pop(k, None)
+                        self._total_ask_volume.pop(k, None)
 
     async def set_asset_ids_async(self, ids: list[str]) -> None:
         """Update subscription list and reconnect WebSocket (call from async main loop)."""
@@ -143,32 +172,92 @@ class ClobMarketBookCache:
         """Return the same shape as ``_snapshot_from_levels`` or None if no book yet."""
         if not token_id:
             return None
+        
+        # Check if we can use cached snapshot
+        if (
+            self._cache_enabled
+            and depth == self._top_n
+            and not self._snapshot_dirty.get(token_id, True)
+        ):
+            with self._lock:
+                cached = self._cached_snapshot.get(token_id)
+                if cached is not None:
+                    return cached
+        
         with self._lock:
             bids = self._bids.get(token_id)
             asks = self._asks.get(token_id)
             if not bids and not asks:
                 return None
-            bid_levels = sorted(bids.items(), key=lambda x: x[0], reverse=True) if bids else []
-            ask_levels = sorted(asks.items(), key=lambda x: x[0]) if asks else []
-        return _snapshot_from_levels(bid_levels, ask_levels, depth)
+            
+            # Use heapq.nlargest for top-N extraction (optimized)
+            if self._cache_enabled and depth == self._top_n:
+                import heapq
+                # Get top N bids (highest prices)
+                bid_items = heapq.nlargest(depth, bids.items(), key=lambda x: x[0])
+                # Get top N asks (lowest prices)
+                ask_items = heapq.nsmallest(depth, asks.items(), key=lambda x: x[0])
+                bid_levels = bid_items
+                ask_levels = ask_items
+            else:
+                bid_levels = sorted(bids.items(), key=lambda x: x[0], reverse=True)
+                ask_levels = sorted(asks.items(), key=lambda x: x[0])
+        
+        snap = _snapshot_from_levels(bid_levels, ask_levels, depth)
+        
+        # Cache the snapshot if enabled
+        if self._cache_enabled and depth == self._top_n:
+            with self._lock:
+                self._cached_snapshot[token_id] = snap
+                self._cached_top_bids[token_id] = bid_levels
+                self._cached_top_asks[token_id] = ask_levels
+                # Calculate and cache incremental totals
+                if self._incremental_imbalance:
+                    bid_vol = sum(s for _, s in bid_levels)
+                    ask_vol = sum(s for _, s in ask_levels)
+                    self._total_bid_volume[token_id] = bid_vol
+                    self._total_ask_volume[token_id] = ask_vol
+                    # Pre-calculate imbalance
+                    total = bid_vol + ask_vol
+                    imbalance = (bid_vol - ask_vol) / total if total > 0 else 0.0
+                    self._cached_imbalance[token_id] = imbalance
+                self._mark_snapshot_clean(token_id)
+        
+        return snap
 
     def get_snapshot_with_imbalance(self, token_id: str, depth: int = 5) -> dict[str, Any] | None:
         """Return snapshot with top-N volume and imbalance metrics expected by HFTEngine.
 
+        Uses cached snapshot and pre-calculated imbalance when available for performance.
         Calculates bid_vol_topn, ask_vol_topn, imbalance, and pressure fields.
         Returns None if no book data available.
         """
         snap = self.snapshot(token_id, depth)
         if snap is None:
             return None
-        # Calculate volumes from bid/ask levels
-        bid_vol = sum(snap.get('bids', {}).values())
-        ask_vol = sum(snap.get('asks', {}).values())
-        total = bid_vol + ask_vol
-        snap['bid_vol_topn'] = bid_vol
-        snap['ask_vol_topn'] = ask_vol
-        snap['imbalance'] = (bid_vol - ask_vol) / total if total > 0 else 0.0
-        snap['pressure'] = bid_vol / total if total > 0 else 0.5
+        
+        # Use cached imbalance and volumes if available and fresh
+        if (
+            self._cache_enabled
+            and depth == self._top_n
+            and not self._snapshot_dirty.get(token_id, True)
+            and token_id in self._cached_imbalance
+        ):
+            snap['bid_vol_topn'] = self._total_bid_volume.get(token_id, 0.0)
+            snap['ask_vol_topn'] = self._total_ask_volume.get(token_id, 0.0)
+            snap['imbalance'] = self._cached_imbalance[token_id]
+            total = snap['bid_vol_topn'] + snap['ask_vol_topn']
+            snap['pressure'] = snap['bid_vol_topn'] / total if total > 0 else 0.5
+        else:
+            # Calculate volumes from bid/ask levels (fallback)
+            bid_vol = sum(snap.get('bids', {}).values())
+            ask_vol = sum(snap.get('asks', {}).values())
+            total = bid_vol + ask_vol
+            snap['bid_vol_topn'] = bid_vol
+            snap['ask_vol_topn'] = ask_vol
+            snap['imbalance'] = (bid_vol - ask_vol) / total if total > 0 else 0.0
+            snap['pressure'] = bid_vol / total if total > 0 else 0.5
+        
         return snap
 
     def _apply_snapshot(self, snap: dict[str, Any], token_id: str) -> None:
@@ -187,6 +276,27 @@ class ClobMarketBookCache:
             self._bids[token_id] = bids
             self._asks[token_id] = asks
             self._touch(token_id)
+            # Invalidate cached snapshot for this token
+            if self._cache_enabled:
+                self._snapshot_dirty[token_id] = True
+                self._cached_snapshot.pop(token_id, None)
+                self._cached_top_bids.pop(token_id, None)
+                self._cached_top_asks.pop(token_id, None)
+                self._cached_imbalance.pop(token_id, None)
+                self._total_bid_volume.pop(token_id, None)
+                self._total_ask_volume.pop(token_id, None)
+
+    def invalidate_cache(self, token_id: str) -> None:
+        """Explicitly invalidate cached snapshot for a token (e.g., after external update)."""
+        if self._cache_enabled:
+            with self._lock:
+                self._snapshot_dirty[token_id] = True
+                self._cached_snapshot.pop(token_id, None)
+                self._cached_top_bids.pop(token_id, None)
+                self._cached_top_asks.pop(token_id, None)
+                self._cached_imbalance.pop(token_id, None)
+                self._total_bid_volume.pop(token_id, None)
+                self._total_ask_volume.pop(token_id, None)
 
     def is_fresh(self, token_id: str) -> bool:
         """Check if token data is fresh, accounting for reconnection grace period."""
@@ -269,6 +379,14 @@ class ClobMarketBookCache:
         if len(self._message_rate_window) > self._max_rate_samples:
             self._message_rate_window.pop(0)
         self._message_count += 1
+        # Mark snapshot as dirty when book updates
+        if self._cache_enabled:
+            self._snapshot_dirty[asset_id] = True
+
+    def _mark_snapshot_clean(self, asset_id: str) -> None:
+        """Clear dirty flag after snapshot has been computed."""
+        if self._cache_enabled and asset_id in self._snapshot_dirty:
+            self._snapshot_dirty[asset_id] = False
 
     def _apply_book(self, msg: dict[str, Any]) -> None:
         """Replace L2 for ``asset_id`` from a ``book`` event (full snapshot)."""
@@ -281,6 +399,15 @@ class ClobMarketBookCache:
             self._bids[aid] = bids
             self._asks[aid] = asks
             self._touch(aid)
+            # Invalidate cached snapshot for this asset
+            if self._cache_enabled:
+                self._snapshot_dirty[aid] = True
+                self._cached_snapshot.pop(aid, None)
+                self._cached_top_bids.pop(aid, None)
+                self._cached_top_asks.pop(aid, None)
+                self._cached_imbalance.pop(aid, None)
+                self._total_bid_volume.pop(aid, None)
+                self._total_ask_volume.pop(aid, None)
 
     def _apply_price_change(self, msg: dict[str, Any]) -> None:
         for ch in msg.get("price_changes") or []:
@@ -306,6 +433,15 @@ class ClobMarketBookCache:
                 else:
                     book[price] = size
                 self._touch(aid)
+                # Invalidate cached snapshot for this asset
+                if self._cache_enabled:
+                    self._snapshot_dirty[aid] = True
+                    self._cached_snapshot.pop(aid, None)
+                    self._cached_top_bids.pop(aid, None)
+                    self._cached_top_asks.pop(aid, None)
+                    self._cached_imbalance.pop(aid, None)
+                    self._total_bid_volume.pop(aid, None)
+                    self._total_ask_volume.pop(aid, None)
 
     def _apply_best_bid_ask(self, msg: dict[str, Any]) -> None:
         """Apply ``best_bid_ask`` (custom feature): refresh top-of-book prices for ``asset_id``.
@@ -345,6 +481,15 @@ class ClobMarketBookCache:
                             sz = 1.0
                         asks[ba] = asks.get(ba, 0.0) + sz
             self._touch(aid)
+            # Invalidate cached snapshot for this asset
+            if self._cache_enabled:
+                self._snapshot_dirty[aid] = True
+                self._cached_snapshot.pop(aid, None)
+                self._cached_top_bids.pop(aid, None)
+                self._cached_top_asks.pop(aid, None)
+                self._cached_imbalance.pop(aid, None)
+                self._total_bid_volume.pop(aid, None)
+                self._total_ask_volume.pop(aid, None)
 
     def _handle_message_dict(self, msg: dict[str, Any]) -> None:
         """Dispatch one decoded JSON object (Polymarket may batch multiple events in a list)."""
