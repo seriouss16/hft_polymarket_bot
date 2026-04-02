@@ -1333,7 +1333,7 @@ class HFTEngine:
                         close_i = price
                     self._adx_calculator.update(high_i, low_i, close_i)
                 self._last_adx = self._adx_calculator.get_last_adx()
-                self._indicators_dirty = False
+                # Do not clear _indicators_dirty here — incremental RSI below must run too.
         else:
             self._last_adx = float(compute_adx_last(px_adx, period=self.adx_period))
 
@@ -1356,12 +1356,15 @@ class HFTEngine:
                 self._rsi_calculator.reset(period=self.rsi_period)
                 for price in px:
                     self._rsi_calculator.update(price)
-                self._last_rsi_raw = self._rsi_calculator.get_last_rsi()
-                self._indicators_dirty = False
+            raw_rsi = float(self._rsi_calculator.get_last_rsi())
+            self._last_rsi_raw = raw_rsi
         else:
             raw_rsi = float(compute_rsi(px, period=self.rsi_period))
             self._last_rsi_raw = raw_rsi
-        
+
+        if self.use_incremental_indicators:
+            self._indicators_dirty = False
+
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
         _ml, _ms, _mh = compute_macd_last(
             px,
