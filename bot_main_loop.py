@@ -390,7 +390,7 @@ async def main():
         _account_balance = live_exec.fetch_usdc_balance()
         _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit
         if _effective_account > 0.0 and _session_deposit > _effective_account:
-            raise SystemExit(
+            _abort = (
                 f"\n{'='*60}\n"
                 f"🛑  STARTUP ABORTED — session deposit exceeds account balance:\n"
                 f"  HFT_DEPOSIT_USD = {_session_deposit:.2f} USD  (session budget)\n"
@@ -398,6 +398,8 @@ async def main():
                 f"  Set HFT_DEPOSIT_USD <= {_effective_account:.2f} to proceed.\n"
                 f"{'='*60}\n"
             )
+            logging.critical("%s", _abort)
+            raise SystemExit(1)
         if _effective_account > 0.0:
             logging.info(
                 "💰 Account balance check: session=%.2f USD  account=%.2f USD  margin=%.2f USD",
