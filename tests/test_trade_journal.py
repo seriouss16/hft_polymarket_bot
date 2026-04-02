@@ -143,6 +143,22 @@ def test_journal_entry_composer_close_includes_row_kind():
     assert row["pnl"] == -1.5
 
 
+def test_trade_journal_queue_overflow_counts_drops(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Bounded deque evicts oldest; _queue_dropped_count increments (no IndexError)."""
+    import utils.trade_journal as tj
+
+    monkeypatch.setattr(tj, "_JOURNAL_QUEUE_MAX_SIZE", 2)
+    j = TradeJournal(path=str(tmp_path / "overflow.csv"))
+    dec = {"side": "UP", "reason": "TP", "strategy_name": "x", "entry_profile": "", "performance_key": ""}
+    j.queue_close(decision=dec, live_pnl=0.0, rsi_state=None)
+    j.queue_close(decision=dec, live_pnl=0.1, rsi_state=None)
+    assert j.dropped_count == 0
+    assert j.queue_size == 2
+    j.queue_close(decision=dec, live_pnl=0.2, rsi_state=None)
+    assert j.dropped_count == 1
+    assert j.queue_size == 2
+
+
 def test_stats_journal_aggregates_skip_open_rows(tmp_path: Path):
     p = tmp_path / "mix.csv"
     # One open (pnl 0) and one close — stats must only count close for PnL

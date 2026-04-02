@@ -284,6 +284,23 @@ class TradeJournal:
         """Synchronous write (legacy compatibility)."""
         self._write_row(row)
 
+    def _enqueue_journal_row(self, row: dict[str, Any]) -> None:
+        """Append ``row`` to ``_write_queue``, counting implicit maxlen evictions.
+
+        :class:`collections.deque` with ``maxlen`` drops the leftmost item on append
+        when full without raising; we detect ``len >= maxlen`` before append and
+        increment :attr:`_queue_dropped_count` for that eviction.
+        """
+        q = self._write_queue
+        maxlen = q.maxlen
+        if maxlen is not None and len(q) >= maxlen:
+            self._queue_dropped_count += 1
+            logging.debug(
+                "Trade journal write queue full (%d pending); evicting oldest row",
+                maxlen,
+            )
+        q.append(row)
+
     def start_async_writer(self) -> None:
         """Start the background async writer task.
 
@@ -297,18 +314,24 @@ class TradeJournal:
         self._async_writer_task = asyncio.create_task(self._async_writer_loop())
 
     async def stop_async_writer(self) -> int:
-        """Signal shutdown and flush remaining queue entries.
+        """Stop the background writer and drain the queue on shutdown.
 
-        Returns the number of entries flushed to disk.
+        Sets :attr:`_shutdown_event` so :meth:`_async_writer_loop` exits, then waits up
+        to 5 seconds for :attr:`_async_writer_task` to finish. On
+        :exc:`asyncio.TimeoutError` or :exc:`asyncio.CancelledError`, pending rows are
+        written synchronously via :meth:`_flush_queue`. If there was no writer task,
+        :meth:`_flush_queue` runs unconditionally.
+
+        **Return value:** :attr:`_queue_dropped_count` — the cumulative number of journal
+        rows dropped because the bounded queue was full (not the number of rows flushed
+        to disk). Callers use this for logging (e.g. ``Journal: N entries dropped…``).
         """
         if self._shutdown_event is None:
             return 0
         self._shutdown_event.set()
-        flushed = 0
         if self._async_writer_task is not None:
             try:
                 await asyncio.wait_for(self._async_writer_task, timeout=5.0)
-                flushed = self._queue_dropped_count  # Report dropped count for logging
             except asyncio.TimeoutError:
                 logging.warning("Async journal writer timed out — flushing remaining entries synchronously")
                 self._flush_queue()
@@ -316,7 +339,7 @@ class TradeJournal:
                 self._flush_queue()
         else:
             self._flush_queue()
-        return flushed
+        return self._queue_dropped_count
 
     def _flush_queue(self) -> None:
         """Drain and write all pending queue entries synchronously."""
@@ -356,17 +379,12 @@ class TradeJournal:
     ) -> bool:
         """Queue a close entry for async writing (non-blocking).
 
-        Returns True if the entry was queued, False if the queue was full
-        and the entry was dropped.
+        When the queue is at capacity, the oldest pending row is evicted and
+        :attr:`dropped_count` is incremented; the new row is still enqueued.
         """
         row = JournalEntryComposer.close_row(decision, live_pnl, rsi_state)
-        try:
-            self._write_queue.append(row)
-            return True
-        except IndexError:
-            # deque with maxlen should not raise, but guard anyway
-            self._queue_dropped_count += 1
-            return False
+        self._enqueue_journal_row(row)
+        return True
 
     def queue_open(
         self,
@@ -380,7 +398,8 @@ class TradeJournal:
     ) -> bool:
         """Queue an open entry for async writing (non-blocking).
 
-        Returns True if the entry was queued, False if the queue was full.
+        When the queue is at capacity, the oldest pending row is evicted and
+        :attr:`dropped_count` is incremented; the new row is still enqueued.
         """
         row = JournalEntryComposer.open_row(
             decision,
@@ -390,12 +409,8 @@ class TradeJournal:
             rsi_state,
             book_snapshot,
         )
-        try:
-            self._write_queue.append(row)
-            return True
-        except IndexError:
-            self._queue_dropped_count += 1
-            return False
+        self._enqueue_journal_row(row)
+        return True
 
     def record_close(
         self,

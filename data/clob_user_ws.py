@@ -17,6 +17,7 @@ import collections
 import json
 import logging
 import os
+import random
 import threading
 import time
 from collections import defaultdict
@@ -163,8 +164,30 @@ class ClobUserOrderCache:
             "true",
             "yes",
         )
-        self._max_stale_sec = float(os.getenv("CLOB_USER_WS_MAX_STALE_SEC", "12"))
-        self._reconnect_sec = float(os.getenv("CLOB_USER_WS_RECONNECT_SEC", "2"))
+        # Staleness thresholds
+        self._max_stale_sec = float(os.getenv("CLOB_USER_WS_MAX_STALE_SEC", "25"))
+        self._stale_warn_sec = float(os.getenv("CLOB_WS_STALE_WARN_SEC", "15"))
+        self._stale_skip_sec = float(os.getenv("CLOB_WS_STALE_SKIP_SEC", "25"))
+        
+        # Reconnection backoff parameters
+        self._reconnect_base_sec = float(os.getenv("CLOB_WS_RECONNECT_BASE_SEC", "1"))
+        self._reconnect_max_sec = float(os.getenv("CLOB_WS_RECONNECT_MAX_SEC", "30"))
+        self._reconnect_jitter_ms = float(os.getenv("CLOB_WS_RECONNECT_JITTER_MS", "500"))
+        self._reconnect_attempt = 0
+        self._reconnect_start_time: float | None = None
+        self._reconnecting = False
+        self._backup_connected = False
+        self._backup_ws: Any = None
+        
+        # Health monitoring
+        self._health_log_interval = float(os.getenv("CLOB_WS_HEALTH_LOG_INTERVAL_SEC", "60"))
+        self._last_health_log = time.time()
+        self._connection_start_time: float | None = None
+        self._total_reconnects = 0
+        self._message_count = 0
+        self._message_rate_window: list[float] = []  # timestamps for rolling rate
+        self._max_rate_samples = 1000
+        
         self._ping_interval = float(os.getenv("CLOB_USER_WS_PING_SEC", "10"))
         self._lock = threading.RLock()
         self._orders: dict[str, dict[str, Any]] = {}
@@ -249,7 +272,10 @@ class ClobUserOrderCache:
                         row = v
                         break
             if row is not None:
-                if time.time() - float(row.get("ts", 0.0)) <= self._max_stale_sec:
+                age = time.time() - float(row.get("ts", 0.0))
+                # During reconnection, extend threshold by 2x to avoid skip gates
+                effective_threshold = self._max_stale_sec * (2.0 if self._reconnecting else 1.0)
+                if age <= effective_threshold:
                     # Fresh cache available, return it
                     return str(row.get("status", "unknown")), float(row.get("filled", 0.0))
             
@@ -313,18 +339,19 @@ class ClobUserOrderCache:
     def _touch(self, oid: str, status: str, filled: float, original_size: float = 0.0,
                 ws_latency_ms: float = 0.0) -> None:
         """Merge order state (best-effort) and invoke callback if registered."""
+        now = time.time()
         with self._lock:
             self._orders[oid] = {
                 "status": status,
                 "filled": filled,
-                "ts": time.time(),
+                "ts": now,
             }
             
             # Update state machine
             state_info = self._init_order_state(oid, original_size)
             state_info.filled_size = filled
-            state_info.last_updated = time.time()
-            state_info.last_ws_event_ts = time.time()
+            state_info.last_updated = now
+            state_info.last_ws_event_ts = now
             state_info.ws_events_received += 1
             
             # Track latency
@@ -334,6 +361,12 @@ class ClobUserOrderCache:
                     self._ws_latency_samples.pop(0)
             
             self._ws_events_total += 1
+            
+            # Track message rate
+            self._message_rate_window.append(now)
+            if len(self._message_rate_window) > self._max_rate_samples:
+                self._message_rate_window.pop(0)
+            self._message_count += 1
             
             # Determine state from status
             status_lower = status.lower()
@@ -521,52 +554,111 @@ class ClobUserOrderCache:
         if not self.enabled:
             logging.info("CLOB user WS disabled (CLOB_USER_WS_ENABLED=0).")
             return
-        while not self._stop.is_set():
-            creds = self._creds_getter()
-            if _auth_dict(creds) is None:
-                await asyncio.sleep(1.0)
-                continue
-            try:
-                async with websockets.connect(
-                    CLOB_USER_WS_URL,
-                    open_timeout=_CLOB_USER_WS_OPEN_TIMEOUT,
-                    ping_interval=None,
-                    ping_timeout=15,
-                    close_timeout=5,
-                    max_size=10 * 1024 * 1024,
-                ) as ws:
-                    self._ws = ws
-                    await self._send_subscribe(ws)
-                    self.stop_reconnect_buffering()
-                    ping_task = asyncio.create_task(self._ping_loop(ws))
-                    try:
-                        async for message in ws:
-                            if self._stop.is_set():
-                                break
-                            if isinstance(message, bytes):
-                                message = message.decode("utf-8", errors="replace")
-                            self.handle_ws_message_with_sequence(message)
-                    finally:
-                        ping_task.cancel()
-                        try:
-                            await ping_task
-                        except asyncio.CancelledError:
-                            pass
-                        self._ws = None
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logging.warning(
-                    "CLOB user WS error: %s — reconnect in %.1fs",
-                    exc,
-                    self._reconnect_sec,
-                )
-                # Buffer until subscribe completes on the next connection (see stop after _send_subscribe).
-                self.start_reconnect_buffering()
-                await asyncio.sleep(self._reconnect_sec)
         
-        # Log final metrics
-        self._log_metrics("shutdown")
+        primary_url = CLOB_USER_WS_URL
+        # Note: backup URL not typically used for user WS (auth required), but support it if configured
+        backup_url = os.getenv("CLOB_USER_WS_BACKUP_URL", "")
+        
+        try:
+            while not self._stop.is_set():
+                creds = self._creds_getter()
+                if _auth_dict(creds) is None:
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                # Determine which URL to use
+                url = primary_url if not self._backup_connected else (backup_url or primary_url)
+                
+                try:
+                    async with websockets.connect(
+                        url,
+                        open_timeout=_CLOB_USER_WS_OPEN_TIMEOUT,
+                        ping_interval=None,
+                        ping_timeout=15,
+                        close_timeout=5,
+                        max_size=10 * 1024 * 1024,
+                    ) as ws:
+                        self._ws = ws
+                        self._connection_start_time = time.time()
+                        self._reconnect_attempt = 0
+                        self._reconnecting = False
+                        self._reconnect_start_time = None
+                        
+                        # Log connection success
+                        if self._backup_connected and backup_url:
+                            logging.info("CLOB user WS reverted to primary endpoint")
+                            self._backup_connected = False
+                        else:
+                            logging.info("CLOB user WS connected: %s", url)
+                        
+                        await self._send_subscribe(ws)
+                        self.stop_reconnect_buffering()
+                        ping_task = asyncio.create_task(self._ping_loop(ws))
+                        try:
+                            async for message in ws:
+                                if self._stop.is_set():
+                                    break
+                                if isinstance(message, bytes):
+                                    message = message.decode("utf-8", errors="replace")
+                                self.handle_ws_message_with_sequence(message)
+                                # Periodic health logging
+                                self._log_health_metrics()
+                        finally:
+                            ping_task.cancel()
+                            try:
+                                await ping_task
+                            except asyncio.CancelledError:
+                                pass
+                            self._ws = None
+                            self._connection_start_time = None
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Calculate exponential backoff with jitter
+                    self._reconnect_attempt += 1
+                    if self._reconnect_start_time is None:
+                        self._reconnect_start_time = time.time()
+                    
+                    base = self._reconnect_base_sec
+                    max_delay = self._reconnect_max_sec
+                    jitter_ms = self._reconnect_jitter_ms
+                    
+                    # Exponential backoff: base * 2^attempt, capped at max
+                    delay = min(base * (2 ** (self._reconnect_attempt - 1)), max_delay)
+                    # Add jitter: random 0-jitter_ms
+                    jitter = (random.random() if jitter_ms > 0 else 0.0) * (jitter_ms / 1000.0)
+                    delay += jitter
+                    
+                    self._reconnecting = True
+                    
+                    # Check if we should try backup connection
+                    if backup_url and not self._backup_connected and self._reconnect_attempt >= 3:
+                        logging.warning(
+                            "CLOB user WS primary connection failed after %d attempts — switching to backup endpoint",
+                            self._reconnect_attempt,
+                        )
+                        self._backup_connected = True
+                        # Reset attempt count for backup connection
+                        self._reconnect_attempt = 0
+                        self._reconnect_start_time = time.time()
+                        await asyncio.sleep(0.1)  # Quick retry with backup
+                    else:
+                        logging.warning(
+                            "CLOB user WS error: %s — reconnect in %.2fs (attempt=%d)",
+                            exc,
+                            delay,
+                            self._reconnect_attempt,
+                        )
+                        # Buffer until subscribe completes on the next connection
+                        self.start_reconnect_buffering()
+                        await asyncio.sleep(delay)
+                    
+                    self._total_reconnects += 1
+        except asyncio.CancelledError:
+            raise
+        finally:
+            # Log final metrics
+            self._log_metrics("shutdown")
 
     def stop(self) -> None:
         self._stop.set()
@@ -635,6 +727,20 @@ class ClobUserOrderCache:
             min_latency = min(ws_latency) if ws_latency else 0.0
             max_latency = max(ws_latency) if ws_latency else 0.0
             
+            # Calculate rolling message rate
+            if len(self._message_rate_window) > 1:
+                time_span = self._message_rate_window[-1] - self._message_rate_window[0]
+                msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
+            else:
+                msg_rate = 0.0
+            
+            # Last message age
+            if self._orders:
+                latest_ts = max(float(row.get("ts", 0.0)) for row in self._orders.values())
+                last_msg_age = time.time() - latest_ts
+            else:
+                last_msg_age = 0.0
+            
             return {
                 "ws_events_total": self._ws_events_total,
                 "http_fallbacks_total": self._http_fallbacks_total,
@@ -652,7 +758,57 @@ class ClobUserOrderCache:
                 "sequence_gaps_detected": self._sequence_gaps_detected,
                 "pending_orders": len(self._pending_orders),
                 "reconnect_buffer_size": len(self._reconnect_buffer),
+                # Health metrics
+                "uptime_sec": round((time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2),
+                "reconnect_count": self._total_reconnects,
+                "messages_per_sec": round(msg_rate, 2),
+                "last_message_age_sec": round(last_msg_age, 2),
+                "is_reconnecting": self._reconnecting,
             }
+    
+    def get_health_metrics(self) -> dict[str, Any]:
+        """Return connection health metrics (subset of get_metrics)."""
+        with self._lock:
+            # Calculate rolling message rate
+            if len(self._message_rate_window) > 1:
+                time_span = self._message_rate_window[-1] - self._message_rate_window[0]
+                msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
+            else:
+                msg_rate = 0.0
+            
+            # Last message age
+            if self._orders:
+                latest_ts = max(float(row.get("ts", 0.0)) for row in self._orders.values())
+                last_msg_age = time.time() - latest_ts
+            else:
+                last_msg_age = 0.0
+            
+            return {
+                "uptime_sec": round((time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2),
+                "reconnect_count": self._total_reconnects,
+                "messages_per_sec": round(msg_rate, 2),
+                "last_message_age_sec": round(last_msg_age, 2),
+                "is_reconnecting": self._reconnecting,
+                "backup_active": self._backup_connected,
+            }
+    
+    def _log_health_metrics(self) -> None:
+        """Log health metrics periodically."""
+        now = time.time()
+        if now - self._last_health_log < self._health_log_interval:
+            return
+        
+        metrics = self.get_health_metrics()
+        logging.info(
+            "[WS_HEALTH] uptime=%.1fs reconnects=%d msg_rate=%.2f/s last_msg_age=%.2fs reconnecting=%s backup=%s",
+            metrics["uptime_sec"],
+            metrics["reconnect_count"],
+            metrics["messages_per_sec"],
+            metrics["last_message_age_sec"],
+            metrics["is_reconnecting"],
+            metrics["backup_active"],
+        )
+        self._last_health_log = now
 
     def _log_metrics(self, reason: str = "periodic") -> None:
         """Log WebSocket metrics."""

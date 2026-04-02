@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import threading
 import time
 from typing import Any
@@ -32,6 +33,7 @@ CLOB_MARKET_WS_URL = os.getenv(
     "CLOB_MARKET_WS_URL",
     "wss://ws-subscriptions-clob.polymarket.com/ws/market",
 )
+CLOB_MARKET_WS_BACKUP_URL = os.getenv("CLOB_MARKET_WS_BACKUP_URL", "")
 # Max seconds to wait for TCP + WebSocket handshake (avoids hanging forever on bad routes).
 _CLOB_MARKET_WS_OPEN_TIMEOUT = float(os.getenv("CLOB_MARKET_WS_OPEN_TIMEOUT_SEC", "30"))
 
@@ -77,8 +79,30 @@ class ClobMarketBookCache:
             "true",
             "yes",
         )
-        self._max_stale_sec = float(os.getenv("CLOB_BOOK_WS_MAX_STALE_SEC", "12"))
-        self._reconnect_sec = float(os.getenv("CLOB_MARKET_WS_RECONNECT_SEC", "2"))
+        # Staleness thresholds
+        self._max_stale_sec = float(os.getenv("CLOB_MARKET_WS_MAX_STALE_SEC", "25"))
+        self._stale_warn_sec = float(os.getenv("CLOB_WS_STALE_WARN_SEC", "15"))
+        self._stale_skip_sec = float(os.getenv("CLOB_WS_STALE_SKIP_SEC", "25"))
+        
+        # Reconnection backoff parameters
+        self._reconnect_base_sec = float(os.getenv("CLOB_WS_RECONNECT_BASE_SEC", "1"))
+        self._reconnect_max_sec = float(os.getenv("CLOB_WS_RECONNECT_MAX_SEC", "30"))
+        self._reconnect_jitter_ms = float(os.getenv("CLOB_WS_RECONNECT_JITTER_MS", "500"))
+        self._reconnect_attempt = 0
+        self._reconnect_start_time: float | None = None
+        self._reconnecting = False
+        self._backup_connected = False
+        self._backup_ws: Any = None
+        
+        # Health monitoring
+        self._health_log_interval = float(os.getenv("CLOB_WS_HEALTH_LOG_INTERVAL_SEC", "60"))
+        self._last_health_log = time.time()
+        self._connection_start_time: float | None = None
+        self._total_reconnects = 0
+        self._message_count = 0
+        self._message_rate_window: list[float] = []  # timestamps for rolling rate
+        self._max_rate_samples = 1000
+        
         self._ping_interval = float(os.getenv("CLOB_MARKET_WS_PING_SEC", "10"))
         self._custom_features = os.getenv("CLOB_MARKET_WS_CUSTOM_FEATURES", "1").strip().lower() in (
             "1",
@@ -164,11 +188,62 @@ class ClobMarketBookCache:
             self._touch(token_id)
 
     def is_fresh(self, token_id: str) -> bool:
+        """Check if token data is fresh, accounting for reconnection grace period."""
         with self._lock:
             ts = self._last_ts.get(token_id)
         if ts is None:
             return False
-        return (time.time() - ts) <= self._max_stale_sec
+        age = time.time() - ts
+        # During reconnection, extend threshold by 2x to avoid skip gates
+        effective_threshold = self._max_stale_sec * (2.0 if self._reconnecting else 1.0)
+        return age <= effective_threshold
+    
+    def get_health_metrics(self) -> dict[str, Any]:
+        """Return connection health metrics."""
+        now = time.time()
+        uptime = (now - self._connection_start_time) if self._connection_start_time else 0.0
+        
+        # Calculate rolling message rate (messages/sec over recent window)
+        if len(self._message_rate_window) > 1:
+            time_span = self._message_rate_window[-1] - self._message_rate_window[0]
+            msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
+        else:
+            msg_rate = 0.0
+        
+        # Last message age
+        with self._lock:
+            if self._last_ts:
+                latest_ts = max(self._last_ts.values())
+                last_msg_age = now - latest_ts
+            else:
+                last_msg_age = 0.0
+        
+        return {
+            "uptime_sec": round(uptime, 2),
+            "reconnect_count": self._total_reconnects,
+            "messages_per_sec": round(msg_rate, 2),
+            "last_message_age_sec": round(last_msg_age, 2),
+            "is_reconnecting": self._reconnecting,
+            "backup_active": self._backup_connected,
+        }
+    
+    def _log_health_metrics(self) -> None:
+        """Log health metrics periodically."""
+        now = time.time()
+        if now - self._last_health_log < self._health_log_interval:
+            return
+        
+        metrics = self.get_health_metrics()
+        logging.info(
+            "[WS_HEALTH] uptime=%.1fs reconnects=%d msg_rate=%.2f/s last_msg_age=%.2fs reconnecting=%s backup=%s",
+            metrics["uptime_sec"],
+            metrics["reconnect_count"],
+            metrics["messages_per_sec"],
+            metrics["last_message_age_sec"],
+            metrics["is_reconnecting"],
+            metrics["backup_active"],
+        )
+        self._last_health_log = now
 
     def has_valid_pair(self, up_id: str, down_id: str | None) -> bool:
         if not up_id:
@@ -180,7 +255,14 @@ class ClobMarketBookCache:
         return True
 
     def _touch(self, asset_id: str) -> None:
-        self._last_ts[asset_id] = time.time()
+        now = time.time()
+        self._last_ts[asset_id] = now
+        # Track message rate
+        self._message_rate_window.append(now)
+        # Keep window bounded
+        if len(self._message_rate_window) > self._max_rate_samples:
+            self._message_rate_window.pop(0)
+        self._message_count += 1
 
     def _apply_book(self, msg: dict[str, Any]) -> None:
         """Replace L2 for ``asset_id`` from a ``book`` event (full snapshot)."""
@@ -324,21 +406,41 @@ class ClobMarketBookCache:
         if not self.enabled:
             logging.info("CLOB market WS disabled (CLOB_MARKET_WS_ENABLED=0).")
             return
+        
+        primary_url = CLOB_MARKET_WS_URL
+        backup_url = CLOB_MARKET_WS_BACKUP_URL if CLOB_MARKET_WS_BACKUP_URL else None
+        
         try:
             while not self._stop.is_set():
                 ids = list(self._asset_ids)
                 if not ids:
                     await asyncio.sleep(0.25)
                     continue
+                
+                # Determine which URL to use
+                url = primary_url if not self._backup_connected else (backup_url or primary_url)
+                
                 try:
                     async with websockets.connect(
-                        CLOB_MARKET_WS_URL,
+                        url,
                         open_timeout=_CLOB_MARKET_WS_OPEN_TIMEOUT,
                         ping_interval=None,
                         close_timeout=5,
                         max_size=10 * 1024 * 1024,
                     ) as ws:
                         self._ws = ws
+                        self._connection_start_time = time.time()
+                        self._reconnect_attempt = 0
+                        self._reconnecting = False
+                        self._reconnect_start_time = None
+                        
+                        # Log connection success
+                        if self._backup_connected and backup_url:
+                            logging.info("CLOB market WS reverted to primary endpoint")
+                            self._backup_connected = False
+                        else:
+                            logging.info("CLOB market WS connected: %s", url)
+                        
                         await self._send_subscribe(ws, ids)
                         ping_task = asyncio.create_task(self._ping_loop(ws))
                         try:
@@ -348,6 +450,8 @@ class ClobMarketBookCache:
                                 if isinstance(message, bytes):
                                     message = message.decode("utf-8", errors="replace")
                                 self._handle_raw(message)
+                                # Periodic health logging
+                                self._log_health_metrics()
                         finally:
                             ping_task.cancel()
                             try:
@@ -355,15 +459,48 @@ class ClobMarketBookCache:
                             except asyncio.CancelledError:
                                 pass
                             self._ws = None
+                            self._connection_start_time = None
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logging.warning(
-                        "CLOB market WS connection error: %s — reconnect in %.1fs",
-                        exc,
-                        self._reconnect_sec,
-                    )
-                    await asyncio.sleep(self._reconnect_sec)
+                    # Calculate exponential backoff with jitter
+                    self._reconnect_attempt += 1
+                    if self._reconnect_start_time is None:
+                        self._reconnect_start_time = time.time()
+                    
+                    base = self._reconnect_base_sec
+                    max_delay = self._reconnect_max_sec
+                    jitter_ms = self._reconnect_jitter_ms
+                    
+                    # Exponential backoff: base * 2^attempt, capped at max
+                    delay = min(base * (2 ** (self._reconnect_attempt - 1)), max_delay)
+                    # Add jitter: random 0-jitter_ms
+                    jitter = (random.random() if jitter_ms > 0 else 0.0) * (jitter_ms / 1000.0)
+                    delay += jitter
+                    
+                    self._reconnecting = True
+                    
+                    # Check if we should try backup connection
+                    if backup_url and not self._backup_connected and self._reconnect_attempt >= 3:
+                        logging.warning(
+                            "CLOB market WS primary connection failed after %d attempts — switching to backup endpoint",
+                            self._reconnect_attempt,
+                        )
+                        self._backup_connected = True
+                        # Reset attempt count for backup connection
+                        self._reconnect_attempt = 0
+                        self._reconnect_start_time = time.time()
+                        await asyncio.sleep(0.1)  # Quick retry with backup
+                    else:
+                        logging.warning(
+                            "CLOB market WS connection error: %s — reconnect in %.2fs (attempt=%d)",
+                            exc,
+                            delay,
+                            self._reconnect_attempt,
+                        )
+                        await asyncio.sleep(delay)
+                    
+                    self._total_reconnects += 1
         except asyncio.CancelledError:
             raise
 
