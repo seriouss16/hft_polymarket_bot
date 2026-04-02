@@ -1,11 +1,18 @@
-"""CSV trade journal for V5 meta-optimization and live session audit."""
+"""CSV trade journal for V5 meta-optimization and live session audit.
+
+Supports both synchronous writes (legacy) and async queue-based writes
+for non-blocking main loop operation.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import csv
+import logging
 import os
 import tempfile
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -238,8 +245,18 @@ class JournalEntryComposer:
         }
 
 
+# Maximum number of pending journal entries in the async queue.
+# Oldest entries are dropped when full to prevent memory growth.
+_JOURNAL_QUEUE_MAX_SIZE = 100
+
+
 class TradeJournal:
-    """Append trade journal rows to CSV with a stable schema."""
+    """Append trade journal rows to CSV with a stable schema.
+
+    Supports async queue-based writes for non-blocking main loop operation.
+    Use ``start_async_writer()`` to enable background task, and
+    ``stop_async_writer()`` to flush remaining entries on shutdown.
+    """
 
     def __init__(self, path: str = "reports/trade_journal.csv") -> None:
         self.path = Path(path)
@@ -251,10 +268,134 @@ class TradeJournal:
                 writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDNAMES)
                 writer.writeheader()
 
+        # Async write queue (non-blocking main loop)
+        self._write_queue: deque[dict[str, Any]] = deque(maxlen=_JOURNAL_QUEUE_MAX_SIZE)
+        self._async_writer_task: asyncio.Task | None = None
+        self._shutdown_event: asyncio.Event | None = None
+        self._queue_dropped_count: int = 0
+
     def _write_row(self, row: Mapping[str, Any]) -> None:
+        """Synchronously write a single row to the journal CSV."""
         with self.path.open("a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=JOURNAL_FIELDNAMES, extrasaction="ignore")
             writer.writerow({k: _str_cell(row.get(k)) for k in JOURNAL_FIELDNAMES})
+
+    def _write_row_sync(self, row: Mapping[str, Any]) -> None:
+        """Synchronous write (legacy compatibility)."""
+        self._write_row(row)
+
+    def start_async_writer(self) -> None:
+        """Start the background async writer task.
+
+        Must be called from within an async context with a running event loop.
+        After calling this, use ``queue_close()`` and ``queue_open()`` instead
+        of ``record_close()`` and ``record_open()`` for non-blocking writes.
+        """
+        if self._async_writer_task is not None and not self._async_writer_task.done():
+            return  # Already running
+        self._shutdown_event = asyncio.Event()
+        self._async_writer_task = asyncio.create_task(self._async_writer_loop())
+
+    async def stop_async_writer(self) -> int:
+        """Signal shutdown and flush remaining queue entries.
+
+        Returns the number of entries flushed to disk.
+        """
+        if self._shutdown_event is None:
+            return 0
+        self._shutdown_event.set()
+        flushed = 0
+        if self._async_writer_task is not None:
+            try:
+                await asyncio.wait_for(self._async_writer_task, timeout=5.0)
+                flushed = self._queue_dropped_count  # Report dropped count for logging
+            except asyncio.TimeoutError:
+                logging.warning("Async journal writer timed out — flushing remaining entries synchronously")
+                self._flush_queue()
+            except asyncio.CancelledError:
+                self._flush_queue()
+        else:
+            self._flush_queue()
+        return flushed
+
+    def _flush_queue(self) -> None:
+        """Drain and write all pending queue entries synchronously."""
+        while self._write_queue:
+            try:
+                row = self._write_queue.popleft()
+                self._write_row(row)
+            except Exception as exc:
+                logging.error("Failed to flush journal entry: %s", exc)
+
+    async def _async_writer_loop(self) -> None:
+        """Background task that drains the write queue and writes to CSV."""
+        if self._shutdown_event is None:
+            return
+        while not self._shutdown_event.is_set():
+            if self._write_queue:
+                try:
+                    row = self._write_queue.popleft()
+                    await asyncio.to_thread(self._write_row, row)
+                except Exception as exc:
+                    logging.error("Async journal write failed: %s", exc)
+            else:
+                # No entries to write — sleep briefly to avoid busy-waiting
+                try:
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    pass  # Normal: no shutdown signal yet
+        # Final flush after shutdown signal
+        self._flush_queue()
+
+    def queue_close(
+        self,
+        *,
+        decision: dict[str, Any],
+        live_pnl: float,
+        rsi_state: Mapping[str, Any] | None,
+    ) -> bool:
+        """Queue a close entry for async writing (non-blocking).
+
+        Returns True if the entry was queued, False if the queue was full
+        and the entry was dropped.
+        """
+        row = JournalEntryComposer.close_row(decision, live_pnl, rsi_state)
+        try:
+            self._write_queue.append(row)
+            return True
+        except IndexError:
+            # deque with maxlen should not raise, but guard anyway
+            self._queue_dropped_count += 1
+            return False
+
+    def queue_open(
+        self,
+        *,
+        decision: dict[str, Any],
+        filled_shares: float,
+        avg_price: float,
+        amount_usd: float,
+        rsi_state: Mapping[str, Any] | None = None,
+        book_snapshot: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Queue an open entry for async writing (non-blocking).
+
+        Returns True if the entry was queued, False if the queue was full.
+        """
+        row = JournalEntryComposer.open_row(
+            decision,
+            filled_shares,
+            avg_price,
+            amount_usd,
+            rsi_state,
+            book_snapshot,
+        )
+        try:
+            self._write_queue.append(row)
+            return True
+        except IndexError:
+            self._queue_dropped_count += 1
+            return False
 
     def record_close(
         self,
@@ -263,7 +404,7 @@ class TradeJournal:
         live_pnl: float,
         rsi_state: Mapping[str, Any] | None,
     ) -> None:
-        """Record a closed trade (paper or live)."""
+        """Record a closed trade (paper or live). Synchronous write."""
         self._write_row(JournalEntryComposer.close_row(decision, live_pnl, rsi_state))
 
     def record_open(
@@ -276,7 +417,7 @@ class TradeJournal:
         rsi_state: Mapping[str, Any] | None = None,
         book_snapshot: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record a confirmed live BUY fill."""
+        """Record a confirmed live BUY fill. Synchronous write."""
         self._write_row(
             JournalEntryComposer.open_row(
                 decision,
@@ -287,3 +428,13 @@ class TradeJournal:
                 book_snapshot,
             )
         )
+
+    @property
+    def queue_size(self) -> int:
+        """Number of entries pending in the async write queue."""
+        return len(self._write_queue)
+
+    @property
+    def dropped_count(self) -> int:
+        """Number of entries dropped due to queue overflow."""
+        return self._queue_dropped_count

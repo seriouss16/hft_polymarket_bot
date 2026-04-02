@@ -31,6 +31,200 @@ from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
 
+class _BackgroundTaskManager:
+    """Manages non-critical async tasks that run independently of the main loop.
+
+    Tasks include: stats logging, balance checks, pulse logging, trade journal writes.
+    Uses asyncio.create_task() for each non-critical operation to reduce main loop latency.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        self._shutdown_event = asyncio.Event()
+
+    def create_task(self, coro, name: str | None = None) -> asyncio.Task:
+        """Create and track a background task."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def shutdown(self, timeout: float = 5.0) -> None:
+        """Signal shutdown and wait for tasks to complete."""
+        self._shutdown_event.set()
+        if self._tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logging.warning("Background task manager: timeout waiting for tasks to finish")
+            for task in self._tasks:
+                if not task.done():
+                    task.cancel()
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_event.is_set()
+
+
+async def _stats_logging_task(
+    stats: StatsCollector,
+    balance_cache: BalanceCache | None,
+    live_exec: LiveExecutionEngine,
+    interval: float,
+    shutdown_event: asyncio.Event,
+    live_mode: bool = False,
+) -> None:
+    """Periodic background task for stats collection and logging."""
+    while not shutdown_event.is_set():
+        try:
+            if live_mode and balance_cache is not None:
+                try:
+                    _st_usdc = balance_cache.get_cached_usdc_balance()
+                    stats.set_live_wallet_usdc(_st_usdc)
+                    stats.update_balance_metrics_from_cache(balance_cache)
+                    balance_cache.log_metrics("stats_interval")
+                except Exception as _st_exc:
+                    logging.debug("balance_cache.get_cached_usdc_balance for stats: %s", _st_exc)
+                    stats.set_live_wallet_usdc(None)
+            else:
+                stats.set_live_wallet_usdc(None)
+            stats.update_ws_metrics_from_engine(live_exec)
+            live_exec._log_ws_metrics("stats_interval")
+            stats.show_report()
+            logging.info(
+                "Intermediate stats (STATS_INTERVAL_SEC=%s).",
+                interval,
+            )
+        except Exception as exc:
+            logging.debug("Stats logging task error: %s", exc)
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass  # Normal: interval elapsed
+
+
+async def _pulse_logging_task(
+    aggregator: FastPriceAggregator,
+    poly_book_ref: list,
+    pnl: PnLTracker,
+    strategy_hub: StrategyHub,
+    regime_detector: MarketRegimeDetector,
+    risk: RiskEngine,
+    interval: float,
+    shutdown_event: asyncio.Event,
+    use_smart_fast: bool = False,
+) -> None:
+    """Periodic background task for pulse logging."""
+    while not shutdown_event.is_set():
+        try:
+            poly_book = poly_book_ref[0] if poly_book_ref else None
+            if poly_book is None:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+                continue
+
+            poly_btc = float(
+                poly_book.book.get("btc_oracle")
+                or poly_book.book.get("mid")
+                or 0.0
+            )
+            fast_price = aggregator.get_weighted_price() if use_smart_fast else aggregator.get_coinbase_price() or aggregator.get_weighted_price()
+            if fast_price is None or poly_btc <= 0:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+                continue
+
+            diff = fast_price - poly_btc
+            trend = strategy_hub.get_trend_state()
+            _pulse_adx = trend.get("adx")
+            _pulse_adx_s = f"{_pulse_adx:.1f}" if _pulse_adx is not None else "n/a"
+            _pm = trend.get("micro_slope")
+            _pm_s = f"{_pm:+.2f}/s" if _pm is not None else "n/a"
+            _tt = trend.get("toward_target")
+            _tt_s = "Y" if _tt is True else ("N" if _tt is False else "n/a")
+            _eta = trend.get("cross_eta_sec")
+            _eta_s = f"{_eta:.1f}s" if _eta is not None else "n/a"
+            _stale_s = "1" if trend.get("trend_stale") else "0"
+            profile_suffix = ""
+            if os.getenv("HFT_LOG_MARKET_PROFILE") == "1":
+                _gp = getattr(strategy_hub.get_active_strategy(), "get_active_profile", None)
+                if callable(_gp):
+                    profile_suffix = f" | Profile: {_gp()}"
+            bid_size = float(poly_book.book.get("bid_size_top", 1.0))
+            ask_size = float(poly_book.book.get("ask_size_top", 1.0))
+            db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
+            da_sz = float(poly_book.book.get("down_ask_size_top", 0.0))
+            if pnl.inventory > 1e-9 and pnl.position_side == "DOWN" and db_sz + da_sz > 0.0:
+                imbalance = db_sz / (db_sz + da_sz + 1e-9)
+            elif pnl.inventory > 1e-9 and pnl.position_side == "UP":
+                imbalance = bid_size / (bid_size + ask_size + 1e-9)
+            elif trend["trend"] == "DOWN" and db_sz + da_sz > 0.0:
+                imbalance = db_sz / (db_sz + da_sz + 1e-9)
+            else:
+                imbalance = bid_size / (bid_size + ask_size + 1e-9)
+            upnl = pnl.get_unrealized_pnl(poly_book.book)
+            rsi_st = strategy_hub.get_rsi_v5_state()
+            _rx_on = float(rsi_st.get("reaction_on", 0.0)) >= 0.5
+            _rsi_line = (
+                f"Rx {rsi_st['rsi']:.1f} raw {rsi_st.get('rsi_raw', rsi_st['rsi']):.1f} "
+                f"[{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                f"Δ={rsi_st['slope']:+.2f} m={rsi_st.get('ma_fast', 0.0):.2f} mh={rsi_st.get('macd_hist', 0.0):+.2f}"
+                if _rx_on
+                else (
+                    f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
+                    f"Δ={rsi_st['slope']:+.2f}"
+                )
+            )
+            cb_px = aggregator.get_coinbase_price()
+            bn_px = aggregator.get_binance_price()
+            bn_bbo = aggregator.get_binance_bbo()
+            cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
+            if bn_bbo:
+                bn_s = f"{bn_bbo[0]:.4f}/{bn_bbo[1]:.4f}"
+            elif bn_px is not None:
+                bn_s = f"{bn_px:.4f}"
+            else:
+                bn_s = "n/a"
+            up_bid = float(poly_book.book.get("bid", 0.0))
+            up_ask = float(poly_book.book.get("ask", 0.0))
+            d_bid = float(poly_book.book.get("down_bid", 0.0))
+            d_ask = float(poly_book.book.get("down_ask", 0.0))
+            book_focus = (
+                f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
+            )
+            _ft = aggregator.feed_timing(float(poly_book.book.get("ts", 0.0)))
+            latency_ms = float(_ft["staleness_ms"])
+            skew_ms = float(_ft["skew_ms"])
+            slot_price_to_beat = float(poly_btc)  # Approximation for pulse log
+
+            logging.info(
+                f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={use_smart_fast}) | "
+                f"PolyRTDS: {poly_btc:.2f} | "
+                f"Diff: {diff:+.2f} | Z: {aggregator.get_zscore():+.2f} | "
+                f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} "
+                f"a={trend['age']:.1f}s adx={_pulse_adx_s} "
+                f"micro={_pm_s} tt={_tt_s} eta={_eta_s} stale={_stale_s} | "
+                f"Book: {book_focus} | "
+                f"{_rsi_line} | "
+                f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
+                f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
+                f"(cb {float(_ft['coinbase_age_ms']):.0f} "
+                f"poly {float(_ft['poly_age_ms']):.0f} "
+                f"bn {float(_ft['binance_age_ms']):.0f}) | "
+                f"DD: {risk.drawdown_pct(pnl.balance + upnl)*100:.2f}% | "
+                f"Regime: {regime_detector.get_regime()} | "
+                f"priceToBeat: {slot_price_to_beat:.2f} Δ={fast_price - slot_price_to_beat:+.2f} | "
+                f"Forecast: {fast_price:.2f}{profile_suffix}",
+            )
+        except Exception as exc:
+            logging.debug("Pulse logging task error: %s", exc)
+        try:
+            await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass  # Normal: interval elapsed
+
+
 def _max_runtime_sec_from_env() -> float:
     """Wall-clock session cap. Only values > 0 enable auto-stop (LIVE and paper). 0/empty/invalid = unlimited."""
     raw = (os.getenv("HFT_MAX_RUNTIME_SEC") or "").strip()
@@ -159,6 +353,9 @@ async def main():
         loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
     journal = TradeJournal(path=req_str("TRADE_JOURNAL_PATH"))
+    
+    # Background task manager for non-critical async operations
+    bg_tasks = _BackgroundTaskManager()
 
     # Validate session deposit against real account balance in live mode.
     _session_deposit = float(os.environ["HFT_DEPOSIT_USD"])
@@ -405,8 +602,7 @@ async def main():
     token_down_id = None
     current_slug = None
     poly_book = None
-    last_stats_time = asyncio.get_event_loop().time()
-    last_pulse_time = 0
+    # last_stats_time and last_pulse_time removed — stats/pulse logging moved to background tasks
     _regime_last_price: float = 0.0
     _regime_last_ts: float = 0.0
     # Timestamp until which live OPEN entries are suppressed after a live BUY skip.
@@ -588,6 +784,25 @@ async def main():
         if _allowance_refresh_interval > 0 and allowance_cache is not None:
             _allowance_refresh_task = asyncio.create_task(_run_allowance_refresh())
     
+    # Start async journal writer
+    journal.start_async_writer()
+    
+    # Start background stats logging task
+    _stats_task = bg_tasks.create_task(
+        _stats_logging_task(stats, balance_cache, live_exec, STATS_INTERVAL, bg_tasks._shutdown_event, LIVE_MODE),
+        name="stats_logging",
+    )
+    
+    # Start background pulse logging task (poly_book_ref holds mutable reference to current poly_book)
+    _poly_book_ref = [poly_book]
+    _pulse_task = bg_tasks.create_task(
+        _pulse_logging_task(
+            aggregator, _poly_book_ref, pnl, strategy_hub, regime_detector, risk,
+            pulse_log_period, bg_tasks._shutdown_event, USE_SMART_FAST,
+        ),
+        name="pulse_logging",
+    )
+    
     try:
         while True:
             now = asyncio.get_event_loop().time()
@@ -610,33 +825,7 @@ async def main():
                 shutdown_reason = "session_loss_limit"
                 break
 
-            # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
-            if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
-                if LIVE_MODE and balance_cache is not None:
-                    # Phase 3 WebSocket Migration: Use non-blocking cached balance read
-                    try:
-                        _st_usdc = balance_cache.get_cached_usdc_balance()
-                        stats.set_live_wallet_usdc(_st_usdc)
-                        # Update balance cache metrics for display
-                        stats.update_balance_metrics_from_cache(balance_cache)
-                        # Log balance cache metrics periodically
-                        balance_cache.log_metrics("stats_interval")
-                    except Exception as _st_exc:
-                        logging.debug("balance_cache.get_cached_usdc_balance for stats: %s", _st_exc)
-                        stats.set_live_wallet_usdc(None)
-                else:
-                    stats.set_live_wallet_usdc(None)
-                # Phase 2 WebSocket Migration: Update WS/HTTP metrics from engine (both LIVE and PAPER modes)
-                stats.update_ws_metrics_from_engine(live_exec)
-                # Log WS metrics periodically
-                live_exec._log_ws_metrics("stats_interval")
-                stats.show_report()
-                logging.info(
-                    "Intermediate stats (STATS_INTERVAL_SEC=%s, loop.now=%.3f).",
-                    STATS_INTERVAL,
-                    now,
-                )
-                last_stats_time = now
+            # Stats logging moved to background task (_stats_logging_task) — no inline work.
 
             # Check day/night session boundary and reapply profile if needed.
             _switched = maybe_switch_profile()
@@ -728,6 +917,7 @@ async def main():
                                     exc,
                                 )
                         poly_book = PolyOrderBook(symbol="bitcoin")
+                        _poly_book_ref[0] = poly_book  # Update reference for pulse logging task
                         poly_connect_task = asyncio.create_task(poly_book.connect())
 
             # 2. Data ingestion
@@ -926,98 +1116,7 @@ async def main():
                     skew_ms=skew_ms,
                     slot_price_to_beat=slot_price_to_beat,
                 )
-                if (now - last_pulse_time) >= pulse_log_period:
-                    diff = fast_price - poly_btc
-                    trend = strategy_hub.get_trend_state()
-                    _pulse_adx = trend.get("adx")
-                    _pulse_adx_s = f"{_pulse_adx:.1f}" if _pulse_adx is not None else "n/a"
-                    _pm = trend.get("micro_slope")
-                    _pm_s = f"{_pm:+.2f}/s" if _pm is not None else "n/a"
-                    _tt = trend.get("toward_target")
-                    _tt_s = (
-                        "Y"
-                        if _tt is True
-                        else ("N" if _tt is False else "n/a")
-                    )
-                    _eta = trend.get("cross_eta_sec")
-                    _eta_s = f"{_eta:.1f}s" if _eta is not None else "n/a"
-                    _stale_s = "1" if trend.get("trend_stale") else "0"
-                    profile_suffix = ""
-                    if os.getenv("HFT_LOG_MARKET_PROFILE") == "1":
-                        _gp = getattr(
-                            strategy_hub.get_active_strategy(),
-                            "get_active_profile",
-                            None,
-                        )
-                        if callable(_gp):
-                            profile_suffix = f" | Profile: {_gp()}"
-                    bid_size = float(poly_book.book.get("bid_size_top", 1.0))
-                    ask_size = float(poly_book.book.get("ask_size_top", 1.0))
-                    db_sz = float(poly_book.book.get("down_bid_size_top", 0.0))
-                    da_sz = float(poly_book.book.get("down_ask_size_top", 0.0))
-                    # Match HFTEngine.process_tick: use the **position** leg when inventory>0, not trend
-                    # (short trend flips must not switch pulse imbalance away from the held outcome).
-                    if pnl.inventory > 1e-9 and pnl.position_side == "DOWN" and db_sz + da_sz > 0.0:
-                        imbalance = db_sz / (db_sz + da_sz + 1e-9)
-                    elif pnl.inventory > 1e-9 and pnl.position_side == "UP":
-                        imbalance = bid_size / (bid_size + ask_size + 1e-9)
-                    elif trend["trend"] == "DOWN" and db_sz + da_sz > 0.0:
-                        imbalance = db_sz / (db_sz + da_sz + 1e-9)
-                    else:
-                        imbalance = bid_size / (bid_size + ask_size + 1e-9)
-                    upnl = pnl.get_unrealized_pnl(poly_book.book)
-                    rsi_st = strategy_hub.get_rsi_v5_state()
-                    _rx_on = float(rsi_st.get("reaction_on", 0.0)) >= 0.5
-                    _rsi_line = (
-                        f"Rx {rsi_st['rsi']:.1f} raw {rsi_st.get('rsi_raw', rsi_st['rsi']):.1f} "
-                        f"[{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
-                        f"Δ={rsi_st['slope']:+.2f} m={rsi_st.get('ma_fast', 0.0):.2f} mh={rsi_st.get('macd_hist', 0.0):+.2f}"
-                        if _rx_on
-                        else (
-                            f"RSI: {rsi_st['rsi']:.1f} [{rsi_st['lower']:.0f}-{rsi_st['upper']:.0f}] "
-                            f"Δ={rsi_st['slope']:+.2f}"
-                        )
-                    )
-                    cb_px = aggregator.get_coinbase_price()
-                    bn_px = aggregator.get_binance_price()
-                    bn_bbo = aggregator.get_binance_bbo()
-                    cb_s = f"{cb_px:.2f}" if cb_px else "n/a"
-                    if bn_bbo:
-                        bn_s = f"{bn_bbo[0]:.4f}/{bn_bbo[1]:.4f}"
-                    elif bn_px is not None:
-                        bn_s = f"{bn_px:.4f}"
-                    else:
-                        bn_s = "n/a"
-                    up_bid = float(poly_book.book.get("bid", 0.0))
-                    up_ask = float(poly_book.book.get("ask", 0.0))
-                    d_bid = float(poly_book.book.get("down_bid", 0.0))
-                    d_ask = float(poly_book.book.get("down_ask", 0.0))
-                    # Always show both outcome legs (pulse used to follow trend only — confusing
-                    # when trend flips while a DOWN/UP position is open).
-                    book_focus = (
-                        f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
-                    )
-                    
-                    logging.info(
-                        f"Fast: {fast_price:.2f} (CB {cb_s} BNC {bn_s} smart={USE_SMART_FAST}) | "
-                        f"PolyRTDS: {poly_btc:.2f} | "
-                        f"Diff: {diff:+.2f} | Z: {zscore:+.2f} | "
-                        f"Trend: {trend['trend']} s={trend['speed']:+.2f} d={trend['depth']:.2f} "
-                        f"a={trend['age']:.1f}s adx={_pulse_adx_s} "
-                        f"micro={_pm_s} tt={_tt_s} eta={_eta_s} stale={_stale_s} | "
-                        f"Book: {book_focus} | "
-                        f"{_rsi_line} | "
-                        f"Imb: {imbalance:.2f} | uPnL: {upnl:+.2f}$ | "
-                        f"Stale: {latency_ms:.0f}ms skew: {skew_ms:+.0f} "
-                        f"(cb {float(_ft['coinbase_age_ms']):.0f} "
-                        f"poly {float(_ft['poly_age_ms']):.0f} "
-                        f"bn {float(_ft['binance_age_ms']):.0f}) | "
-                        f"DD: {risk.drawdown_pct(equity)*100:.2f}% | Gate: {'ON' if trade_allowed else 'OFF'} | "
-                        f"Regime: {regime_detector.get_regime()} | "
-                        f"priceToBeat: {slot_price_to_beat:.2f} Δ={fast_price - slot_price_to_beat:+.2f} | "
-                        f"Forecast: {forecast:.2f}{profile_suffix}",
-                    )
-                    last_pulse_time = now
+                # Pulse logging moved to background task (_pulse_logging_task) — no inline work.
                 if isinstance(decision, dict) and decision.get("event") == "CLOSE":
                     _close_slot_ts = int(selector.get_current_slot_timestamp())
                     _live_skip_until = 0.0
@@ -1143,7 +1242,8 @@ async def main():
                         if _sc:
                             logging.info("📊 session_slices: %s", _sc)
                     # Journal uses real CLOB PnL in live mode, sim PnL in paper mode.
-                    journal.record_close(
+                    # Async queue-based write (non-blocking)
+                    journal.queue_close(
                         decision=decision,
                         live_pnl=_live_pnl,
                         rsi_state=_rs,
@@ -1371,7 +1471,8 @@ async def main():
                                             )
                                             if _opp_tid:
                                                 allowance_cache.schedule_refresh(_opp_tid)
-                                        journal.record_open(
+                                        # Async queue-based write (non-blocking)
+                                        journal.queue_open(
                                             decision=decision,
                                             filled_shares=float(_filled_sh),
                                             avg_price=float(_filled_px),
@@ -1432,9 +1533,7 @@ async def main():
                                                 "live-skip cooldown (set "
                                                 "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT=1 to enable).",
                                             )
-            elif (now - last_pulse_time) >= pulse_log_period:
-                # logging.debug("⏳ Waiting for full data sync (Coinbase/Poly)...")
-                last_pulse_time = now
+            # Pulse logging handled by background task — no inline work needed.
 
             # When MAIN_LOOP_SLEEP is 0, asyncio.sleep(0) only yields to the event loop (no wall delay).
             await asyncio.sleep(MAIN_LOOP_SLEEP if MAIN_LOOP_SLEEP > 0.0 else 0.0)
@@ -1453,6 +1552,14 @@ async def main():
         except Exception:
             pass
     finally:
+        # Signal shutdown of background tasks before any cleanup
+        await bg_tasks.shutdown(timeout=5.0)
+        
+        # Stop async journal writer and flush remaining entries
+        _dropped = await journal.stop_async_writer()
+        if _dropped > 0:
+            logging.warning("Journal: %d entries dropped due to queue overflow", _dropped)
+        
         if LIVE_MODE and token_up_id and pnl.inventory > 0:
             logging.warning(
                 "🚨 Shutdown with open live position (%.4f shares) — emergency exit.",
