@@ -321,14 +321,23 @@ class ClobUserOrderCache:
             status_lower = status.lower()
             if status_lower in ("matched", "filled"):
                 new_state = OrderState.FILLED
+                # Order filled - complete pending tracking
+                self._pending_orders.pop(oid, None)
             elif status_lower in ("canceled", "cancelled"):
                 new_state = OrderState.CANCELLED
+                # Order cancelled - complete pending tracking
+                self._pending_orders.pop(oid, None)
             elif status_lower == "partially_matched":
                 new_state = OrderState.PARTIAL
             elif status_lower == "live":
                 new_state = OrderState.PENDING
+                # Order is live - register as pending if not already
+                if oid not in self._pending_orders:
+                    self._pending_orders[oid] = time.time()
             elif status_lower == "failed":
                 new_state = OrderState.FAILED
+                # Order failed - complete pending tracking
+                self._pending_orders.pop(oid, None)
             else:
                 new_state = OrderState.PENDING
             
@@ -629,10 +638,14 @@ class ClobUserOrderCache:
                 "ws_latency_samples": len(ws_latency),
                 "events_by_type": {k.value: v for k, v in self._events_by_type.items()},
                 "state_transitions": {
-                    f"{k[0].value}→{k[1].value}": v 
+                    f"{k[0].value}→{k[1].value}": v
                     for k, v in self._state_transitions.items()
                 },
                 "active_orders": len(self._state_machine),
+                "sequence_number": self._sequence_number,
+                "sequence_gaps_detected": self._sequence_gaps_detected,
+                "pending_orders": len(self._pending_orders),
+                "reconnect_buffer_size": len(self._reconnect_buffer),
             }
 
     def _log_metrics(self, reason: str = "periodic") -> None:
