@@ -198,6 +198,39 @@ class BalanceCache:
             latency_ms = (time.perf_counter() - start_time) * 1000
             self._metrics.record_latency(latency_ms)
             return balance
+
+    def get_cached_usdc_balance(self) -> Optional[float]:
+        """Return cached USDC balance without blocking.
+        
+        This is a non-blocking read-only method for the main loop.
+        Returns None if cache is stale or not yet populated.
+        Use this instead of get_usdc_balance() in the critical path.
+        
+        Returns:
+            Cached USDC balance in USD, or None if cache is stale/empty
+        """
+        with self._lock:
+            if self._usdc_cache is not None and self._usdc_cache.is_fresh(self._max_age_sec):
+                return self._usdc_cache.value
+            return None
+
+    def get_cached_conditional_balance(self, token_id: str) -> Optional[float]:
+        """Return cached conditional balance without blocking.
+        
+        This is a non-blocking read-only method for the main loop.
+        Returns None if cache is stale or not yet populated.
+        
+        Args:
+            token_id: The conditional token ID to look up
+            
+        Returns:
+            Cached conditional token balance, or None if cache is stale/empty
+        """
+        with self._lock:
+            cache_entry = self._conditional_caches.get(token_id)
+            if cache_entry is not None and cache_entry.is_fresh(self._conditional_max_age_sec):
+                return cache_entry.value
+            return None
     
     def get_conditional_balance(self, token_id: str) -> Optional[float]:
         """Get conditional token balance from cache or fetch if stale.

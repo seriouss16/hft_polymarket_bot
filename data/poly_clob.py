@@ -8,6 +8,9 @@ e.g. ``{"symbol":"btc/usd"}``). Messages: ``topic``, ``type``, ``timestamp``, ``
 ``symbol``, ``value``, ``timestamp``.
 
 RTDS docs require **application ``PING`` every 5 seconds** (separate from WebSocket protocol pings).
+
+Async HTTP Client: ClobAsyncHTTPClient provides non-blocking order book fetches
+for the main loop to avoid blocking on synchronous HTTP calls.
 """
 
 from __future__ import annotations
@@ -16,9 +19,15 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import websockets
+
+try:
+    import aiohttp
+    _AIOHTTP_AVAILABLE = True
+except ImportError:
+    _AIOHTTP_AVAILABLE = False
 
 # Default RTDS keepalive interval per Polymarket RTDS documentation.
 _DEFAULT_RTDS_PING_SEC = 5.0
@@ -148,3 +157,155 @@ class PolyOrderBook:
             except Exception as e:
                 logging.error("❌ Poly RTDS Error: %s", e)
                 await asyncio.sleep(_reconnect_delay_sec())
+
+
+# ---------------------------------------------------------------------------
+# Async HTTP client for CLOB order book (non-blocking, replaces sync requests)
+# ---------------------------------------------------------------------------
+
+_CLOB_BOOK_HTTP_URL = os.getenv("CLOB_BOOK_HTTP", "https://clob.polymarket.com/book")
+_CLOB_BOOK_HTTP_TIMEOUT = float(os.getenv("LIVE_CLOB_BOOK_HTTP_TIMEOUT", "1.5"))
+
+
+def _levels_from_book_rows(rows: Any) -> list[tuple[float, float]]:
+    """Parse CLOB bids or asks JSON rows into (price, size) tuples."""
+    out: list[tuple[float, float]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            out.append((float(row.get("price", 0.0)), float(row.get("size", 0.0))))
+        else:
+            out.append((float(getattr(row, "price", 0.0)), float(getattr(row, "size", 0.0))))
+    return out
+
+
+def _snapshot_from_levels(
+    bid_levels: list[tuple[float, float]],
+    ask_levels: list[tuple[float, float]],
+    depth: int,
+) -> dict:
+    """Pick best bid (max price), best ask (min price), and top-of-book volumes."""
+    bids = sorted(bid_levels, key=lambda x: x[0], reverse=True)
+    asks = sorted(ask_levels, key=lambda x: x[0])
+    best_bid = float(bids[0][0]) if bids else 0.0
+    best_ask = float(asks[0][0]) if asks else 1.0
+    bid_size_top = float(bids[0][1]) if bids else 0.0
+    ask_size_top = float(asks[0][1]) if asks else 0.0
+    bid_vol_topn = float(sum(s for _, s in bids[:depth]))
+    ask_vol_topn = float(sum(s for _, s in asks[:depth]))
+    den = bid_vol_topn + ask_vol_topn + 1e-9
+    imbalance = (bid_vol_topn - ask_vol_topn) / den
+    pressure = bid_size_top - ask_size_top
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "bid_size_top": bid_size_top,
+        "ask_size_top": ask_size_top,
+        "imbalance": imbalance,
+        "bid_vol_topn": bid_vol_topn,
+        "ask_vol_topn": ask_vol_topn,
+        "pressure": pressure,
+    }
+
+
+class ClobAsyncHTTPClient:
+    """Async HTTP client for CLOB order book fetches (non-blocking).
+
+    This replaces the synchronous `requests` calls with aiohttp to avoid
+    blocking the event loop during order book fetches in the main loop.
+    """
+
+    def __init__(self, timeout: float = _CLOB_BOOK_HTTP_TIMEOUT) -> None:
+        self._timeout = aiohttp.ClientTimeout(total=timeout) if _AIOHTTP_AVAILABLE else None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._base_url = _CLOB_BOOK_HTTP_URL
+
+    async def _ensure_session(self) -> None:
+        """Ensure aiohttp session exists (lazy initialization)."""
+        if self._session is None and _AIOHTTP_AVAILABLE:
+            self._session = aiohttp.ClientSession(timeout=self._timeout)
+
+    async def close(self) -> None:
+        """Close the HTTP session."""
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+
+    async def fetch_orderbook(
+        self, token_id: str, depth: int = 5
+    ) -> Optional[dict]:
+        """Fetch order book snapshot asynchronously.
+
+        Returns dict with best_bid, best_ask, bid_size_top, ask_size_top, etc.
+        Returns None on failure.
+        """
+        if not _AIOHTTP_AVAILABLE:
+            logging.warning("aiohttp not available; async order book fetch disabled")
+            return None
+
+        await self._ensure_session()
+        if self._session is None:
+            return None
+
+        empty = {
+            "best_bid": 0.0,
+            "best_ask": 1.0,
+            "bid_size_top": 0.0,
+            "ask_size_top": 0.0,
+            "imbalance": 0.0,
+            "bid_vol_topn": 0.0,
+            "ask_vol_topn": 0.0,
+            "pressure": 0.0,
+        }
+
+        try:
+            async with self._session.get(
+                self._base_url, params={"token_id": token_id}
+            ) as resp:
+                if resp.status != 200:
+                    logging.debug("CLOB HTTP order book failed token=%s…: %d", token_id[:28], resp.status)
+                    return empty
+                data = await resp.json()
+                bid_levels = _levels_from_book_rows(data.get("bids"))
+                ask_levels = _levels_from_book_rows(data.get("asks"))
+                return _snapshot_from_levels(bid_levels, ask_levels, depth)
+        except asyncio.TimeoutError:
+            logging.debug("CLOB HTTP order book timeout token=%s…", token_id[:28])
+            return empty
+        except Exception as exc:
+            logging.debug("CLOB HTTP order book failed token=%s…: %s", token_id[:28], exc)
+            return empty
+
+    async def fetch_orderbook_pair(
+        self,
+        token_up_id: str,
+        token_down_id: Optional[str],
+        depth: int = 5,
+    ) -> tuple[dict, dict]:
+        """Fetch order books for UP and DOWN tokens concurrently.
+
+        Returns (up_snapshot, down_snapshot). If token_down_id is None,
+        returns (up_snapshot, empty_dict).
+        """
+        empty = {
+            "best_bid": 0.0,
+            "best_ask": 1.0,
+            "bid_size_top": 0.0,
+            "ask_size_top": 0.0,
+            "imbalance": 0.0,
+            "bid_vol_topn": 0.0,
+            "ask_vol_topn": 0.0,
+            "pressure": 0.0,
+        }
+
+        if not _AIOHTTP_AVAILABLE:
+            return empty, empty
+
+        if token_down_id:
+            up_snap, down_snap = await asyncio.gather(
+                self.fetch_orderbook(token_up_id, depth),
+                self.fetch_orderbook(token_down_id, depth),
+            )
+            return up_snap or empty, down_snap or empty
+        else:
+            up_snap = await self.fetch_orderbook(token_up_id, depth)
+            return up_snap or empty, empty

@@ -23,7 +23,7 @@ from data.aggregator import FastPriceAggregator
 from data.providers import FastExchangeProvider
 from data.clob_market_ws import ClobMarketBookCache, sync_poly_book_from_cache
 from data.clob_user_ws import ClobUserOrderCache
-from data.poly_clob import PolyOrderBook
+from data.poly_clob import PolyOrderBook, ClobAsyncHTTPClient
 from data.balance_cache import BalanceCache
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
@@ -126,6 +126,7 @@ async def main():
     clob_ws_task = asyncio.create_task(clob_ws_cache.run_forever())
     clob_user_cache: ClobUserOrderCache | None = None
     clob_user_task: asyncio.Task | None = None
+    clob_async_http: ClobAsyncHTTPClient | None = None
     balance_cache: BalanceCache | None = None
     if LIVE_MODE:
         clob_user_cache = ClobUserOrderCache(lambda: live_exec.get_api_creds())
@@ -143,6 +144,9 @@ async def main():
             max_age_sec=_balance_cache_max_age_sec,
             conditional_max_age_sec=_balance_conditional_max_age_sec,
         )
+        
+        # Async HTTP client for non-blocking order book fetches
+        clob_async_http = ClobAsyncHTTPClient()
     live_risk = LiveRiskManager(max_session_loss=float(os.environ["LIVE_MAX_SESSION_LOSS"]))
     risk = RiskEngine(
         max_drawdown_pct=float(os.environ["MAX_DRAWDOWN_PCT"]),
@@ -226,6 +230,82 @@ async def main():
 
         _heartbeat_task = asyncio.create_task(_run_heartbeat())
 
+    # Background order book refresh task (pre-warms cache, avoids blocking HTTP in main loop)
+    _orderbook_refresh_task: asyncio.Task | None = None
+    _orderbook_refresh_interval = float(os.getenv("CLOB_ORDERBOOK_REFRESH_SEC", "1.5"))
+    
+    async def _run_orderbook_refresh() -> None:
+        """Continuously refresh CLOB order book cache in background.
+        
+        This task runs every _orderbook_refresh_interval seconds and pre-warms
+        the poly_book cache so the main loop doesn't need to block on HTTP calls.
+        """
+        if clob_async_http is None:
+            return
+        while True:
+            try:
+                if not token_up_id:
+                    await asyncio.sleep(_orderbook_refresh_interval)
+                    continue
+                    
+                up_snap, down_snap = await clob_async_http.fetch_orderbook_pair(
+                    token_up_id, token_down_id, depth=5
+                )
+                
+                up_valid = 0.0 < up_snap.get("best_bid", 0.0) < up_snap.get("best_ask", 1.0) <= 1.0
+                down_valid = 0.0 < down_snap.get("best_bid", 0.0) < down_snap.get("best_ask", 1.0) <= 1.0
+                
+                if poly_book is not None:
+                    if up_valid:
+                        poly_book.book["bid"] = up_snap["best_bid"]
+                        poly_book.book["ask"] = up_snap["best_ask"]
+                        poly_book.book["bid_size_top"] = up_snap.get("bid_size_top", 1.0)
+                        poly_book.book["ask_size_top"] = up_snap.get("ask_size_top", 1.0)
+                    if down_valid and token_down_id:
+                        poly_book.book["down_bid"] = down_snap["best_bid"]
+                        poly_book.book["down_ask"] = down_snap["best_ask"]
+                        poly_book.book["down_bid_size_top"] = down_snap.get("bid_size_top", 0.0)
+                        poly_book.book["down_ask_size_top"] = down_snap.get("ask_size_top", 0.0)
+                    
+                    if up_valid and (not token_down_id or down_valid):
+                        nonlocal last_clob_book_success_time
+                        last_clob_book_success_time = time.time()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.debug("Background order book refresh failed: %s", exc)
+            await asyncio.sleep(_orderbook_refresh_interval)
+    
+    # Background balance refresh task (pre-warms balance cache)
+    _balance_refresh_task: asyncio.Task | None = None
+    _balance_refresh_interval = float(os.getenv("BALANCE_REFRESH_SEC", "30"))
+    
+    async def _run_balance_refresh() -> None:
+        """Continuously refresh balance cache in background.
+        
+        This task runs every _balance_refresh_interval seconds and pre-warms
+        the balance cache so the main loop can read from cache without blocking.
+        """
+        if balance_cache is None:
+            return
+        while True:
+            try:
+                # Fetch USDC balance
+                usdc_bal = live_exec.fetch_usdc_balance()
+                if usdc_bal is not None:
+                    logging.debug("Background balance refresh: USDC=%.2f", usdc_bal)
+                
+                # Fetch conditional balances for active tokens
+                if token_up_id:
+                    live_exec.fetch_conditional_balance(token_up_id)
+                if token_down_id:
+                    live_exec.fetch_conditional_balance(token_down_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logging.debug("Background balance refresh failed: %s", exc)
+            await asyncio.sleep(_balance_refresh_interval)
+
     token_up_id = None
     token_down_id = None
     current_slug = None
@@ -286,9 +366,9 @@ async def main():
                 if live_exec.has_pending_buy(_tid) or live_exec.has_pending_sell(_tid):
                     continue
                 _mem = live_exec.filled_buy_shares(_tid)
-                # Phase 3 WebSocket Migration: Use balance cache for conditional token balance
+                # Phase 3 WebSocket Migration: Use non-blocking cached balance read
                 if balance_cache is not None:
-                    _ch = await asyncio.to_thread(balance_cache.get_conditional_balance, _tid)
+                    _ch = balance_cache.get_cached_conditional_balance(_tid)
                 else:
                     _ch = await asyncio.to_thread(live_exec.fetch_conditional_balance, _tid)
                 _chv = float(_ch) if _ch is not None else 0.0
@@ -404,6 +484,14 @@ async def main():
         )
 
     shutdown_reason = "shutdown"
+    
+    # Start background refresh tasks (LIVE mode only)
+    if LIVE_MODE:
+        if _orderbook_refresh_interval > 0:
+            _orderbook_refresh_task = asyncio.create_task(_run_orderbook_refresh())
+        if _balance_refresh_interval > 0 and balance_cache is not None:
+            _balance_refresh_task = asyncio.create_task(_run_balance_refresh())
+    
     try:
         while True:
             now = asyncio.get_event_loop().time()
@@ -429,17 +517,16 @@ async def main():
             # Periodic stats before any await: slot/orderbook/strategy work must not delay the report.
             if STATS_INTERVAL > 0.0 and (now - last_stats_time >= STATS_INTERVAL):
                 if LIVE_MODE and balance_cache is not None:
-                    # Phase 3 WebSocket Migration: Use balance cache for USDC balance
-                    # The cache automatically handles staleness and metrics tracking
+                    # Phase 3 WebSocket Migration: Use non-blocking cached balance read
                     try:
-                        _st_usdc = await asyncio.to_thread(balance_cache.get_usdc_balance)
+                        _st_usdc = balance_cache.get_cached_usdc_balance()
                         stats.set_live_wallet_usdc(_st_usdc)
                         # Update balance cache metrics for display
                         stats.update_balance_metrics_from_cache(balance_cache)
                         # Log balance cache metrics periodically
                         balance_cache.log_metrics("stats_interval")
                     except Exception as _st_exc:
-                        logging.debug("balance_cache.get_usdc_balance for stats: %s", _st_exc)
+                        logging.debug("balance_cache.get_cached_usdc_balance for stats: %s", _st_exc)
                         stats.set_live_wallet_usdc(None)
                 else:
                     stats.set_live_wallet_usdc(None)
@@ -609,90 +696,21 @@ async def main():
                         )
                         if _ws_filled:
                             last_clob_book_success_time = now
-                    if not _ws_filled and (
-                        CLOB_PULL_INTERVAL <= 0.0
-                        or (now - last_book_pull_time) >= CLOB_PULL_INTERVAL
-                    ):
-                        if _net_dbg:
-                            _nw_t2 = time.perf_counter()
-                        try:
-                            up_bid = 0.0
-                            up_ask = 0.0
-                            down_bid = 0.0
-                            down_ask = 0.0
-
-                            if token_down_id:
-                                ob_up, ob_down = await asyncio.gather(
-                                    asyncio.to_thread(
-                                        live_exec.get_orderbook_snapshot, token_up_id, 5
-                                    ),
-                                    asyncio.to_thread(
-                                        live_exec.get_orderbook_snapshot, token_down_id, 5
-                                    ),
-                                )
-                            else:
-                                ob_up = await asyncio.to_thread(
-                                    live_exec.get_orderbook_snapshot, token_up_id, 5
-                                )
-                                ob_down = {}
-                            up_bid = float(ob_up.get("best_bid", 0.0))
-                            up_ask = float(ob_up.get("best_ask", 0.0))
-                            if token_down_id:
-                                down_bid = float(ob_down.get("best_bid", 0.0))
-                                down_ask = float(ob_down.get("best_ask", 0.0))
-
-                            up_valid = 0.0 < up_bid < up_ask <= 1.0
-                            down_valid = 0.0 < down_bid < down_ask <= 1.0
-                            if (not up_valid or not down_valid) and current_slug:
-                                q = await selector.fetch_up_down_quotes(current_slug, token_up_id, token_down_id)
-                                if not up_valid:
-                                    up_bid = float(q.get("up_bid", 0.0))
-                                    up_ask = float(q.get("up_ask", 0.0))
-                                    up_valid = 0.0 < up_bid < up_ask <= 1.0
-                                if not down_valid:
-                                    down_bid = float(q.get("down_bid", 0.0))
-                                    down_ask = float(q.get("down_ask", 0.0))
-                                    down_valid = 0.0 < down_bid < down_ask <= 1.0
-
-                            if up_valid:
-                                poly_book.book["bid"] = up_bid
-                                poly_book.book["ask"] = up_ask
-                                poly_book.book["bid_size_top"] = float(ob_up.get("bid_size_top", poly_book.book.get("bid_size_top", 1.0)))
-                                poly_book.book["ask_size_top"] = float(ob_up.get("ask_size_top", poly_book.book.get("ask_size_top", 1.0)))
-                            else:
-                                # Reset stale UP data to force complement calculation
-                                poly_book.book.pop("bid", None)
-                                poly_book.book.pop("ask", None)
-                            if down_valid:
-                                poly_book.book["down_bid"] = down_bid
-                                poly_book.book["down_ask"] = down_ask
-                                if isinstance(ob_down, dict) and ob_down:
-                                    poly_book.book["down_bid_size_top"] = float(
-                                        ob_down.get("bid_size_top", 0.0)
-                                    )
-                                    poly_book.book["down_ask_size_top"] = float(
-                                        ob_down.get("ask_size_top", 0.0)
-                                    )
-                            else:
-                                # Reset stale DOWN data to force complement calculation
-                                poly_book.book.pop("down_bid", None)
-                                poly_book.book.pop("down_ask", None)
-                            if up_valid and (not token_down_id or down_valid):
-                                last_clob_book_success_time = now
-                        except Exception as exc:
+                    # Background refresh task pre-warms cache; skip blocking HTTP calls.
+                    # If WS cache is stale, the background task will refresh it asynchronously.
+                    # This eliminates 100-600ms blocking HTTP calls from the critical path.
+                    if not _ws_filled:
+                        # Cache is stale or empty — background task will refresh it.
+                        # Skip this tick rather than block; next tick will have fresh data.
+                        if (now - last_clob_book_success_time) > _live_max_book_age_sec > 0:
+                            # Data is too old; log once and continue with whatever we have
                             if (now - last_clob_pull_fail_log_time) >= 90.0:
-                                logging.warning("CLOB book pull failed: %s", exc)
+                                logging.debug(
+                                    "CLOB book cache stale (age=%.0fs > %.0fs); background refresh active",
+                                    now - last_clob_book_success_time,
+                                    _live_max_book_age_sec,
+                                )
                                 last_clob_pull_fail_log_time = now
-                            else:
-                                logging.debug("CLOB book pull failed (rate-limited): %s", exc)
-                        last_book_pull_time = now
-                        if _net_dbg:
-                            _nw_t3 = time.perf_counter()
-                            logging.info(
-                                "NetworkCheck read_fast=%.1fms clob_roundtrip=%.1fms",
-                                (_nw_t1 - _nw_t0) * 1000.0,
-                                (_nw_t3 - _nw_t2) * 1000.0,
-                            )
 
                 # Re-read fast anchor after CLOB awaits; feeds advance while the event loop is in thread/network work.
                 _fp_before_refresh = fast_price
@@ -1079,7 +1097,8 @@ async def main():
                             # Cap order size to actual CLOB balance to prevent
                             # "not enough balance" rejections when account dropped
                             # below the configured LIVE_ORDER_SIZE after a loss.
-                            _real_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                            # Use non-blocking cached balance read
+                            _real_usdc = balance_cache.get_cached_usdc_balance() if balance_cache else await asyncio.to_thread(live_exec.fetch_usdc_balance)
                             if _real_usdc is not None and _real_usdc < _cost_usd:
                                 logging.warning(
                                     "⚠️ [LIVE] Real USDC balance %.4f < order size %.4f "
@@ -1342,6 +1361,11 @@ async def main():
                 await asyncio.sleep(2.0)
             except Exception as _exc:
                 logging.error("Emergency exit on shutdown failed: %s", _exc)
+        # Cancel background refresh tasks
+        if _orderbook_refresh_task is not None and not _orderbook_refresh_task.done():
+            _orderbook_refresh_task.cancel()
+        if _balance_refresh_task is not None and not _balance_refresh_task.done():
+            _balance_refresh_task.cancel()
         if _heartbeat_task is not None and not _heartbeat_task.done():
             _heartbeat_task.cancel()
         clob_ws_cache.stop()
@@ -1380,7 +1404,11 @@ async def main():
         try:
             if LIVE_MODE:
                 try:
-                    _fin_usdc = await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                    # Close async HTTP client
+                    if clob_async_http is not None:
+                        await clob_async_http.close()
+                    # Use cached balance for final report
+                    _fin_usdc = balance_cache.get_cached_usdc_balance() if balance_cache else await asyncio.to_thread(live_exec.fetch_usdc_balance)
                     stats.set_live_wallet_usdc(_fin_usdc)
                     # Phase 2 WebSocket Migration: Set WS/HTTP metrics for final report
                     if hasattr(live_exec, '_get_ws_metrics'):

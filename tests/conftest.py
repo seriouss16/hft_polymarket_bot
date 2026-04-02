@@ -40,6 +40,10 @@ _ENV_DEFAULTS = {
     # Tests: no live CLOB market WebSocket (avoid network).
     "CLOB_MARKET_WS_ENABLED": "0",
     "CLOB_USER_WS_ENABLED": "0",
+    # CLOB HTTP timeout for live_engine module import
+    "LIVE_CLOB_BOOK_HTTP_TIMEOUT": "1.5",
+    # Live engine settings
+    "HFT_LIVE_SKIP_STATS_LOG_SEC": "60",
     # Deterministic SIM entry price in executor tests (shell or runtime may set analyzer suggestion).
     "HFT_SIM_SLIPPAGE_EXTRA_FRACTION": "0",
 }
