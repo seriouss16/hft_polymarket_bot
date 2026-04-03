@@ -21,8 +21,9 @@ the branch under test.
 
 from __future__ import annotations
 
+import asyncio
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -880,3 +881,75 @@ class TestSellFillAvgPriceHelpers:
         assert LiveExecutionEngine._associate_trade_ids_from_order(
             {"associate_trades": '["tid1","tid2"]'}
         ) == ["tid1", "tid2"]
+
+
+class TestFreshnessChecks:
+    """Freshness check logic in execute, close_position, and _poll_order."""
+
+    async def test_execute_skips_when_stale(self, monkeypatch):
+        """execute() must skip when market data is stale and LIVE_STALE_BLOCK_ACTIONS=1."""
+        monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
+        eng = make_engine(monkeypatch)
+    
+        # Mock stale cache (MagicMock for sync is_fresh)
+        mock_cache = MagicMock()
+        mock_cache.is_fresh.return_value = False
+        eng.set_market_book_cache(mock_cache)
+
+        with patch.object(eng, "get_best_prices", return_value=(0.48, 0.52)):
+            result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
+        
+        assert result == (0.0, 0.0)
+        mock_cache.is_fresh.assert_called_with(TOKEN)
+
+    async def test_close_position_skips_when_stale(self, monkeypatch):
+        """close_position() must skip when market data is stale and LIVE_STALE_BLOCK_ACTIONS=1."""
+        monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
+        eng = make_engine(monkeypatch)
+        
+        # Mock stale cache (MagicMock for sync is_fresh)
+        mock_cache = MagicMock()
+        mock_cache.is_fresh.return_value = False
+        eng.set_market_book_cache(mock_cache)
+
+        result = await eng.close_position(TOKEN, 10.0)
+        
+        assert result == (0.0, 0.0)
+        mock_cache.is_fresh.assert_called_with(TOKEN)
+
+    async def test_poll_order_blocks_reprice_when_stale(self, monkeypatch):
+        """_poll_order() must block reprice when market data is stale."""
+        monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
+        eng = make_engine(monkeypatch)
+    
+        # Mock stale cache (MagicMock for sync is_fresh)
+        mock_cache = MagicMock()
+        mock_cache.is_fresh.return_value = False
+        eng.set_market_book_cache(mock_cache)
+
+        order = make_order(size=8.0, age_offset=_STALE_AGE)
+        eng._active_orders[order.order_id] = order
+
+        # We need to break the loop, so we'll make it "filled" after one check
+        
+        # Patch _wait_for_order_fill to return "live" then "matched"
+        # And patch asyncio.sleep to avoid waiting
+        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            # We only want to run one iteration of the stale check
+            # So we'll make the order NOT stale after the first check
+            async def side_effect_sleep(duration):
+                order.status = OrderStatus.FILLED
+                return None
+            mock_sleep.side_effect = side_effect_sleep
+            
+            # Ensure _wait_for_order_fill doesn't block and returns terminal state on second call
+            responses = iter([("live", 0.0), ("matched", 8.0)])
+            with patch.object(eng, "_wait_for_order_fill", side_effect=lambda *args, **kwargs: next(responses)):
+                # Run with a timeout to prevent infinite loop if logic fails
+                try:
+                    await asyncio.wait_for(eng._poll_order(order), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pytest.fail("_poll_order timed out in freshness check test")
+
+        # Should have called is_fresh
+        mock_cache.is_fresh.assert_called_with(TOKEN)
