@@ -34,6 +34,9 @@ _REPRICE_POST_CANCEL_SLEEP_SEC = req_float("LIVE_REPRICE_POST_CANCEL_SLEEP_SEC")
 _REPRICE_POST_CANCEL_FILL_POLLS = max(1, req_int("LIVE_REPRICE_POST_CANCEL_FILL_POLLS"))
 _REPRICE_POST_CANCEL_POLL_SEC = req_float("LIVE_REPRICE_POST_CANCEL_POLL_SEC")
 
+_ORDERBOOK_STALE_SEC_DAY = req_float("LIVE_ORDERBOOK_STALE_SEC_DAY")
+_ORDERBOOK_STALE_SEC_NIGHT = req_float("LIVE_ORDERBOOK_STALE_SEC_NIGHT")
+
 if _ORDER_MAX_REPRICE == 0:
     logging.warning(
         "LIVE_ORDER_MAX_REPRICE=0: stale orders are not repriced; the first stale hit "
@@ -379,3 +382,23 @@ class LiveRiskManager:
             "[LIVE RISK] session_pnl=%.4f max_session_loss=%.4f trades=%d can_trade=%s",
             self.pnl, self.max_session_loss, self.trades, self.can_trade(),
         )
+
+
+def is_maker_buy_price(price: float, best_ask: float) -> bool:
+    """True if price is at or below best_ask (resting order)."""
+    return float(price) <= float(best_ask)
+
+
+def is_taker_buy_price(price: float, best_ask: float) -> bool:
+    """True if price is above best_ask (aggressive cross)."""
+    return float(price) > float(best_ask)
+
+
+def is_maker_sell_price(price: float, best_bid: float) -> bool:
+    """True if price is at or above best_bid (resting order)."""
+    return float(price) >= float(best_bid)
+
+
+def is_taker_sell_price(price: float, best_bid: float) -> bool:
+    """True if price is below best_bid (aggressive cross)."""
+    return float(price) < float(best_bid)
