@@ -332,19 +332,51 @@ def _price_to_beat_counter_min_delta_pct() -> float:
 
 
 def price_to_beat_gate(fast_price: float, slot_price_to_beat: float) -> tuple[bool, bool]:
-    """Return (up_allowed, down_allowed) using slot start price (Gamma priceToBeat) vs fast CEX."""
+    """
+    Return (up_allowed, down_allowed) using slot start price (Gamma priceToBeat) vs fast CEX.
+
+    This gate implements an intentional asymmetric logic to support the current trend
+    and filter out contrarian entries that lack sufficient momentum.
+
+    Logic:
+    - If fast_price > price_to_beat (delta_pct > 0):
+        - UP is always allowed (following the trend relative to the anchor).
+        - DOWN is allowed only if the price has moved significantly enough (abs(delta_pct) >= min_delta)
+          to justify a contrarian entry.
+    - If fast_price < price_to_beat (delta_pct < 0):
+        - DOWN is always allowed (following the trend relative to the anchor).
+        - UP is allowed only if abs(delta_pct) >= min_delta.
+
+    Why this is useful:
+    It prevents "weak" contrarian entries when the price is very close to the anchor,
+    ensuring we only bet against the local trend (relative to slot start) when there's
+    a meaningful gap.
+
+    Configuration:
+    - HFT_PRICE_TO_BEAT_FILTER_ENABLED=1 to enable.
+    - HFT_PRICE_TO_BEAT_COUNTER_MIN_DELTA_PCT (default 0.0005) sets the threshold for contrarian moves.
+
+    Related filters: Z-score (momentum), Speed (volatility).
+    """
     enabled = _price_to_beat_filter_enabled()
     if not enabled or slot_price_to_beat <= 0.0 or fast_price <= 0.0:
         return True, True
+
     delta_pct = (fast_price - slot_price_to_beat) / slot_price_to_beat
     min_delta = _price_to_beat_counter_min_delta_pct()
+
+    # Intentional asymmetry: always allow trend-following moves,
+    # but require a minimum delta for contrarian moves.
     if delta_pct > 0.0:
+        # Price is above anchor: UP is trend-following, DOWN is contrarian.
         ok_up = True
         ok_down = abs(delta_pct) >= min_delta
     elif delta_pct < 0.0:
+        # Price is below anchor: DOWN is trend-following, UP is contrarian.
         ok_up = abs(delta_pct) >= min_delta
         ok_down = True
     else:
         ok_up = True
         ok_down = True
+
     return ok_up, ok_down

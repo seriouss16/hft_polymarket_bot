@@ -26,6 +26,10 @@ Direct latency-arb logic through shared `HFTEngine`; live and paper use the same
 - **RSI** — dynamic bands, block entries at extremes (with bypass for aggressive edge when enabled).
 - **Z-score of edge** — window filter; **trend** (direction, speed, age) for soft_flow and exits.
 - **LSTM** (optional) — background predictor in `ml/model.py` when enabled and a model is loaded.
+- **Price-to-Beat (Anchor) Filter** — asymmetric gate comparing fast CEX price to the slot's "price to beat" (Gamma anchor).
+  - **Trend Support**: If `fast > anchor`, UP is always allowed; DOWN requires `abs(delta) >= HFT_PRICE_TO_BEAT_COUNTER_MIN_DELTA_PCT`.
+  - **Contrarian Filter**: Prevents weak entries against the local trend relative to the anchor.
+  - **Config**: `HFT_PRICE_TO_BEAT_FILTER_ENABLED=1`, `HFT_PRICE_TO_BEAT_COUNTER_MIN_DELTA_PCT` (default 0.0005).
 
 ## Entry thresholds (concept)
 

@@ -56,6 +56,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         # Should not raise
         validate_config()
@@ -75,6 +77,8 @@ class TestConfigValidator:
         monkeypatch.setenv("HFT_DEFAULT_TRADE_USD", "ten")  # invalid
         monkeypatch.setenv("HFT_MAX_POSITION_USD", "100")
         monkeypatch.setenv("STATS_INTERVAL_SEC", "120")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         monkeypatch.setenv("HFT_BUY_EDGE", "4.8")
         monkeypatch.setenv("HFT_SELL_EDGE_ABS", "7.2")
         monkeypatch.setenv("HFT_MIN_HOLD_SEC", "3.8")
@@ -98,6 +102,8 @@ class TestConfigValidator:
         monkeypatch.setenv("HFT_DEFAULT_TRADE_USD", "10.0")
         monkeypatch.setenv("HFT_MAX_POSITION_USD", "100")
         monkeypatch.setenv("STATS_INTERVAL_SEC", "120")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         monkeypatch.setenv("HFT_BUY_EDGE", "4.8")
         monkeypatch.setenv("HFT_SELL_EDGE_ABS", "7.2")
         monkeypatch.setenv("HFT_MIN_HOLD_SEC", "3.8")
@@ -134,6 +140,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Set HFT_ENTRY_MAX_ASK_UP above max (1.0)
         monkeypatch.setenv("HFT_ENTRY_MAX_ASK_UP", "1.5")
 
@@ -159,6 +167,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         with pytest.raises(SystemExit):
             validate_config()
@@ -182,6 +192,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         with pytest.raises(SystemExit):
             validate_config()
@@ -205,6 +217,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         monkeypatch.setenv("HFT_ZSCORE_MONOTONIC_STRICTNESS", "invalid")  # not in {strict, relaxed, off}
 
         with pytest.raises(SystemExit):
@@ -229,6 +243,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Invalid: clamp high <= clamp low
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_HIGH", "50.0")
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_LOW", "60.0")
@@ -255,6 +271,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Valid: clamp high > clamp low
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_HIGH", "90.0")
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_LOW", "10.0")
@@ -358,6 +376,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Invalid: min > max
         monkeypatch.setenv("HFT_ENTRY_MIN_SKEW_MS", "100")
         monkeypatch.setenv("HFT_ENTRY_MAX_SKEW_MS", "50")
@@ -384,6 +404,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         monkeypatch.setenv("HFT_DYNAMIC_AMOUNT_MIN_USD", "80.0")
         monkeypatch.setenv("HFT_DYNAMIC_AMOUNT_MAX_USD", "50.0")  # min > max
 
@@ -410,6 +432,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Invalid: min > max for UP
         monkeypatch.setenv("HFT_ENTRY_MIN_ASK_UP", "0.5")
         monkeypatch.setenv("HFT_ENTRY_MAX_ASK_UP", "0.3")
@@ -456,6 +480,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         # Valid choices: strict, relaxed, off
         for choice in ("strict", "relaxed", "off"):
             monkeypatch.setenv("HFT_ZSCORE_MONOTONIC_STRICTNESS", choice)
@@ -481,6 +507,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         # Should not raise even though many optional params are unset
         validate_config()
@@ -504,6 +532,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         # Too large
         monkeypatch.setenv("HFT_RSI_PRICE_LEN", "2000")
@@ -538,6 +568,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         # Out of range
         monkeypatch.setenv("HFT_RSI_ENTRY_UP_LOW", "110.0")
@@ -567,6 +599,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
 
         # Exceeds 1.0
         monkeypatch.setenv("HFT_PNL_TP_PERCENT", "1.5")
@@ -597,6 +631,8 @@ class TestConfigValidator:
         monkeypatch.setenv("REGIME_CALM_STALE_MIN_MS", "1200")
         monkeypatch.setenv("REGIME_LOG_MIN_SEC", "120")
         monkeypatch.setenv("REGIME_HYSTERESIS_TICKS", "15")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0")
+        monkeypatch.setenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0")
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_HIGH", "50.0")
         monkeypatch.setenv("HFT_RSI_EXIT_CLAMP_LOW", "60.0")
 

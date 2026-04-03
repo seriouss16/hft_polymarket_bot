@@ -235,9 +235,9 @@ class HFTEngine:
 
         # --- RSI slope ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED") == "1"
-        # Read RSI slope exit thresholds from env with hardcoded defaults for backward compatibility
-        self.rsi_slope_up_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0"))
-        self.rsi_slope_down_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0"))
+        # Read RSI slope exit thresholds from env (mandatory)
+        self.rsi_slope_up_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_UP"))
+        self.rsi_slope_down_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_DOWN"))
         
         # Validate RSI slope exit configuration
         if self.rsi_slope_up_exit >= 0:
@@ -251,13 +251,6 @@ class HFTEngine:
                 f"Invalid RSI slope exit configuration: HFT_RSI_SLOPE_EXIT_DOWN "
                 f"({self.rsi_slope_down_exit}) must be > 0 (positive for DOWN direction exit). "
                 f"Check config/runtime.env"
-            )
-        
-        # Log custom values if they differ from defaults
-        if self.rsi_slope_up_exit != -2.0 or self.rsi_slope_down_exit != 2.0:
-            logging.info(
-                f"RSI slope exit thresholds configured: UP={self.rsi_slope_up_exit} "
-                f"(default -2.0), DOWN={self.rsi_slope_down_exit} (default 2.0)"
             )
         
         self._rsi_tick_history = deque(maxlen=10)

@@ -170,12 +170,12 @@ class ConfigValidator:
         # RSI slope exits (critical: UP < 0, DOWN > 0)
         self._add_float(
             "HFT_RSI_SLOPE_EXIT_UP",
-            required=False,
+            required=True,
             custom_validator=self._validate_slope_up,
         )
         self._add_float(
             "HFT_RSI_SLOPE_EXIT_DOWN",
-            required=False,
+            required=True,
             custom_validator=self._validate_slope_down,
         )
 
@@ -480,20 +480,20 @@ class ConfigValidator:
         self._add_float("HFT_NIGHT_END_UTC_HOUR", min=0, max=23, required=False)
         self._add_float("CLOB_BOOK_HTTP_FALLBACK_INTERVAL_SEC", min=1.0, max=300.0, required=False)
         self._add_float("GAMMA_API_CACHE_TTL_SEC", min=0.0, max=60.0, required=False)
-        self._add_float("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC", required=False)
+        self._add_str_list("LIVE_CLOSE_CHAIN_PROBE_DELAYS_SEC", min_len=1, required=False)
         self._add_float("LIVE_CLOSE_WAIT_PENDING_SEC", min=0.0, required=False)
         self._add_float("LIVE_SELL_GTC_OFFSET_FROM_BID", required=False)
         self._add_float("LIVE_SELL_PLACE_ATTEMPTS", min=1, max=10, required=False)
         self._add_float("LIVE_SELL_FAK_ATTEMPTS", min=1, max=10, required=False)
         self._add_float("LIVE_SELL_PLACE_RETRY_SLEEP_SEC", min=0.0, required=False)
         self._add_float("LIVE_SELL_FAK_RETRY_SLEEP_SEC", min=0.0, required=False)
-        self._add_float("LIVE_SELL_BALANCE_WAIT_DELAYS_SEC", required=False)
+        self._add_str_list("LIVE_SELL_BALANCE_WAIT_DELAYS_SEC", min_len=1, required=False)
         self._add_float("LIVE_CHAIN_EXIT_DUST_SHARES", min=0.0, required=False)
         self._add_float("LIVE_SELL_CHAIN_DUST_SHARES", min=0.0, required=False)
         self._add_float("LIVE_POST_SELL_CHAIN_DELAY_SEC", min=0.0, required=False)
         self._add_float("LIVE_BUY_COLLATERAL_SAFETY", min=0.0, max=1.0, required=False)
         self._add_float("LIVE_BALANCE_MIN_FRAC", min=0.0, max=1.0, required=False)
-        self._add_float("LIVE_BALANCE_CONFIRM_DELAYS_SEC", required=False)
+        self._add_str_list("LIVE_BALANCE_CONFIRM_DELAYS_SEC", min_len=1, required=False)
         self._add_float("LIVE_MAX_BOOK_AGE_SEC", min=0.0, required=False)
         self._add_float("LIVE_INVENTORY_RECONCILE_SEC", min=0.0, required=False)
         self._add_float("LIVE_INVENTORY_RECONCILE_AFTER_CLOSE_SEC", min=0.0, required=False)
