@@ -54,6 +54,7 @@ Polymarket RTDS WS ──────┘
 - **Coinbase** — mid anchor; **Binance** — leading signal (`USE_SMART_FAST` may blend).
 - **PolyRTDS** — Polymarket oracle, typically lags CEX by hundreds of ms to seconds.
 - **Edge** — primary quantity for UP/DOWN decisions.
+- **Skew gate** — `skew_ms` from `FastPriceAggregator.feed_timing` (Coinbase vs Poly receive-time delta). Entries require `HFT_ENTRY_MIN_SKEW_MS ≤ skew_ms ≤ HFT_ENTRY_MAX_SKEW_MS` when the gate is on (`HFT_ENTRY_MAX_SKEW_MS > 0`). Omit `HFT_ENTRY_MIN_SKEW_MS` for no lower bound. `HFTEngine.reload_profile_params` refreshes both bounds after a day/night profile switch.
 
 ## Configuration layering
 

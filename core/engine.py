@@ -110,6 +110,14 @@ def poly_book_outcome_quotes(poly_orderbook: dict) -> tuple[float, float, float,
     return up_bid, up_ask, down_bid, down_ask, up_mid, down_mid
 
 
+def _entry_skew_bounds_from_env() -> tuple[float, float]:
+    """Parse HFT_ENTRY_MIN_SKEW_MS (optional) and HFT_ENTRY_MAX_SKEW_MS for entry skew gate."""
+    raw_min = os.getenv("HFT_ENTRY_MIN_SKEW_MS")
+    lo = float(raw_min) if raw_min not in (None, "") else float("-inf")
+    hi = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS"))
+    return lo, hi
+
+
 class HFTEngine:
     """Signal, risk, and simulated execution for Polymarket latency strategy.
 
@@ -308,7 +316,8 @@ class HFTEngine:
 
         # --- Latency guard ---
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
-        self.entry_max_skew_ms = float(os.getenv("HFT_ENTRY_MAX_SKEW_MS"))
+        self.entry_min_skew_ms, self.entry_max_skew_ms = _entry_skew_bounds_from_env()
+        self._last_skew_gate_skew_ms = 0.0
         self.entry_min_ask_up_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_UP"))
         self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP"))
         self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN"))
@@ -478,7 +487,7 @@ class HFTEngine:
         logging.info(
             "FilterDiag params: profile=%s spread_max=%.4f liq_spread_max=%.4f spread_gate_up_relax=%.2f "
             "max_entry_ask=%.4f "
-            "ask_up=[%.3f,%.3f] ask_down=[%.3f,%.3f] max_latency_ms=%.0f max_skew_ms=%.0f "
+            "ask_up=[%.3f,%.3f] ask_down=[%.3f,%.3f] max_latency_ms=%.0f skew_ms_gate=[%s,%.0f] "
             "trend_flip_min_age=%.2f strong_jump_min_age=%s no_entry_guards=%s cooldown=%.2fs "
             "post_close_reentry=%.2fs min_hold=%.2fs.",
             self.get_active_profile(),
@@ -491,6 +500,9 @@ class HFTEngine:
             self.entry_min_ask_down_cap,
             self.entry_max_ask_down_cap,
             self.entry_max_latency_ms,
+            "-inf"
+            if self.entry_min_skew_ms == float("-inf")
+            else f"{self.entry_min_skew_ms:.0f}",
             self.entry_max_skew_ms,
             self.trend_flip_min_age_sec,
             os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC"),
@@ -815,6 +827,7 @@ class HFTEngine:
         self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
         self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
+        self.entry_min_skew_ms, self.entry_max_skew_ms = _entry_skew_bounds_from_env()
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
@@ -1009,8 +1022,16 @@ class HFTEngine:
         return entry_latency_allows_entry(self.entry_max_latency_ms, latency_ms)
 
     def entry_skew_allows_entry(self, skew_ms: float) -> bool:
-        """Block entries when cross-feed skew is larger than the limit (0 disables the gate)."""
-        return entry_skew_allows_entry(self.entry_max_skew_ms, skew_ms)
+        """Block entries when ``skew_ms`` is outside ``[entry_min_skew_ms, entry_max_skew_ms]``.
+
+        Gate off when ``entry_max_skew_ms <= 0``. Unset ``HFT_ENTRY_MIN_SKEW_MS`` → no lower bound.
+        """
+        ok = entry_skew_allows_entry(
+            self.entry_min_skew_ms, self.entry_max_skew_ms, skew_ms
+        )
+        if not ok:
+            self._last_skew_gate_skew_ms = float(skew_ms)
+        return ok
 
     def entry_edge_jump_ok(self, edge_now: float, edge_speed: float = 0.0) -> bool:
         """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly).
@@ -1356,15 +1377,12 @@ class HFTEngine:
                 self._rsi_calculator.reset(period=self.rsi_period)
                 for price in px:
                     self._rsi_calculator.update(price)
-            raw_rsi = float(self._rsi_calculator.get_last_rsi())
-            self._last_rsi_raw = raw_rsi
+                self._last_rsi_raw = self._rsi_calculator.get_last_rsi()
+                self._indicators_dirty = False
         else:
             raw_rsi = float(compute_rsi(px, period=self.rsi_period))
             self._last_rsi_raw = raw_rsi
-
-        if self.use_incremental_indicators:
-            self._indicators_dirty = False
-
+        
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
         _ml, _ms, _mh = compute_macd_last(
             px,

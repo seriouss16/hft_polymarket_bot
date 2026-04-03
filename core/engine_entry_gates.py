@@ -65,15 +65,22 @@ def entry_latency_allows_entry(entry_max_latency_ms: float, latency_ms: float) -
     return float(latency_ms) <= entry_max_latency_ms
 
 
-def entry_skew_allows_entry(entry_max_skew_ms: float, skew_ms: float) -> bool:
-    """Block entries only when positive skew exceeds the limit (0 disables the gate).
+def entry_skew_allows_entry(
+    entry_min_skew_ms: float,
+    entry_max_skew_ms: float,
+    skew_ms: float,
+) -> bool:
+    """Require ``entry_min_skew_ms <= skew_ms <= entry_max_skew_ms`` when the gate is on.
 
-    ``skew_ms`` is (coinbase_recv - poly_recv) in ms. Negative skew means Poly was
-    received after Coinbase (favorable for timing); it is never blocked by this gate.
+    ``skew_ms`` is (coinbase_recv - poly_recv) in ms (see aggregator ``feed_timing``).
+
+    Legacy off-switch: if ``entry_max_skew_ms <= 0``, the gate is disabled (always True).
+    Omit ``HFT_ENTRY_MIN_SKEW_MS`` in config so the engine uses ``-inf`` (no lower bound).
     """
     if entry_max_skew_ms <= 0.0:
         return True
-    return float(skew_ms) <= entry_max_skew_ms
+    s = float(skew_ms)
+    return float(entry_min_skew_ms) <= s <= float(entry_max_skew_ms)
 
 
 def entry_edge_jump_ok(
