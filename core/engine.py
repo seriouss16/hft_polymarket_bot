@@ -1380,9 +1380,9 @@ class HFTEngine:
                 self._last_rsi_raw = self._rsi_calculator.get_last_rsi()
                 self._indicators_dirty = False
         else:
-            raw_rsi = float(compute_rsi(px, period=self.rsi_period))
-            self._last_rsi_raw = raw_rsi
-        
+            self._last_rsi_raw = float(compute_rsi(px, period=self.rsi_period))
+        raw_rsi = float(self._last_rsi_raw)
+
         self._last_ma_fast = float(compute_ema_last(px, self.reaction_ma_period))
         _ml, _ms, _mh = compute_macd_last(
             px,

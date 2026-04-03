@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from utils.env_merge import strip_env_inline_comment
+
 NIGHT_START_UTC: Final[int] = int(os.getenv("HFT_NIGHT_START_UTC_HOUR"))
 NIGHT_END_UTC: Final[int] = int(os.getenv("HFT_NIGHT_END_UTC_HOUR"))
 
@@ -44,7 +46,7 @@ _RUNTIME_DAY_ENV: Final[Path] = _CONFIG_DIR / "runtime_day.env"
 
 
 def _parse_profile_env_file(path: Path) -> dict[str, str]:
-    """Parse KEY=VALUE lines into a dict (same rules as bot._load_env_file)."""
+    """Parse KEY=VALUE lines into a dict (same rules as :func:`utils.env_merge.merge_env_file`)."""
     if not path.is_file():
         raise FileNotFoundError(f"Session profile file missing: {path}")
     out: dict[str, str] = {}
@@ -57,6 +59,7 @@ def _parse_profile_env_file(path: Path) -> dict[str, str]:
             continue
         key, _, val = line.partition("=")
         key = key.strip()
+        val = strip_env_inline_comment(val)
         val = val.strip().strip('"').strip("'")
         if not key:
             continue
