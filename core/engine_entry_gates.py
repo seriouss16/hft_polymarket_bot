@@ -66,10 +66,14 @@ def entry_latency_allows_entry(entry_max_latency_ms: float, latency_ms: float) -
 
 
 def entry_skew_allows_entry(entry_max_skew_ms: float, skew_ms: float) -> bool:
-    """Block entries when cross-feed skew is larger than the limit (0 disables the gate)."""
+    """Block entries only when positive skew exceeds the limit (0 disables the gate).
+
+    ``skew_ms`` is (coinbase_recv - poly_recv) in ms. Negative skew means Poly was
+    received after Coinbase (favorable for timing); it is never blocked by this gate.
+    """
     if entry_max_skew_ms <= 0.0:
         return True
-    return abs(float(skew_ms)) <= entry_max_skew_ms
+    return float(skew_ms) <= entry_max_skew_ms
 
 
 def entry_edge_jump_ok(
