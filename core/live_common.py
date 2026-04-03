@@ -402,3 +402,39 @@ def is_maker_sell_price(price: float, best_bid: float) -> bool:
 def is_taker_sell_price(price: float, best_bid: float) -> bool:
     """True if price is below best_bid (aggressive cross)."""
     return float(price) < float(best_bid)
+
+
+def is_market_data_fresh(token_id: str, market_cache: object | None) -> bool:
+    """Return True if market data for token_id is fresh in the cache."""
+    if market_cache is None:
+        return False
+    # ClobMarketBookCache.is_fresh(token_id)
+    return bool(getattr(market_cache, "is_fresh", lambda _: False)(token_id))
+
+
+def is_user_data_fresh(user_cache: object | None) -> bool:
+    """Return True if user data (orders/fills) is fresh in the cache."""
+    if user_cache is None:
+        return False
+    # ClobUserOrderCache.is_fresh()
+    return bool(getattr(user_cache, "is_fresh", lambda: False)())
+
+
+def is_fresh_for_trading(
+    token_id: str,
+    market_cache: object | None,
+    user_cache: object | None,
+    require_both: bool = False,
+) -> bool:
+    """Return True if data is fresh enough to allow trading actions.
+
+    If require_both is True, both market and user data must be fresh.
+    Otherwise, only market data freshness is strictly required (user data
+    freshness is preferred but not always blocking for all actions).
+    """
+    m_fresh = is_market_data_fresh(token_id, market_cache)
+    u_fresh = is_user_data_fresh(user_cache)
+
+    if require_both:
+        return m_fresh and u_fresh
+    return m_fresh
