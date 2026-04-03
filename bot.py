@@ -7,8 +7,10 @@ import os
 import threading
 
 from bot_runtime import install_uvloop_policy, load_runtime_env
+from utils.config_validation import validate_config
 
 load_runtime_env()
+validate_config()
 install_uvloop_policy()
 
 os.environ["PYTHONUNBUFFERED"] = "1"
