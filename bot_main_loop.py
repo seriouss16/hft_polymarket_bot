@@ -289,6 +289,10 @@ async def main():
     LIVE_MODE = os.getenv("LIVE_MODE", "0") == "1"
     validate_required_config(LIVE_MODE)
 
+    # Centralized validation of all configuration parameters
+    from utils.config_validation import validate_config
+    validate_config()
+
     # Apply day/night session profile before any strategy objects read env vars.
     apply_profile(force=True)
 

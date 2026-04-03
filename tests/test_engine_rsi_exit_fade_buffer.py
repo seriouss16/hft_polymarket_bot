@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
 from types import SimpleNamespace
 
-from core.engine_rsi_exit import rsi_range_exit_triggered
+from core.engine_rsi_exit import rsi_range_exit_triggered, exit_rsi
 
 
 def _eng(**kwargs) -> SimpleNamespace:
@@ -47,3 +48,30 @@ def test_up_fade_requires_lower_rsi_when_buffer_positive():
     assert rsi_range_exit_triggered(e0, "UP", 24.0, 0.5, hold_sec=1.0) is True
     assert rsi_range_exit_triggered(e8, "UP", 24.0, 0.5, hold_sec=1.0) is False
     assert rsi_range_exit_triggered(e8, "UP", 16.0, 0.5, hold_sec=1.0) is True
+
+
+def test_exit_rsi_uses_np_clip():
+    """exit_rsi should clamp RSI between lo and hi using np.clip."""
+    # Normal clamping
+    assert exit_rsi(50.0, 99.0, 1.0) == 50.0
+    assert exit_rsi(0.0, 99.0, 1.0) == 1.0
+    assert exit_rsi(150.0, 99.0, 1.0) == 99.0
+    assert exit_rsi(-10.0, 99.0, 1.0) == 1.0
+    
+    # Edge cases
+    assert exit_rsi(1.0, 99.0, 1.0) == 1.0  # exactly at lower bound
+    assert exit_rsi(99.0, 99.0, 1.0) == 99.0  # exactly at upper bound
+
+
+def test_exit_rsi_validation_raises_on_invalid_config():
+    """exit_rsi should raise ValueError when high <= low."""
+    # Equal values
+    with pytest.raises(ValueError, match="Invalid RSI exit clamp configuration"):
+        exit_rsi(50.0, 50.0, 50.0)
+    
+    # high < low
+    with pytest.raises(ValueError, match="Invalid RSI exit clamp configuration"):
+        exit_rsi(50.0, 30.0, 70.0)
+    
+    # Negative values but high > low should work
+    assert exit_rsi(50.0, 10.0, -10.0) == 10.0

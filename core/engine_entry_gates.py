@@ -210,6 +210,7 @@ def entry_zscore_trend_ok(
     entry_zscore_trend_enabled: bool,
     entry_zscore_strict_ticks: int,
     entry_zscore_bypass_abs_speed: float,
+    monotonic_strictness: str = "strict",
 ) -> bool:
     """Require z-score to move monotonically with the intended side for several ticks."""
     if (
@@ -219,50 +220,57 @@ def entry_zscore_trend_ok(
         return True
     if not entry_zscore_trend_enabled:
         return True
-    k = max(1, entry_zscore_strict_ticks)
-    if len(zscore_samples) < 2:
-        return True
-    zs = list(zscore_samples)
-    if k == 1:
-        if trend_dir == "UP":
-            return zs[-1] > zs[-2]
-        if trend_dir == "DOWN":
-            return zs[-1] < zs[-2]
-        return True
-    recent = zs[-(k + 1) :]
-    if len(recent) < 2:
-        return True
-    if trend_dir == "UP":
-        return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
-    if trend_dir == "DOWN":
-        return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
-    return True
+    return zscore_monotonic_for_direction(
+        zscore_samples, entry_zscore_strict_ticks, trend_dir, monotonic_strictness
+    )
 
 
 def zscore_monotonic_for_direction(
     zscore_samples: deque,
     entry_zscore_strict_ticks: int,
     trend_dir: str,
+    monotonic_strictness: str = "strict",
 ) -> bool:
-    """Return True if recent z-score ticks are strictly monotone in the trade direction."""
+    """Return True if recent z-score ticks are monotone in the trade direction.
+
+    Parameters:
+        monotonic_strictness: "strict" (all ticks must be monotonic), "relaxed" (allow 1 violation), "off" (skip check)
+    """
+    if monotonic_strictness == "off":
+        return True
+
     k = max(1, entry_zscore_strict_ticks)
     if len(zscore_samples) < 2:
         return False
     zs = list(zscore_samples)
+
     if k == 1:
         if trend_dir == "UP":
             return zs[-1] > zs[-2]
         if trend_dir == "DOWN":
             return zs[-1] < zs[-2]
         return False
+
     recent = zs[-(k + 1) :]
     if len(recent) < 2:
         return False
+
     if trend_dir == "UP":
-        return all(recent[i] < recent[i + 1] for i in range(len(recent) - 1))
-    if trend_dir == "DOWN":
-        return all(recent[i] > recent[i + 1] for i in range(len(recent) - 1))
-    return False
+        comparisons = [recent[i] < recent[i + 1] for i in range(len(recent) - 1)]
+    elif trend_dir == "DOWN":
+        comparisons = [recent[i] > recent[i + 1] for i in range(len(recent) - 1)]
+    else:
+        return False
+
+    if monotonic_strictness == "strict":
+        return all(comparisons)
+    elif monotonic_strictness == "relaxed":
+        # Allow at most 1 violation in the sequence
+        violations = sum(1 for comp in comparisons if not comp)
+        return violations <= 1
+    else:
+        # Unknown strictness, default to strict
+        return all(comparisons)
 
 
 def low_speed_edge_multiplier(speed: float, entry_low_speed_abs: float, entry_low_speed_edge_mult: float) -> float:

@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 from core.engine_entry_gates import low_speed_edge_multiplier, zscore_monotonic_for_direction
+import logging
 from core.engine_trend import dynamic_edge_threshold
 
 
@@ -40,9 +41,23 @@ def entry_momentum_alt_signal(
     sell_edge_dyn *= lsm
     if abs(edge) < eng.noise_edge * 2.0:
         return None
+
+    strictness = getattr(eng, 'zscore_monotonic_strictness', 'strict')
     if not zscore_monotonic_for_direction(
-        eng._zscore_samples, eng.entry_zscore_strict_ticks, trend
+        eng._zscore_samples, eng.entry_zscore_strict_ticks, trend, strictness
     ):
+        # Debug logging when signal is blocked due to monotonicity in relaxed mode
+        if strictness == 'relaxed' and logging.getLogger().isEnabledFor(logging.DEBUG):
+            zs = list(eng._zscore_samples)
+            recent = zs[-(eng.entry_zscore_strict_ticks + 1):] if eng.entry_zscore_strict_ticks > 1 else [zs[-2], zs[-1]]
+            if trend == "UP":
+                violations = sum(1 for i in range(len(recent)-1) if not (recent[i] < recent[i+1]))
+            else:
+                violations = sum(1 for i in range(len(recent)-1) if not (recent[i] > recent[i+1]))
+            logging.debug(
+                "Entry blocked: z-score monotonicity (relaxed mode, %d violations, k=%d, dir=%s)",
+                violations, eng.entry_zscore_strict_ticks, trend
+            )
         return None
     if not eng.entry_speed_acceleration_ok(trend, speed):
         return None

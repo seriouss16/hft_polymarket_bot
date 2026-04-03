@@ -195,6 +195,7 @@ class HFTEngine:
         self.use_incremental_indicators = os.getenv("HFT_USE_INCREMENTAL_INDICATORS", "1") == "1"
         self._rsi_calculator = IncrementalRSI(period=self.rsi_period) if self.use_incremental_indicators else None
         self._adx_calculator = IncrementalADX(period=self.adx_period) if self.use_incremental_indicators else None
+        self._adx_last_processed_index = -1  # Tracks last index in px_adx that was processed
         self._indicators_dirty = True  # Set when price history changes, cleared after update
         self.rsi_entry_up_low = float(
             os.getenv("HFT_RSI_ENTRY_UP_LOW") or os.getenv("HFT_RSI_ENTRY_YES_LOW")
@@ -223,11 +224,42 @@ class HFTEngine:
         self.rsi_range_exit_fade_buffer = float(os.getenv("HFT_RSI_RANGE_EXIT_FADE_BUFFER", "0") or 0.0)
         self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
         self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
+        
+        # Validate RSI exit clamp configuration
+        if self.rsi_exit_clamp_high <= self.rsi_exit_clamp_low:
+            raise ValueError(
+                f"Invalid RSI exit clamp configuration: HFT_RSI_EXIT_CLAMP_HIGH "
+                f"({self.rsi_exit_clamp_high}) must be > HFT_RSI_EXIT_CLAMP_LOW "
+                f"({self.rsi_exit_clamp_low}). Check config/runtime.env"
+            )
 
         # --- RSI slope ---
         self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED") == "1"
-        self.rsi_slope_up_exit = -2.0
-        self.rsi_slope_down_exit = 2.0
+        # Read RSI slope exit thresholds from env with hardcoded defaults for backward compatibility
+        self.rsi_slope_up_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_UP", "-2.0"))
+        self.rsi_slope_down_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_DOWN", "2.0"))
+        
+        # Validate RSI slope exit configuration
+        if self.rsi_slope_up_exit >= 0:
+            raise ValueError(
+                f"Invalid RSI slope exit configuration: HFT_RSI_SLOPE_EXIT_UP "
+                f"({self.rsi_slope_up_exit}) must be < 0 (negative for UP direction exit). "
+                f"Check config/runtime.env"
+            )
+        if self.rsi_slope_down_exit <= 0:
+            raise ValueError(
+                f"Invalid RSI slope exit configuration: HFT_RSI_SLOPE_EXIT_DOWN "
+                f"({self.rsi_slope_down_exit}) must be > 0 (positive for DOWN direction exit). "
+                f"Check config/runtime.env"
+            )
+        
+        # Log custom values if they differ from defaults
+        if self.rsi_slope_up_exit != -2.0 or self.rsi_slope_down_exit != 2.0:
+            logging.info(
+                f"RSI slope exit thresholds configured: UP={self.rsi_slope_up_exit} "
+                f"(default -2.0), DOWN={self.rsi_slope_down_exit} (default 2.0)"
+            )
+        
         self._rsi_tick_history = deque(maxlen=10)
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
@@ -342,6 +374,7 @@ class HFTEngine:
         # --- Z-score (statistical entry) ---
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
+        self.zscore_monotonic_strictness = os.getenv("HFT_ZSCORE_MONOTONIC_STRICTNESS", "strict")
 
         # --- Anti-spoof: reject one-tick CEX spikes vs lagging Poly oracle. ---
         self.entry_max_edge_jump_pts = float(os.getenv("HFT_ENTRY_MAX_EDGE_JUMP_PTS"))
@@ -787,9 +820,13 @@ class HFTEngine:
 
         Fade exits (RSI past band against the position) respect ``rsi_range_exit_min_hold_sec``
         to avoid immediate churn when RSI spikes on a short lookback. TP-at-band exits are unchanged.
+        
+        Uses dynamic RSI bands computed from price volatility for adaptive thresholds.
         """
         return rsi_range_exit_triggered(
-            self, position_side, current_rsi, unrealized, hold_sec
+            self, position_side, current_rsi, unrealized, hold_sec,
+            dynamic_upper=self._last_rsi_upper,
+            dynamic_lower=self._last_rsi_lower,
         )
 
     def can_trade(self):
@@ -830,6 +867,7 @@ class HFTEngine:
         self.entry_min_skew_ms, self.entry_max_skew_ms = _entry_skew_bounds_from_env()
         self.entry_zscore_trend_enabled = os.getenv("HFT_ENTRY_ZSCORE_TREND_ENABLED") == "1"
         self.entry_zscore_strict_ticks = int(os.getenv("HFT_ENTRY_ZSCORE_STRICT_TICKS"))
+        self.zscore_monotonic_strictness = os.getenv("HFT_ZSCORE_MONOTONIC_STRICTNESS", "strict")
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
@@ -896,6 +934,7 @@ class HFTEngine:
             self._rsi_calculator.reset(period=self.rsi_period)
         if self._adx_calculator:
             self._adx_calculator.reset(period=self.adx_period)
+        self._adx_last_processed_index = -1  # Reset ADX incremental tracking
         self.apply_profile("latency")
 
     def _position_notional_usd(self):
@@ -1119,12 +1158,16 @@ class HFTEngine:
             entry_zscore_trend_enabled=self.entry_zscore_trend_enabled,
             entry_zscore_strict_ticks=self.entry_zscore_strict_ticks,
             entry_zscore_bypass_abs_speed=self.entry_zscore_bypass_abs_speed,
+            monotonic_strictness=self.zscore_monotonic_strictness,
         )
 
     def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
-        """Return True if recent z-score ticks are strictly monotone in the trade direction."""
+        """Return True if recent z-score ticks are monotone in the trade direction."""
         return zscore_monotonic_for_direction(
-            self._zscore_samples, self.entry_zscore_strict_ticks, trend_dir
+            self._zscore_samples,
+            self.entry_zscore_strict_ticks,
+            trend_dir,
+            self.zscore_monotonic_strictness,
         )
 
     def _imbalance_allows_entry(self, signal: str, imb_up: float, imb_down: float) -> bool:
@@ -1337,22 +1380,34 @@ class HFTEngine:
         # Incremental ADX calculation (or cached if not dirty)
         if self.use_incremental_indicators and self._adx_calculator:
             if self._indicators_dirty:
-                # Reset calculator
-                self._adx_calculator.reset(period=self.adx_period)
-                # Maintain rolling window for synthetic OHLC (window = adx_period)
-                adx_window = deque(maxlen=self.adx_period)
-                # Process all prices in the window
-                for i, price in enumerate(px_adx):
-                    adx_window.append(price)
-                    if i == 0:
-                        # First bar - just initialize with single price
-                        high_i = low_i = close_i = price
-                    else:
-                        # Synthetic bar: high/low over the rolling window, close = current price
-                        high_i = max(adx_window)
-                        low_i = min(adx_window)
-                        close_i = price
-                    self._adx_calculator.update(high_i, low_i, close_i)
+                # Incremental update: only process new prices since last tick
+                current_len = len(px_adx)
+                last_processed = self._adx_last_processed_index
+                
+                # Check if we need to reset due to history shrink (e.g., market reset)
+                if current_len < last_processed:
+                    logging.info(f"ADX: price history shrank from {last_processed} to {current_len}, resetting calculator")
+                    self._adx_calculator.reset(period=self.adx_period)
+                    self._adx_last_processed_index = -1
+                    last_processed = -1
+                
+                # Process only new prices (truly incremental)
+                if current_len > last_processed:
+                    new_prices_count = 0
+                    for i in range(last_processed + 1, current_len):
+                        # Compute synthetic OHLC for this tick using rolling window
+                        start = max(0, i - self.adx_period + 1)
+                        window = px_adx[start:i+1]
+                        high_i = float(np.max(window))
+                        low_i = float(np.min(window))
+                        close_i = float(px_adx[i])
+                        self._adx_calculator.update(high_i, low_i, close_i)
+                        new_prices_count += 1
+                    
+                    self._adx_last_processed_index = current_len - 1
+                    if new_prices_count > 0:
+                        logging.debug(f"ADX incremental: processed {new_prices_count} new prices, total index={self._adx_last_processed_index}")
+                
                 self._last_adx = self._adx_calculator.get_last_adx()
                 # Do not clear _indicators_dirty here — incremental RSI below must run too.
         else:
