@@ -1313,6 +1313,17 @@ class LiveExecutionEngine:
 
             # "live" or "unknown" — order still open, continue polling.
 
+            # Freshness check before reprice/cancel
+            if self.stale_block_actions and not is_fresh_for_trading(
+                tracked.token_id, self._market_book_cache, self._user_order_cache
+            ):
+                logging.warning(
+                    "[STALE_ORDERBOOK] [POLL] Blocking reprice/cancel for %s: data not fresh",
+                    tracked.token_id[:8]
+                )
+                await asyncio.sleep(1.0)
+                continue
+
             if not tracked.is_stale:
                 continue
 
@@ -1517,6 +1528,15 @@ class LiveExecutionEngine:
             "🚨 EMERGENCY EXIT: %s %.2f token=%s (min=%.0f filled=%.2f)",
             tracked.side, remaining, tracked.token_id[:20], poly_min, tracked.filled_size,
         )
+
+        # Freshness check before emergency exit
+        if self.stale_block_actions and not is_fresh_for_trading(
+            tracked.token_id, self._market_book_cache, self._user_order_cache
+        ):
+            logging.warning(
+                "[STALE_ORDERBOOK] [EMERGENCY] Proceeding with emergency exit for %s despite stale data (safety first)",
+                tracked.token_id[:8]
+            )
         
         # Diagnostic: track intended vs actual exit price for slippage analysis
         intended_price = tracked.price if tracked.price > 0 else 0.0
@@ -1628,6 +1648,15 @@ class LiveExecutionEngine:
 
         if size <= 0:
             return
+
+        # Freshness check before aggressive exit
+        if self.stale_block_actions and not is_fresh_for_trading(
+            token_id, self._market_book_cache, self._user_order_cache
+        ):
+            logging.warning(
+                "[STALE_ORDERBOOK] [EMERGENCY_EXIT] Proceeding with aggressive exit for %s despite stale data",
+                token_id[:8]
+            )
 
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
         _xb = live_emergency_cross_bump()
@@ -1986,6 +2015,16 @@ class LiveExecutionEngine:
         if size <= 0:
             return (0.0, 0.0)
 
+        # Freshness check before placing SELL
+        if self.stale_block_actions and not is_fresh_for_trading(
+            token_id, self._market_book_cache, self._user_order_cache
+        ):
+            logging.warning(
+                "[STALE_ORDERBOOK] [SELL] Blocking close_position for %s: data not fresh",
+                token_id[:8]
+            )
+            return (0.0, 0.0)
+
         if token_id in self._confirmed_buys:
             cb = float(self._confirmed_buys[token_id])
             if cb > 0.0 and abs(size - cb) > 1e-6:
@@ -2200,6 +2239,17 @@ class LiveExecutionEngine:
         _SKIP = (0.0, 0.0)
         self._last_buy_skip_reason = None
         self._entry_stats["attempts"] += 1
+
+        # Freshness check before placing BUY
+        if self.stale_block_actions and not is_fresh_for_trading(
+            token_id, self._market_book_cache, self._user_order_cache
+        ):
+            logging.warning(
+                "[STALE_ORDERBOOK] [BUY] Blocking execute for %s: data not fresh",
+                token_id[:8]
+            )
+            return _SKIP
+
         if (
             best_bid is not None
             and best_ask is not None
