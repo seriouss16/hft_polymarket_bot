@@ -492,7 +492,7 @@ class LiveExecutionEngine:
                         # unless WS_PRIMARY=0, then try HTTP
                         if ws_primary:
                             logging.debug(
-                                "[WS] Book cache stale for %s (age>%.1fs), returning cached data",
+                                "[STALE_ORDERBOOK] [WS] Book cache stale for %s (age>%.1fs), returning cached data",
                                 token_id[:8], cache._max_stale_sec
                             )
                             return snap
@@ -501,6 +501,7 @@ class LiveExecutionEngine:
         
         # 2. HTTP fallback only if no WS or WS failed AND we need fresh data
         if self.client is None:
+            logging.warning("[WS_RECONNECT] WS cache unavailable, falling back to HTTP")
             return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
         
         # Try SDK once, then HTTP
@@ -588,7 +589,7 @@ class LiveExecutionEngine:
         if order_id not in self._active_orders:
             # Order not tracked yet (race condition) — ignore
             logging.debug(
-                "[WS] Order event for untracked order: id=%s status=%s filled=%.2f "
+                "[OUT_OF_ORDER_EVENT] [WS] Order event for untracked order: id=%s status=%s filled=%.2f "
                 "(total_ws_events=%d http_fallbacks=%d)",
                 order_id[:20], status, filled,
                 self._ws_metrics["ws_events_received"],
@@ -626,7 +627,7 @@ class LiveExecutionEngine:
             tracked.status = OrderStatus.PARTIAL
             tracked.filled_size = min(tracked.size, filled)
             logging.info(
-                "⚡ [WS] Order partial fill via event: id=%s filled=%.2f / %.2f "
+                "[PARTIAL_FILL] ⚡ [WS] Order partial fill via event: id=%s filled=%.2f / %.2f "
                 "| WS events=%d HTTP fallbacks=%d",
                 order_id[:20], filled, tracked.size,
                 self._ws_metrics["ws_events_received"],
@@ -963,7 +964,7 @@ class LiveExecutionEngine:
             if rem <= 1e-6:
                 tracked.status = OrderStatus.FILLED
                 logging.info(
-                    "✅ [LIVE] Fill synced after cancel: id=%s %s filled=%.4f @ %.4f",
+                    "[REST_RECONCILE] ✅ [LIVE] Fill synced after cancel: id=%s %s filled=%.4f @ %.4f",
                     cancelled_order_id[:20],
                     tracked.side,
                     tracked.filled_size,
@@ -1299,7 +1300,7 @@ class LiveExecutionEngine:
                 tracked.filled_size = clob_filled
                 tracked.status = OrderStatus.PARTIAL
                 logging.info(
-                    "⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f "
+                    "[PARTIAL_FILL] ⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f "
                     "(WS events=%d HTTP fallbacks=%d)",
                     tracked.order_id[:20], clob_filled, tracked.size, tracked.remaining,
                     self._ws_metrics["ws_events_received"],
@@ -1843,7 +1844,7 @@ class LiveExecutionEngine:
             return 0.0
         self._confirmed_buys[token_id] = best
         logging.info(
-            "[LIVE] probe_chain_shares_for_close: token=%s → %.4f sh (synced _confirmed_buys).",
+            "[REST_RECONCILE] [LIVE] probe_chain_shares_for_close: token=%s → %.4f sh (synced _confirmed_buys).",
             token_id[:20],
             best,
         )
@@ -2221,7 +2222,7 @@ class LiveExecutionEngine:
         if spread <= 0 or spread > self.max_spread:
             self._entry_stats["skip_spread"] += 1
             logging.warning(
-                "⚠️ Bad spread %.4f (bid=%.4f ask=%.4f max=%.4f), skip signal %s.",
+                "[SPREAD_TOO_WIDE] ⚠️ Bad spread %.4f (bid=%.4f ask=%.4f max=%.4f), skip signal %s.",
                 spread, best_bid, best_ask, self.max_spread, signal,
             )
             self._log_entry_stats_if_due()
