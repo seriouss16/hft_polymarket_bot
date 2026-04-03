@@ -48,6 +48,7 @@ from core.live_common import (
     live_buy_reprice_tick,
     live_emergency_buy_bump,
     live_emergency_cross_bump,
+    is_fresh_for_trading,
     live_sell_reprice_tick,
 )
 
@@ -93,6 +94,7 @@ class LiveExecutionEngine:
         self.min_order_size = min_order_size
         self.max_spread = max_spread
         self.max_entry_ask = req_float("HFT_MAX_ENTRY_ASK")
+        self.stale_block_actions = os.getenv("LIVE_STALE_BLOCK_ACTIONS", "1") == "1"
         self.skip_stats_log_sec = req_float("HFT_LIVE_SKIP_STATS_LOG_SEC")
         self._last_skip_stats_log_ts = time.time()
         self._entry_stats: dict[str, int] = {
