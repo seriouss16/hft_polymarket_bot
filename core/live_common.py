@@ -127,12 +127,48 @@ def _collateral_usd_from_balance_allowance_response(resp: object) -> float | Non
 class OrderStatus(str, Enum):
     """Lifecycle states for a tracked live order."""
 
+    IDLE = "idle"
+    PLACING = "placing"
     PENDING = "pending"
     FILLED = "filled"
     PARTIAL = "partial"
     STALE = "stale"
     CANCELLED = "cancelled"
     FAILED = "failed"
+
+
+@dataclass(slots=True, frozen=True)
+class WsOrderEvent:
+    """Event from user WebSocket channel."""
+    order_id: str
+    status: str
+    filled: float
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True, frozen=True)
+class WsMarketEvent:
+    """Event from market WebSocket channel."""
+    token_id: str
+    best_bid: float
+    best_ask: float
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True, frozen=True)
+class RestResponseEvent:
+    """Event from REST API response (e.g. order placement)."""
+    order_id: str | None
+    success: bool
+    status: str | None = None
+    filled: float = 0.0
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass(slots=True, frozen=True)
+class TimerEvent:
+    """Periodic timer event for stale checks and repricing."""
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass(slots=True)
