@@ -59,7 +59,7 @@ Polymarket RTDS WS ──────┘
 
 ## Configuration layering
 
-`bot_runtime.load_runtime_env()` merges (weakest → strongest): `config/runtime.env`, `config/runtime_live.env` (`LIVE_*` and related CLOB execution defaults), day/night session profile (`runtime_day.env` / `runtime_night.env`), `config/sim_slippage.env`, then root `.env`. `apply_sim_live_unify()` may fill `LIVE_ORDER_SIZE` / `LIVE_MAX_SPREAD` from `HFT_*` when unset.
+`bot_runtime.load_runtime_env()` merges (weakest → strongest): `config/runtime.env`, `config/runtime_live.env` (`LIVE_*` and related CLOB execution defaults), day/night session profile (`runtime_day.env` / `runtime_night.env` — only keys listed there override; omit keys identical to `runtime.env` to avoid drift), `config/sim_slippage.env`, then root `.env`. `apply_sim_live_unify()` may fill `LIVE_ORDER_SIZE` / `LIVE_MAX_SPREAD` from `HFT_*` when unset.
 
 Пример полного разбора одного прогона (effective env, `Fast:` pulse, FilterDiag, отчёты): [docs/log_decode_bot_020426_083433.md](log_decode_bot_020426_083433.md).
 
