@@ -21,6 +21,7 @@ Trading bot for short Bitcoin Up/Down binary markets on [Polymarket](https://pol
 │                         HFTEngine
 │                              │
 │              PnLTracker ◄────┴────► LiveExecutionEngine (LIVE_MODE=1)
+│                                     (Event-driven FSM + WS-first)
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -31,7 +32,7 @@ Trading bot for short Bitcoin Up/Down binary markets on [Polymarket](https://pol
 | `bot.py`, `bot_main_loop.py` | Entry point, asyncio loop, wiring |
 | `core/engine.py` | Signals, entry/exit, trailing TP/SL |
 | `core/executor.py` | PnL accounting, regime filter, sim vs live |
-| `core/live_engine.py` | Real CLOB orders, reprice, emergency exit |
+| `core/live_engine.py` | Real CLOB orders, Event-driven FSM, reprice, emergency exit |
 | `core/risk_engine.py` | Drawdown, size limits, loss cooldown |
 | `core/selector.py` | Active 5-minute BTC Up/Down via Gamma API |
 | `core/strategy_hub.py` | Strategy registration, tick routing |
@@ -65,3 +66,19 @@ Polymarket RTDS WS ──────┘
 ## Repository history
 
 Extracted from monorepo `prjBJ_arb_polymarket` with `git filter-repo --subdirectory-filter hft_bot`: root is the former `hft_bot/` tree; history is preserved for commits touching that path. Tree mapping: monorepo `bd7ac4f8ee6005bf0d7f54392958cbd5020c5565` (`hft_bot/`) ≈ this repo `3638c01089b6ecdca2377c8647e6079c40e75e4f` (root).
+
+## Live Execution FSM
+
+The `LiveExecutionEngine` uses a strictly sequential, event-driven Finite State Machine (FSM) to manage order lifecycles. All events (WebSocket, REST responses, Timers) are processed through a unified `asyncio.Queue` by a single worker task to eliminate race conditions.
+
+### States
+- `IDLE`: No active order.
+- `PLACING`: Order submitted to CLOB, waiting for acknowledgment.
+- `OPEN`: Order resting on the book.
+- `PARTIAL`: Order partially filled.
+- `CANCELING`: Cancellation requested, waiting for confirmation.
+- `FILLED`: Order completely filled.
+- `STALE`: Order exceeded stale threshold, awaiting reprice or emergency exit.
+
+### Freshness Guards
+Before any `place`, `reprice`, or `cancel` action, the engine verifies market data freshness via `is_fresh_for_trading()`. If data is older than the profile-specific threshold (e.g., 30ms for DAY), the action is blocked with a `[STALE_ORDERBOOK]` log entry.
