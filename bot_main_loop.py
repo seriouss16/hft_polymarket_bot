@@ -651,7 +651,6 @@ async def main():
     forecast = 0.0
     last_slot_check_time = 0.0
     last_slot_ts: int | None = None
-    last_skew_warn_time = 0.0
     last_high_latency_warn_time = 0.0
     # Official start-of-window BTC/USD (Gamma eventMetadata.priceToBeat); fallback RTDS.
     slot_price_to_beat: float = 0.0
@@ -1054,18 +1053,6 @@ async def main():
                         strategy_hub.entry_max_latency_ms,
                     )
                     last_high_latency_warn_time = now
-                if (
-                    abs(skew_ms) > 800.0
-                    and (now - last_skew_warn_time) >= 300.0
-                ):
-                    logging.info(
-                        "Cross-feed skew skew_ms=%.0f (cb_age=%.0f poly_age=%.0f ms); "
-                        "not wall-clock NTP — local recv order of WS messages.",
-                        skew_ms,
-                        float(_ft["coinbase_age_ms"]),
-                        float(_ft["poly_age_ms"]),
-                    )
-                    last_skew_warn_time = now
                 # Feed regime detector using raw fast-price velocity (pts/s)
                 # rather than edge_window speed which flips 0↔large every other tick.
                 _regime_dt = now - _regime_last_ts if _regime_last_ts > 0 else 1.0

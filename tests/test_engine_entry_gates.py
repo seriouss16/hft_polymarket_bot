@@ -26,6 +26,18 @@ def test_entry_skew_finite_min_max_band():
     assert entry_skew_allows_entry(-3000.0, 100.0, 150.0) is False
 
 
+def test_entry_skew_is_signed_interval_not_abs():
+    """Gate compares signed skew_ms to [min, max]; a buggy abs(|skew|) cap would differ."""
+    lo, hi = -3200.0, 100.0
+    # Large negative skew still allowed if inside [lo, hi] (abs-based cap would wrongly reject).
+    assert entry_skew_allows_entry(lo, hi, -3000.0) is True
+    assert entry_skew_allows_entry(lo, hi, -3100.0) is True
+    assert entry_skew_allows_entry(lo, hi, -3300.0) is False
+    # Positive side uses the same upper bound hi, not abs.
+    assert entry_skew_allows_entry(lo, hi, 100.0) is True
+    assert entry_skew_allows_entry(lo, hi, 101.0) is False
+
+
 # Tests for zscore_monotonic_for_direction with different strictness levels
 def test_zscore_monotonic_strict_allows_perfect_monotonic():
     """Strict mode should allow perfectly monotonic sequences."""

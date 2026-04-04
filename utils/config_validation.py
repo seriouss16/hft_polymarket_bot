@@ -196,7 +196,10 @@ class ConfigValidator:
 
         # Price/speed gates
         self._add_float("HFT_ENTRY_MAX_LATENCY_MS", min=0.0, required=False)
-        self._add_float("HFT_ENTRY_MAX_SKEW_MS", min=0.0, required=False)
+        # Signed ms bounds (see data/aggregator feed_timing skew_ms). Not |skew|.
+        # HFTEngine applies entry_min_skew_ms <= skew_ms <= entry_max_skew_ms when max > 0.
+        # max <= 0 disables the skew gate (legacy); min may be negative (e.g. -3200).
+        self._add_float("HFT_ENTRY_MAX_SKEW_MS", required=False)
         self._add_float("HFT_ENTRY_MIN_SKEW_MS", required=False)  # can be -inf
         self._add_float("HFT_LATENCY_HIGH_MS", min=0.0, required=False)
         self._add_float("HFT_LATENCY_HIGH_EDGE_MULT", min=1.0, required=False)
