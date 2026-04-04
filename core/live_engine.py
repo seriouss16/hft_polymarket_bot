@@ -208,6 +208,8 @@ class OrderFSM:
             tracked.placed_at = time.time()
             tracked.status = OrderStatus.FILLED if immediate else OrderStatus.PENDING
             self.engine._fsms[new_id] = self
+            if not immediate:
+                self.engine._event_queue.put_nowait(RestResponseEvent(order_id=new_id, success=True, status="live"))
         else:
             tracked.status = OrderStatus.FAILED
 
@@ -788,71 +790,6 @@ class LiveExecutionEngine:
         event = WsOrderEvent(order_id=order_id, status=status, filled=filled)
         self._event_queue.put_nowait(event)
 
-    async def _wait_for_order_fill(
-        self,
-        order_id: str,
-        timeout: float | None = None,
-    ) -> tuple[str, float]:
-        """Wait for order event via WebSocket only — no HTTP fallback.
-
-        Phase 2 WebSocket Migration: Purely event-driven using asyncio.Event.
-        Uses ClobUserOrderCache.wait_for_fill_with_timeout() for optimized waiting.
-        No HTTP fallback — if WS times out, returns ("live", 0.0) to continue waiting.
-        
-        Memory-based tracking only — no redundant HTTP polling.
-        Latency metrics tracking for WS performance.
-
-        Returns (status_str, filled_size) tuple.
-        """
-        if timeout is None:
-            timeout = float(os.getenv("LIVE_ORDER_WS_TIMEOUT_SEC", "30"))
-        
-        start_time = time.time()
-        
-        # Check cache first (may have recent data from WS)
-        if self._user_order_cache is not None:
-            cached = self._user_order_cache.get_order_fill(order_id)
-            if cached is not None:
-                ws_latency = (time.time() - start_time) * 1000
-                self._track_ws_latency(ws_latency)
-                logging.debug(
-                    "[WS] Order fill from cache: id=%s status=%s filled=%.2f "
-                    "(WS latency=%.2fms)",
-                    order_id[:20], cached[0], cached[1], ws_latency,
-                )
-                return cached
-        
-        # Use optimized wait_for_fill_with_timeout from ClobUserOrderCache
-        if self._user_order_cache is not None:
-            result = await self._user_order_cache.wait_for_fill_with_timeout(
-                order_id, timeout=timeout
-            )
-            if result is not None:
-                ws_latency = (time.time() - start_time) * 1000
-                self._track_ws_latency(ws_latency)
-                logging.debug(
-                    "[WS] Order fill confirmed: id=%s status=%s filled=%.2f "
-                    "(WS latency=%.2fms)",
-                    order_id[:20], result[0], result[1], ws_latency,
-                )
-                return result
-        
-        # Fallback to direct _get_order_fill for test_mode or when no WS cache
-        # This preserves test compatibility while using WS-first in production
-        status, filled = await asyncio.to_thread(self._get_order_fill, order_id)
-        if status not in ("unknown",):
-            ws_latency = (time.time() - start_time) * 1000
-            self._track_ws_latency(ws_latency)
-            return (status, filled)
-        
-        # Timeout — return ("live", 0.0) to continue waiting in the loop
-        # No HTTP fallback — pure WebSocket event-driven
-        wait_time = time.time() - start_time
-        logging.debug(
-            "[WS] Order event timeout: id=%s wait=%.1fs — continuing to wait",
-            order_id[:20], wait_time,
-        )
-        return ("live", 0.0)
     
     def _track_ws_latency(self, latency_ms: float) -> None:
         """Track WebSocket latency metrics."""
@@ -1711,9 +1648,23 @@ class LiveExecutionEngine:
         """
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if not self.has_pending_buy(token_id):
+            pending = [o for o in self._active_orders.values() if o.token_id == token_id and o.side == BUY]
+            if not pending:
                 break
-            await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+            
+            # Wait for any of the pending FSMs to finish or timeout
+            fsms = [self._fsms[o.order_id] for o in pending if o.order_id in self._fsms]
+            if fsms:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(f.wait() for f in fsms)),
+                        timeout=max(0.1, deadline - time.monotonic())
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+            else:
+                await asyncio.sleep(0.1)
+                
         filled = self.filled_buy_shares(token_id)
         logging.info(
             "[LIVE] wait_for_buy_fill done: token=%s filled=%.4f shares",
@@ -1733,12 +1684,24 @@ class LiveExecutionEngine:
             timeout_sec = req_float("LIVE_CLOSE_WAIT_PENDING_SEC")
         deadline = time.monotonic() + max(0.1, timeout_sec)
         while time.monotonic() < deadline:
-            if self.has_pending_buy(token_id) or self.has_pending_sell(token_id):
-                await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+            pending = [o for o in self._active_orders.values() if o.token_id == token_id]
+            if pending:
+                fsms = [self._fsms[o.order_id] for o in pending if o.order_id in self._fsms]
+                if fsms:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*(f.wait() for f in fsms)),
+                            timeout=max(0.1, deadline - time.monotonic())
+                        )
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+                else:
+                    await asyncio.sleep(0.1)
                 continue
+
             open_list = await asyncio.to_thread(self.get_open_orders, token_id)
             if open_list:
-                await asyncio.sleep(_ORDER_FILL_POLL_SEC)
+                await asyncio.sleep(0.5) # Longer sleep for HTTP poll
                 continue
             return
         logging.warning(
