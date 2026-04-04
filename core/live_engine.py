@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from dataclasses import dataclass
 
 from utils.env_config import req_float, req_int, req_str
 
@@ -30,8 +31,12 @@ from core.live_common import (
     OrderArgs,
     OrderStatus,
     OrderType,
+    RestResponseEvent,
     SELL_SIDE,
+    TimerEvent,
     TrackedOrder,
+    WsMarketEvent,
+    WsOrderEvent,
     _CLOB_BOOK_HTTP_TIMEOUT,
     _ORDER_FILL_POLL_SEC,
     _ORDER_MAX_REPRICE,
@@ -51,6 +56,138 @@ from core.live_common import (
     is_fresh_for_trading,
     live_sell_reprice_tick,
 )
+
+
+class OrderFSM:
+    """Finite State Machine for managing a single order's lifecycle."""
+
+    def __init__(self, tracked: TrackedOrder, engine: LiveExecutionEngine) -> None:
+        self.tracked = tracked
+        self.engine = engine
+        self._done_event = asyncio.Event()
+
+    async def transition(self, event: WsOrderEvent | RestResponseEvent | TimerEvent | WsMarketEvent) -> None:
+        """Handle state transitions based on incoming events."""
+        if self.tracked.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED):
+            return
+
+        if isinstance(event, WsOrderEvent):
+            await self._handle_ws_order(event)
+        elif isinstance(event, RestResponseEvent):
+            await self._handle_rest_response(event)
+        elif isinstance(event, TimerEvent):
+            await self._handle_timer(event)
+        elif isinstance(event, WsMarketEvent):
+            await self._handle_market_update(event)
+
+        if self.tracked.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED):
+            self._done_event.set()
+
+    async def _handle_ws_order(self, event: WsOrderEvent) -> None:
+        status = event.status.lower().replace("order_status_", "")
+        if status in ("matched", "filled"):
+            self.tracked.status = OrderStatus.FILLED
+            self.tracked.filled_size = min(self.tracked.size, event.filled)
+        elif status in ("canceled", "cancelled"):
+            self.tracked.status = OrderStatus.CANCELLED
+            self.tracked.filled_size = event.filled
+        elif status == "partially_matched":
+            self.tracked.status = OrderStatus.PARTIAL
+            self.tracked.filled_size = min(self.tracked.size, event.filled)
+            self.tracked.placed_at = time.time()  # Reset stale timer
+        elif status == "live":
+            if self.tracked.status == OrderStatus.PLACING:
+                self.tracked.status = OrderStatus.PENDING
+
+    async def _handle_rest_response(self, event: RestResponseEvent) -> None:
+        if not event.success:
+            self.tracked.status = OrderStatus.FAILED
+            return
+        if event.order_id:
+            self.tracked.order_id = event.order_id
+        if event.status in ("matched", "filled"):
+            self.tracked.status = OrderStatus.FILLED
+            self.tracked.filled_size = self.tracked.size
+        elif event.status == "live":
+            if self.tracked.status == OrderStatus.PLACING:
+                self.tracked.status = OrderStatus.PENDING
+
+    async def _handle_timer(self, event: TimerEvent) -> None:
+        if self.tracked.is_stale:
+            await self._reprice_or_emergency()
+
+    async def _handle_market_update(self, event: WsMarketEvent) -> None:
+        # Market updates can be used for dynamic repricing decisions
+        pass
+
+    async def _reprice_or_emergency(self) -> None:
+        """Execute reprice logic or emergency exit when stale."""
+        tracked = self.tracked
+        poly_min = req_float("POLY_CLOB_MIN_SHARES")
+
+        # BUY partial fill below exchange minimum: cancel and FAK-sell dust (cannot reprice).
+        if tracked.side == BUY and tracked.status == OrderStatus.PARTIAL:
+            if 0 < tracked.filled_size < poly_min:
+                await self.engine._cancel_order(tracked.order_id)
+                await self.engine._fak_sell(tracked.token_id, tracked.filled_size)
+                tracked.filled_size = 0.0
+                tracked.status = OrderStatus.CANCELLED
+                return
+
+        # SELL remainder below minimum GTC size: FAK the rest.
+        if tracked.side == SELL_SIDE and tracked.status == OrderStatus.PARTIAL:
+            rem = tracked.remaining
+            if 0 < rem < poly_min:
+                fak_filled = await self.engine._fak_sell(tracked.token_id, rem)
+                tracked.filled_size += fak_filled
+                tracked.status = OrderStatus.FILLED
+                return
+
+        if tracked.reprice_count >= _ORDER_MAX_REPRICE:
+            logging.warning("⚠️ Order %s stale after %d reprices — emergency exit.", tracked.order_id, tracked.reprice_count)
+            await self.engine._cancel_order(tracked.order_id)
+            tracked.status = OrderStatus.STALE
+            await self.engine._emergency_exit_order(tracked)
+            return
+
+        best_bid, best_ask = await asyncio.to_thread(self.engine.get_best_prices, tracked.token_id)
+        
+        if tracked.side == BUY:
+            new_price = max(0.01, min(0.99, best_ask + 0.001))
+        else:
+            new_price = max(0.01, min(0.99, best_bid - 0.001))
+
+        if abs(new_price - tracked.price) < 0.001:
+            tracked.reprice_count += 1
+            tracked.placed_at = time.time()
+            return
+
+        # Cancel old and place new
+        old_id = tracked.order_id
+        await self.engine._cancel_order(old_id)
+        await self.engine._recover_fill_after_cancel(tracked, old_id)
+        
+        if tracked.remaining <= 0:
+            tracked.status = OrderStatus.FILLED
+            return
+
+        tracked.reprice_count += 1
+        new_id, immediate = await self.engine._place_limit_raw(tracked.token_id, tracked.side, new_price, tracked.remaining)
+        
+        if new_id:
+            # Update FSM mapping in engine
+            self.engine._fsms.pop(old_id, None)
+            tracked.order_id = new_id
+            tracked.price = new_price
+            tracked.placed_at = time.time()
+            tracked.status = OrderStatus.FILLED if immediate else OrderStatus.PENDING
+            self.engine._fsms[new_id] = self
+        else:
+            tracked.status = OrderStatus.FAILED
+
+    async def wait(self) -> None:
+        """Wait for the FSM to reach a terminal state."""
+        await self._done_event.wait()
 
 
 class LiveExecutionEngine:
@@ -134,6 +271,11 @@ class LiveExecutionEngine:
         self._ws_metrics_last_log = time.time()
         self._ws_metrics_log_interval = 60.0  # Log metrics every 60 seconds
         self._allowance_cache = allowance_cache
+        
+        # Event Queue and Worker
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._worker_task: asyncio.Task | None = None
+        self._fsms: dict[str, OrderFSM] = {}
 
         if ClobClient is None:
             if not self.test_mode:
@@ -160,6 +302,41 @@ class LiveExecutionEngine:
                 "[LIVE] ClobClient credentials derived from private key (key=%.8s...).",
                 derived.api_key,
             )
+
+    async def initialize(self) -> None:
+        """Start the event worker task."""
+        if self._worker_task is None:
+            self._worker_task = asyncio.create_task(self._event_worker())
+            logging.info("[LIVE] Event worker started.")
+
+    async def _event_worker(self) -> None:
+        """Main event loop for processing order and market events."""
+        while True:
+            try:
+                event = await self._event_queue.get()
+                if event is None:  # Shutdown signal
+                    break
+
+                # Dispatch event to relevant FSMs
+                if isinstance(event, (WsOrderEvent, RestResponseEvent)):
+                    order_id = event.order_id
+                    if order_id and order_id in self._fsms:
+                        await self._fsms[order_id].transition(event)
+                elif isinstance(event, TimerEvent):
+                    # Periodic check for all active FSMs
+                    for fsm in list(self._fsms.values()):
+                        await fsm.transition(event)
+                elif isinstance(event, WsMarketEvent):
+                    # Market updates can affect all FSMs for the same token
+                    for fsm in list(self._fsms.values()):
+                        if fsm.tracked.token_id == event.token_id:
+                            await fsm.transition(event)
+
+                self._event_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logging.error("[LIVE] Event worker error: %s", exc, exc_info=True)
 
     def get_api_creds(self) -> object | None:
         """L2 API credentials object for user-channel WebSocket (live only)."""
@@ -579,96 +756,11 @@ class LiveExecutionEngine:
     def _on_user_order_event(self, order_id: str, status: str, filled: float) -> None:
         """Callback from user WS cache when order/trade event arrives.
 
-        Phase 2 WebSocket Migration: Event-driven order tracking.
-        Updates the tracked order state immediately without HTTP polling.
-        Called by ClobUserOrderCache after processing order/trade events.
-        
-        Comprehensive logging for WS/HTTP fallback events with detailed metrics.
+        Phase 3: Enqueue event for FSM processing.
         """
-        # Track WS event
         self._ws_metrics["ws_events_received"] += 1
-        
-        if order_id not in self._active_orders:
-            # Order not tracked yet (race condition) — ignore
-            logging.debug(
-                "[OUT_OF_ORDER_EVENT] [WS] Order event for untracked order: id=%s status=%s filled=%.2f "
-                "(total_ws_events=%d http_fallbacks=%d)",
-                order_id[:20], status, filled,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-            return
-        
-        tracked = self._active_orders[order_id]
-        old_status = tracked.status
-        old_filled = tracked.filled_size
-        
-        # Update status based on event
-        if status in ("matched", "filled"):
-            tracked.status = OrderStatus.FILLED
-            tracked.filled_size = min(tracked.size, filled)
-            logging.info(
-                "✅ [WS] Order filled via event: id=%s %s %.2f @ %.4f "
-                "(filled=%.2f/%.2f) | WS events=%d HTTP fallbacks=%d",
-                order_id[:20], tracked.side, tracked.filled_size, tracked.price,
-                tracked.filled_size, tracked.size,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-        elif status in ("canceled", "cancelled"):
-            tracked.status = OrderStatus.CANCELLED
-            tracked.filled_size = filled
-            logging.info(
-                "🚫 [WS] Order canceled via event: id=%s filled=%.2f "
-                "| WS events=%d HTTP fallbacks=%d",
-                order_id[:20], filled,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-        elif status == "partially_matched":
-            tracked.status = OrderStatus.PARTIAL
-            tracked.filled_size = min(tracked.size, filled)
-            logging.info(
-                "[PARTIAL_FILL] ⚡ [WS] Order partial fill via event: id=%s filled=%.2f / %.2f "
-                "| WS events=%d HTTP fallbacks=%d",
-                order_id[:20], filled, tracked.size,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-        elif status == "live":
-            tracked.status = OrderStatus.PENDING
-            tracked.filled_size = filled
-            logging.debug(
-                "[WS] Order status live: id=%s filled=%.2f "
-                "| WS events=%d HTTP fallbacks=%d",
-                order_id[:20], filled,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-        else:
-            # Unknown status — log but don't change state
-            logging.debug(
-                "[WS] Unknown order status from event: id=%s status=%s filled=%.2f "
-                "| WS events=%d HTTP fallbacks=%d",
-                order_id[:20], status, filled,
-                self._ws_metrics["ws_events_received"],
-                self._http_metrics["http_fallbacks_total"],
-            )
-            return
-        
-        # Log state change with metrics
-        logging.info(
-            "[WS] Order state update: id=%s %s → %s filled %.2f → %.2f "
-            "| WS events=%d HTTP fallbacks=%d latency_avg=%.2fms",
-            order_id[:20],
-            old_status.value if hasattr(old_status, 'value') else str(old_status),
-            tracked.status.value if hasattr(tracked.status, 'value') else str(tracked.status),
-            old_filled,
-            tracked.filled_size,
-            self._ws_metrics["ws_events_received"],
-            self._http_metrics["http_fallbacks_total"],
-            self._get_ws_metrics()["ws_latency_avg_ms"],
-        )
+        event = WsOrderEvent(order_id=order_id, status=status, filled=filled)
+        self._event_queue.put_nowait(event)
 
     async def _wait_for_order_fill(
         self,
@@ -1223,291 +1315,64 @@ class LiveExecutionEngine:
         return filled
 
     async def _poll_order(self, tracked: TrackedOrder) -> None:
-        """Monitor fill status; reprice stale orders; handle partial fills correctly.
+        """Monitor fill status using FSM and event queue.
 
-        Phase 2 WebSocket Migration: Fully event-driven order tracking.
-        Uses WebSocket events for immediate fill detection with HTTP fallback.
-        Loop terminates when the order reaches a terminal state.  Partial fills
-        accumulate across reprice cycles — ``tracked.filled_size`` always reflects
-        the running total confirmed by the CLOB.  After each cancel-before-reprice,
+        Production: fills arrive via WebSocket / user-order cache callbacks into
+        ``_event_queue``. Tests: ``test_mode`` drives the FSM by polling
+        ``_get_order_fill`` (patchable) and enqueueing ``WsOrderEvent``.
+
+        Partial fills accumulate across reprice cycles; after cancel-before-reprice,
         ``_recover_fill_after_cancel`` polls the old order id so fills that race
         with cancel are not mistaken for failed sells.
-        
-        Comprehensive logging for WS/HTTP fallback events.
-        Latency metrics tracking for WS vs HTTP performance.
-
-        BUY partial fill logic:
-          - If a BUY goes stale with partial fill < POLY_CLOB_MIN_SHARES: cancel the
-            BUY and FAK-SELL the already-filled shares so we exit cleanly without
-            holding a position we cannot later sell via a normal limit.
-          - If partial fill >= min_shares: reprice or emergency-exit as normal.
-
-        SELL partial fill logic:
-          - If remaining < min_shares: use FAK SELL instead of a sub-minimum GTC
-            (CLOB rejects GTC below the minimum).
         """
-        poly_min = req_float("POLY_CLOB_MIN_SHARES")
-        ws_enabled = os.getenv("CLOB_USER_WS_ENABLED", "1").strip().lower() in ("1", "true", "yes")
-        
-        # Log order tracking start
-        logging.debug(
-            "[WS] Starting event-driven order tracking: id=%s %s %.2f @ %.4f",
-            tracked.order_id[:20], tracked.side, tracked.size, tracked.price,
-        )
-        
-        # Use event-driven model with WS timeout fallback
-        # Polling loop replaced with event wait + HTTP fallback
-        while tracked.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
-            # Wait for WS event with timeout (default 30s)
-            status_str, clob_filled = await self._wait_for_order_fill(
-                tracked.order_id,
-                timeout=float(os.getenv("LIVE_ORDER_WS_TIMEOUT_SEC", "30")),
+        fsm = OrderFSM(tracked, self)
+        self._fsms[tracked.order_id] = fsm
+
+        await self.initialize()
+
+        timer_task = asyncio.create_task(self._order_timer(tracked.order_id))
+        driver_task: asyncio.Task | None = None
+        if self.test_mode:
+            driver_task = asyncio.create_task(
+                self._test_mode_feed_order_fill_events(tracked.order_id),
             )
 
-            # Polymarket API statuses (after normalisation to lower, prefix stripped):
-            #   "live"            — order is open, not yet matched
-            #   "matched"         — fully matched (= filled)
-            #   "canceled"        — cancelled by user or system
-            #   "partially_matched" — some shares filled, rest still open
-            # Historic aliases still accepted: "filled", "order_status_matched".
-            if status_str in ("matched", "filled"):
-                tracked.status = OrderStatus.FILLED
-                if clob_filled > 0:
-                    tracked.filled_size = min(tracked.size, clob_filled)
-                else:
-                    tracked.filled_size = tracked.size
-                logging.info(
-                    "✅ Order filled: id=%s %s %.2f @ %.4f "
-                    "(WS events=%d HTTP fallbacks=%d)",
-                    tracked.order_id[:20], tracked.side, tracked.filled_size, tracked.price,
-                    self._ws_metrics["ws_events_received"],
-                    self._http_metrics["http_fallbacks_total"],
-                )
-                break
+        try:
+            await fsm.wait()
+        finally:
+            timer_task.cancel()
+            if driver_task is not None:
+                driver_task.cancel()
+                try:
+                    await driver_task
+                except asyncio.CancelledError:
+                    pass
+            try:
+                await timer_task
+            except asyncio.CancelledError:
+                pass
+            self._fsms.pop(tracked.order_id, None)
+            self._active_orders.pop(tracked.order_id, None)
 
-            if status_str in ("canceled", "cancelled", "canceled_market_resolved"):
-                # Cancelled externally — may have a partial fill; let reprice/rescue handle.
-                tracked.status = OrderStatus.CANCELLED
-                tracked.filled_size = clob_filled
-                logging.info(
-                    "🚫 Order cancelled externally: id=%s filled=%.2f "
-                    "(WS events=%d HTTP fallbacks=%d)",
-                    tracked.order_id[:20], clob_filled,
-                    self._ws_metrics["ws_events_received"],
-                    self._http_metrics["http_fallbacks_total"],
-                )
-                break
-
-            if status_str in ("partially_matched",) and clob_filled > tracked.filled_size:
-                tracked.filled_size = clob_filled
-                tracked.status = OrderStatus.PARTIAL
-                logging.info(
-                    "[PARTIAL_FILL] ⚡ Order partial: id=%s filled=%.2f / %.2f remaining=%.2f "
-                    "(WS events=%d HTTP fallbacks=%d)",
-                    tracked.order_id[:20], clob_filled, tracked.size, tracked.remaining,
-                    self._ws_metrics["ws_events_received"],
-                    self._http_metrics["http_fallbacks_total"],
-                )
-                # Reset stale timer on new activity.
-                tracked.placed_at = time.time()
-
-            # "live" or "unknown" — order still open, continue polling.
-
-            # Freshness check before reprice/cancel
-            if self.stale_block_actions and not is_fresh_for_trading(
-                tracked.token_id, self._market_book_cache, self._user_order_cache
-            ):
-                logging.warning(
-                    "[STALE_ORDERBOOK] [POLL] Blocking reprice/cancel for %s: data not fresh",
-                    tracked.token_id[:8]
-                )
-                await asyncio.sleep(1.0)
-                continue
-
-            if not tracked.is_stale:
-                continue
-
-            remaining = tracked.remaining
-            if remaining <= 0:
-                tracked.status = OrderStatus.FILLED
-                break
-
-            # --- BUY stale with partial fill below CLOB minimum ---
-            # Cancel the pending BUY and FAK-SELL what was already filled to avoid
-            # holding unsellable shares.
-            if tracked.side == BUY and 0 < tracked.filled_size < poly_min:
-                self._cancel_order(tracked.order_id)
-                logging.warning(
-                    "⚠️ BUY stale with partial fill %.2f < min %.0f shares — "
-                    "cancelling BUY and FAK-selling filled shares. "
-                    "(WS events=%d HTTP fallbacks=%d)",
-                    tracked.filled_size, poly_min,
-                    self._ws_metrics["ws_events_received"],
-                    self._http_metrics["http_fallbacks_total"],
-                )
-                fak_filled = await self._fak_sell(tracked.token_id, tracked.filled_size)
-                # Report net filled as zero so caller treats this as a skip.
-                tracked.filled_size = 0.0
-                tracked.status = OrderStatus.CANCELLED
-                logging.info(
-                    "[LIVE] BUY partial exit: FAK sold %.4f shares token=%s.",
-                    fak_filled, tracked.token_id[:20],
-                )
-                break
-
-            if tracked.reprice_count >= _ORDER_MAX_REPRICE:
-                if _ORDER_MAX_REPRICE == 0:
-                    logging.warning(
-                        "⚠️ Order stale (LIVE_ORDER_MAX_REPRICE=0: no reprice chase) id=%s — "
-                        "emergency exit (filled=%.2f remaining=%.2f). "
-                        "Increase LIVE_ORDER_STALE_SEC or set LIVE_ORDER_MAX_REPRICE>0 to chase. "
-                        "(WS events=%d HTTP fallbacks=%d)",
-                        tracked.order_id[:20],
-                        tracked.filled_size,
-                        remaining,
-                        self._ws_metrics["ws_events_received"],
-                        self._http_metrics["http_fallbacks_total"],
+    async def _test_mode_feed_order_fill_events(self, order_id: str) -> None:
+        """Poll ``_get_order_fill`` and enqueue WsOrderEvents for the FSM (test_mode only)."""
+        poll = float(_ORDER_FILL_POLL_SEC)
+        try:
+            while order_id in self._fsms:
+                status, filled = await asyncio.to_thread(self._get_order_fill, order_id)
+                if status not in ("unknown", "live") or filled > 0:
+                    self._event_queue.put_nowait(
+                        WsOrderEvent(order_id=order_id, status=status, filled=filled),
                     )
-                else:
-                    logging.warning(
-                        "⚠️ Order stale after %d reprice attempts id=%s — emergency exit "
-                        "(filled=%.2f remaining=%.2f). "
-                        "(WS events=%d HTTP fallbacks=%d)",
-                        _ORDER_MAX_REPRICE,
-                        tracked.order_id[:20],
-                        tracked.filled_size,
-                        remaining,
-                        self._ws_metrics["ws_events_received"],
-                        self._http_metrics["http_fallbacks_total"],
-                    )
-                self._cancel_order(tracked.order_id)
-                tracked.status = OrderStatus.STALE
-                await self._emergency_exit_order(tracked)
-                break
+                await asyncio.sleep(poll)
+        except asyncio.CancelledError:
+            raise
 
-            best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
-            _buy_tick = live_buy_reprice_tick()
-            _sell_tick = live_sell_reprice_tick()
-            if tracked.side == BUY:
-                new_price_probe = max(0.01, min(0.99, best_ask + _buy_tick))
-                max_slip = req_float("LIVE_MAX_BUY_REPRICE_SLIPPAGE")
-                if (
-                    max_slip > 0.0
-                    and tracked.entry_best_ask is not None
-                    and new_price_probe - tracked.entry_best_ask > max_slip
-                ):
-                    logging.warning(
-                        "⚠️ [LIVE] BUY reprice aborted: best ask moved %.4f → %.4f "
-                        "(limit would be %.4f > ref %.4f + max slip %.4f) token=%s. "
-                        "(WS events=%d HTTP fallbacks=%d)",
-                        tracked.entry_best_ask,
-                        best_ask,
-                        new_price_probe,
-                        tracked.entry_best_ask,
-                        max_slip,
-                        tracked.token_id[:20],
-                        self._ws_metrics["ws_events_received"],
-                        self._http_metrics["http_fallbacks_total"],
-                    )
-                    self._last_buy_skip_reason = "slippage_abort"
-                    self._cancel_order(tracked.order_id)
-                    tracked.status = OrderStatus.CANCELLED
-                    tracked.filled_size = 0.0
-                    break
-            cancelled_for_reprice = tracked.order_id
-            self._cancel_order(tracked.order_id)
-            if await self._recover_fill_after_cancel(tracked, cancelled_for_reprice):
-                break
-            remaining = tracked.remaining
-            if remaining <= 0:
-                tracked.status = OrderStatus.FILLED
-                break
-
-            if tracked.side == BUY:
-                new_price = max(0.01, min(0.99, best_ask + 0.001))
-            else:
-                new_price = max(0.01, min(0.99, best_bid - 0.001))
-
-            # SELL with remaining < min_shares: use FAK to avoid GTC rejection.
-            if tracked.side == SELL_SIDE and remaining < poly_min:
-                logging.warning(
-                    "⚠️ SELL remaining %.2f < min %.0f shares — FAK sell.",
-                    remaining, poly_min,
-                )
-                fak_filled = await self._fak_sell(tracked.token_id, remaining)
-                tracked.filled_size += fak_filled
-                tracked.status = OrderStatus.FILLED
-                break
-
-            if abs(new_price - tracked.price) < 0.001:
-                tracked.reprice_count += 1
-                tracked.placed_at = time.time()
-                continue
-
-            self._entry_stats["reprice_total"] += 1
-            tracked.reprice_count += 1
-            place_size = remaining
-            if tracked.side == BUY:
-                place_size = self._affordable_buy_shares(new_price, remaining)
-                if place_size <= 0.0:
-                    logging.error(
-                        "Reprice BUY: zero affordable size at %.4f (check USDC balance).",
-                        new_price,
-                    )
-                    tracked.status = OrderStatus.FAILED
-                    break
-                if place_size < poly_min:
-                    logging.error(
-                        "Reprice BUY: affordable size %.4f < CLOB min %.0f at %.4f.",
-                        place_size, poly_min, new_price,
-                    )
-                    tracked.status = OrderStatus.FAILED
-                    break
-                if place_size < remaining - 1e-6:
-                    logging.warning(
-                        "Reprice BUY: size capped %.4f → %.4f so notional fits USDC "
-                        "(price %.4f).",
-                        remaining, place_size, new_price,
-                    )
-                    tracked.size = tracked.filled_size + place_size
-            logging.info(
-                "🔄 Repricing order %s: %.4f → %.4f (attempt %d/%d) "
-                "filled=%.2f remaining=%.2f place=%.2f",
-                tracked.order_id, tracked.price, new_price,
-                tracked.reprice_count, _ORDER_MAX_REPRICE,
-                tracked.filled_size, remaining, place_size,
-            )
-            new_id, new_immediate = await self._place_limit_raw(
-                tracked.token_id, tracked.side, new_price, place_size
-            )
-            if new_id:
-                self._active_orders.pop(tracked.order_id, None)
-                tracked.order_id = new_id
-                tracked.price = new_price
-                tracked.placed_at = time.time()
-                # Preserve accumulated filled_size; only remaining goes into new order.
-                tracked.status = OrderStatus.FILLED if new_immediate else OrderStatus.PENDING
-                self._active_orders[new_id] = tracked
-                if new_immediate:
-                    tracked.filled_size += remaining
-                    break
-            else:
-                if await self._recover_fill_after_cancel(
-                    tracked, cancelled_for_reprice, skip_initial_sleep=True
-                ):
-                    break
-                remaining = tracked.remaining
-                if remaining <= 0:
-                    tracked.status = OrderStatus.FILLED
-                    break
-                tracked.status = OrderStatus.FAILED
-                logging.error(
-                    "Reprice placement failed — filled=%.2f remaining=%.2f unmanaged.",
-                    tracked.filled_size, remaining,
-                )
-                break
-
-        self._active_orders.pop(tracked.order_id, None)
+    async def _order_timer(self, order_id: str) -> None:
+        """Periodic timer for a specific order to trigger stale checks."""
+        while True:
+            await asyncio.sleep(1.0)
+            self._event_queue.put_nowait(TimerEvent())
 
     async def _emergency_exit_order(self, tracked: TrackedOrder) -> None:
         """Exit remaining size aggressively after reprice attempts exhausted.
@@ -1935,8 +1800,16 @@ class LiveExecutionEngine:
         )
         self._last_skip_stats_log_ts = now
     
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         """Shutdown execution engine and log final metrics."""
+        if self._worker_task:
+            self._event_queue.put_nowait(None)
+            try:
+                await asyncio.wait_for(self._worker_task, timeout=2.0)
+            except asyncio.TimeoutError:
+                self._worker_task.cancel()
+            self._worker_task = None
+
         self._log_ws_metrics("shutdown")
         logging.info(
             "[LIVE] Final metrics: ws_events=%d http_fallbacks=%d "
@@ -2371,9 +2244,10 @@ class LiveExecutionEngine:
         )
 
         if not immediate:
-            # Wait for _poll_order to confirm fill — run it as a task and await it.
-            poll_task = asyncio.ensure_future(self._poll_order(tracked))
-            await poll_task
+            # Phase 3: Enqueue initial REST response event to trigger FSM
+            self._event_queue.put_nowait(RestResponseEvent(order_id=order_id, success=True, status="live"))
+            # Wait for _poll_order to confirm fill
+            await self._poll_order(tracked)
 
         filled = tracked.filled_size if tracked.filled_size > 0 else (
             tracked.size if tracked.status == OrderStatus.FILLED else 0.0
