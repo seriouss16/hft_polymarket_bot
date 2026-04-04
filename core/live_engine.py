@@ -68,7 +68,12 @@ class OrderFSM:
 
     async def transition(self, event: WsOrderEvent | RestResponseEvent | TimerEvent | WsMarketEvent) -> None:
         """Handle state transitions based on incoming events."""
-        if self.tracked.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED):
+        if self.tracked.status in (
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.FAILED,
+            OrderStatus.STALE,
+        ):
             return
 
         if isinstance(event, WsOrderEvent):
@@ -80,7 +85,12 @@ class OrderFSM:
         elif isinstance(event, WsMarketEvent):
             await self._handle_market_update(event)
 
-        if self.tracked.status in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.FAILED):
+        if self.tracked.status in (
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.FAILED,
+            OrderStatus.STALE,
+        ):
             self._done_event.set()
 
     async def _handle_ws_order(self, event: WsOrderEvent) -> None:
@@ -128,7 +138,7 @@ class OrderFSM:
         # BUY partial fill below exchange minimum: cancel and FAK-sell dust (cannot reprice).
         if tracked.side == BUY and tracked.status == OrderStatus.PARTIAL:
             if 0 < tracked.filled_size < poly_min:
-                await self.engine._cancel_order(tracked.order_id)
+                self.engine._cancel_order(tracked.order_id)
                 await self.engine._fak_sell(tracked.token_id, tracked.filled_size)
                 tracked.filled_size = 0.0
                 tracked.status = OrderStatus.CANCELLED
@@ -145,15 +155,31 @@ class OrderFSM:
 
         if tracked.reprice_count >= _ORDER_MAX_REPRICE:
             logging.warning("⚠️ Order %s stale after %d reprices — emergency exit.", tracked.order_id, tracked.reprice_count)
-            await self.engine._cancel_order(tracked.order_id)
+            self.engine._cancel_order(tracked.order_id)
             tracked.status = OrderStatus.STALE
             await self.engine._emergency_exit_order(tracked)
             return
 
         best_bid, best_ask = await asyncio.to_thread(self.engine.get_best_prices, tracked.token_id)
-        
+
         if tracked.side == BUY:
             new_price = max(0.01, min(0.99, best_ask + 0.001))
+            slip_raw = os.getenv("LIVE_MAX_BUY_REPRICE_SLIPPAGE", "").strip()
+            entry_ask = tracked.entry_best_ask
+            if slip_raw and entry_ask is not None and entry_ask > 0:
+                max_slip = float(slip_raw)
+                if new_price - entry_ask > max_slip + 1e-9:
+                    logging.warning(
+                        "BUY reprice aborted (slippage): new=%.4f entry_best_ask=%.4f max_slip=%.4f",
+                        new_price,
+                        entry_ask,
+                        max_slip,
+                    )
+                    self.engine._cancel_order(tracked.order_id)
+                    tracked.filled_size = 0.0
+                    tracked.status = OrderStatus.CANCELLED
+                    self.engine._last_buy_skip_reason = "slippage_abort"
+                    return
         else:
             new_price = max(0.01, min(0.99, best_bid - 0.001))
 
@@ -164,7 +190,7 @@ class OrderFSM:
 
         # Cancel old and place new
         old_id = tracked.order_id
-        await self.engine._cancel_order(old_id)
+        self.engine._cancel_order(old_id)
         await self.engine._recover_fill_after_cancel(tracked, old_id)
         
         if tracked.remaining <= 0:
@@ -1355,15 +1381,24 @@ class LiveExecutionEngine:
             self._active_orders.pop(tracked.order_id, None)
 
     async def _test_mode_feed_order_fill_events(self, order_id: str) -> None:
-        """Poll ``_get_order_fill`` and enqueue WsOrderEvents for the FSM (test_mode only)."""
+        """Poll ``_get_order_fill`` and enqueue WsOrderEvents for the FSM (test_mode only).
+
+        De-duplicates consecutive identical (status, filled) pairs so the event worker
+        is not starved by a tight poll interval — ``TimerEvent`` must be able to run
+        for stale / reprice paths in tests.
+        """
         poll = float(_ORDER_FILL_POLL_SEC)
+        last_key: tuple[str, float] | None = None
         try:
             while order_id in self._fsms:
                 status, filled = await asyncio.to_thread(self._get_order_fill, order_id)
                 if status not in ("unknown", "live") or filled > 0:
-                    self._event_queue.put_nowait(
-                        WsOrderEvent(order_id=order_id, status=status, filled=filled),
-                    )
+                    key = (status, filled)
+                    if key != last_key:
+                        self._event_queue.put_nowait(
+                            WsOrderEvent(order_id=order_id, status=status, filled=filled),
+                        )
+                        last_key = key
                 await asyncio.sleep(poll)
         except asyncio.CancelledError:
             raise

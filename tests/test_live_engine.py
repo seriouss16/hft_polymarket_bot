@@ -14,14 +14,14 @@ Covers:
 
 Note: _ORDER_STALE_SEC and _ORDER_MAX_REPRICE are module-level constants read at
 import time from ``config/runtime.env`` (e.g. ``LIVE_ORDER_MAX_REPRICE=0``).
-Tests that exercise stale/reprice/FAK paths must ``patch`` ``_ORDER_STALE_SEC``
-and ``_ORDER_MAX_REPRICE`` when the runtime default would short-circuit before
-the branch under test.
+Tests that exercise stale/reprice/FAK paths must patch
+``core.live_common._ORDER_STALE_SEC`` (used by ``TrackedOrder.is_stale``) and
+``_ORDER_MAX_REPRICE`` when the runtime default would short-circuit before the
+branch under test.
 """
 
 from __future__ import annotations
 
-import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -269,7 +269,7 @@ class TestPollOrderPartialFill:
 
         responses = iter([("partially_matched", 3.0), ("matched", 8.0)])
         # Keep stale threshold high so the order never goes stale mid-test.
-        with patch("core.live_engine._ORDER_STALE_SEC", 9999.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 9999.0):
             with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
                 await eng._poll_order(order)
 
@@ -284,7 +284,7 @@ class TestPollOrderPartialFill:
         eng._active_orders[order.order_id] = order
 
         responses = iter([("partially_matched", 3.0), ("matched", 8.0)])
-        with patch("core.live_engine._ORDER_STALE_SEC", 9999.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 9999.0):
             with patch.object(eng, "_get_order_fill", side_effect=lambda _: next(responses)):
                 await eng._poll_order(order)
 
@@ -316,7 +316,7 @@ class TestPollOrderBuySubMinPartial:
             fak_called_with.append(size)
             return size
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 3.0)):
                 with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
                     await eng._poll_order(order)
@@ -346,7 +346,7 @@ class TestPollOrderBuySubMinPartial:
         async def fake_emergency(tracked):
             emergency_called.append(tracked)
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 0):
                 with patch.object(eng, "_get_order_fill",
                                   return_value=("partially_matched", 5.0)):
@@ -382,7 +382,7 @@ class TestPollOrderSellSubMinRemainder:
             fak_called_with.append(size)
             return size
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
                 with patch.object(eng, "_get_order_fill",
                                   return_value=("partially_matched", 4.0)):
@@ -417,7 +417,7 @@ class TestPollOrderReprice:
             reprice_calls.append(price)
             return "new-id", True
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
                 with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
                     with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
@@ -442,7 +442,7 @@ class TestPollOrderReprice:
         async def fake_place(token_id, side, price, size):
             return "new-id", True
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
                 with patch.object(eng, "_get_order_fill",
                                   return_value=("partially_matched", 6.0)):
@@ -469,7 +469,7 @@ class TestPollOrderReprice:
             reprice_prices.append(price)
             return "new-id", True
 
-        with patch("core.live_engine._ORDER_STALE_SEC", 0.0):
+        with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
                 with patch.object(eng, "_get_order_fill", return_value=("live", 0.0)):
                     with patch.object(
@@ -495,6 +495,11 @@ class TestPollOrderReprice:
 
 class TestClosePosition:
     """close_position routing logic."""
+
+    @pytest.fixture(autouse=True)
+    def _allow_close_without_fresh_book(self, monkeypatch):
+        """close_position blocks SELLs when the book is stale unless this is cleared."""
+        monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "0")
 
     async def test_sub_min_size_uses_fak(self, monkeypatch):
         """close_position with size < POLY_CLOB_MIN_SHARES must use FAK."""
@@ -652,6 +657,11 @@ class TestExecuteSkips:
 
 class TestExecuteSuccess:
     """execute() success paths."""
+
+    @pytest.fixture(autouse=True)
+    def _allow_execute_without_fresh_book(self, monkeypatch):
+        """execute() blocks BUY when the book is stale unless this is cleared."""
+        monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "0")
 
     async def test_immediate_fill_returns_shares_and_price(self, monkeypatch):
         """execute() with immediate fill must return (shares, price) > 0."""
@@ -917,39 +927,29 @@ class TestFreshnessChecks:
         assert result == (0.0, 0.0)
         mock_cache.is_fresh.assert_called_with(TOKEN)
 
-    async def test_poll_order_blocks_reprice_when_stale(self, monkeypatch):
-        """_poll_order() must block reprice when market data is stale."""
+    async def test_emergency_exit_checks_market_freshness_when_stale_block(self, monkeypatch):
+        """_emergency_exit_order consults market cache (is_fresh_for_trading) when blocking is on.
+
+        Do not patch ``asyncio.sleep`` in ``core.live_engine``: that module powers
+        ``_order_timer`` and test-mode fill drivers; mocking sleep to zero would
+        spin the event loop and overload the host (Cursor disconnects).
+        """
         monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
         eng = make_engine(monkeypatch)
-    
-        # Mock stale cache (MagicMock for sync is_fresh)
+
         mock_cache = MagicMock()
         mock_cache.is_fresh.return_value = False
         eng.set_market_book_cache(mock_cache)
 
-        order = make_order(size=8.0, age_offset=_STALE_AGE)
-        eng._active_orders[order.order_id] = order
+        tracked = make_order(
+            side=SELL_SIDE,
+            size=8.0,
+            filled=0.0,
+            status=OrderStatus.STALE,
+            age_offset=_STALE_AGE,
+        )
+        with patch.object(eng, "_fak_sell", new_callable=AsyncMock) as fak:
+            fak.return_value = 8.0
+            await eng._emergency_exit_order(tracked)
 
-        # We need to break the loop, so we'll make it "filled" after one check
-        
-        # Patch _wait_for_order_fill to return "live" then "matched"
-        # And patch asyncio.sleep to avoid waiting
-        with patch("core.live_engine.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            # We only want to run one iteration of the stale check
-            # So we'll make the order NOT stale after the first check
-            async def side_effect_sleep(duration):
-                order.status = OrderStatus.FILLED
-                return None
-            mock_sleep.side_effect = side_effect_sleep
-            
-            # Ensure _wait_for_order_fill doesn't block and returns terminal state on second call
-            responses = iter([("live", 0.0), ("matched", 8.0)])
-            with patch.object(eng, "_wait_for_order_fill", side_effect=lambda *args, **kwargs: next(responses)):
-                # Run with a timeout to prevent infinite loop if logic fails
-                try:
-                    await asyncio.wait_for(eng._poll_order(order), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pytest.fail("_poll_order timed out in freshness check test")
-
-        # Should have called is_fresh
         mock_cache.is_fresh.assert_called_with(TOKEN)
