@@ -7,7 +7,7 @@ in a format suitable for monitoring and reporting.
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 @dataclass
