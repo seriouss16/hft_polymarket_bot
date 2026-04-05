@@ -803,11 +803,11 @@ class ConfigValidator:
         if errors:
             lines = "\n".join(errors)
             _abort = (
-                f"\n{'='*60}\n"
+                f"\n{'=' * 60}\n"
                 f"🛑  CONFIGURATION VALIDATION FAILED:\n"
                 f"{lines}\n"
                 f"\nPlease fix the above issues in your .env or runtime.env file.\n"
-                f"{'='*60}\n"
+                f"{'=' * 60}\n"
             )
             logging.critical("%s", _abort)
             raise SystemExit(1)
@@ -820,12 +820,12 @@ class ConfigValidator:
             try:
                 return float(raw)
             except ValueError:
-                raise ValidationError(param_name, raw, f"cannot parse as float")
+                raise ValidationError(param_name, raw, "cannot parse as float")
         elif target_type is int:
             try:
                 return int(raw)
             except ValueError:
-                raise ValidationError(param_name, raw, f"cannot parse as int")
+                raise ValidationError(param_name, raw, "cannot parse as int")
         elif target_type is str:
             return str(raw).strip()
         else:

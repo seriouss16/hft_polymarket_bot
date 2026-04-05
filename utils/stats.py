@@ -409,7 +409,7 @@ class StatsCollector:
             f"✅ Wins / ❌ Losses:   {self.pnl.wins:>4} / {losses:<4}",
             f"🎯 Win rate:          {win_rate:>10.1f}%",
             f"📊 Avg per trade:     {avg_pnl:>+10.4f} USD",
-            f"📉 Max drawdown:      {self.pnl.max_drawdown*100:>10.1f}%",
+            f"📉 Max drawdown:      {self.pnl.max_drawdown * 100:>10.1f}%",
             f"📦 In position:       {self._inventory_line()}",
             f"⏸️ Regime cooldown:   {self._format_regime_cooldown(cooldown_until, now_ts)}",
         ]
@@ -555,7 +555,7 @@ class StatsCollector:
                 "USDC CLOB (API)",
                 f"{self._live_wallet_usdc:.2f}" if self._live_wallet_usdc is not None else "—",
             ),
-            row("Max drawdown %", f"{self.pnl.max_drawdown*100:.1f}"),
+            row("Max drawdown %", f"{self.pnl.max_drawdown * 100:.1f}"),
             sep,
             row("Closed trades (sim)", str(self.pnl.trades_count)),
             row("Wins / Losses", f"{self.pnl.wins} / {losses}"),

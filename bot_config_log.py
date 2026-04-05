@@ -138,12 +138,12 @@ def validate_required_config(live_mode: bool) -> None:
     if missing:
         lines = "\n".join(missing)
         _abort = (
-            f"\n{'='*60}\n"
+            f"\n{'=' * 60}\n"
             f"🛑  STARTUP ABORTED — missing required config keys:\n"
             f"{lines}\n"
             f"\nAdd the missing keys to hft_bot/config/runtime.env\n"
             f"or to hft_bot/.env (overrides runtime.env).\n"
-            f"{'='*60}\n"
+            f"{'=' * 60}\n"
         )
         logging.critical("%s", _abort)
         raise SystemExit(1)
