@@ -8,8 +8,10 @@ import threading
 
 from bot_runtime import install_uvloop_policy, load_runtime_env
 from utils.config_validation import validate_config
+from utils.config_version import ConfigVersioner
 
 load_runtime_env()
+ConfigVersioner().auto_snapshot()
 validate_config()
 install_uvloop_policy()
 
