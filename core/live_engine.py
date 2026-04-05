@@ -352,6 +352,43 @@ class LiveExecutionEngine:
             return False, f"invalid side: {side}"
         return True, ""
 
+    def can_enter_position(self, token_id: str, side: str) -> bool:
+        """Check if a new position can be entered for the given token/side.
+
+        Anti-doubling safety gate: prevents entering a position if:
+        - An active order already exists for the same token and side (BUY only for entries)
+        - A confirmed position already exists for the token (from previous fill)
+
+        Returns True if safe to enter, False otherwise.
+        """
+        # Normalize side for comparison (execute() only uses BUY for entries)
+        check_side = side.upper()
+        if check_side not in ("BUY", "BUY_UP", "BUY_DOWN"):
+            logging.debug("[SAFETY] can_enter_position: non-entry side %s — allow", side)
+            return True
+
+        # Check for existing active BUY orders for this token
+        for order in self._active_orders.values():
+            if order.token_id == token_id and order.side == BUY:
+                if order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
+                    logging.warning(
+                        "[SAFETY] Anti-doubling: active BUY order %s exists for token %s (status=%s) — blocking new entry",
+                        order.order_id[:12], token_id[:12], order.status,
+                    )
+                    return False
+
+        # Check for confirmed position (from previous fill)
+        if token_id in self._confirmed_buys:
+            existing_shares = self._confirmed_buys[token_id]
+            if existing_shares >= req_float("POLY_CLOB_MIN_SHARES"):
+                logging.warning(
+                    "[SAFETY] Anti-doubling: confirmed position exists for token %s (shares=%.4f) — blocking new entry",
+                    token_id[:12], existing_shares,
+                )
+                return False
+
+        return True
+
     async def initialize(self) -> None:
         """Start the event worker task."""
         if self._worker_task is None:
