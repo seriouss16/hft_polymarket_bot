@@ -2211,6 +2211,7 @@ class LiveExecutionEngine:
         immediate = False
         for _att in range(sell_attempts):
             await self._ensure_allowance_cached(token_id)
+            send_ts = time.time()
             order_id, immediate = await self._place_limit_raw(token_id, SELL_SIDE, price, size)
             if order_id:
                 break
@@ -2260,7 +2261,7 @@ class LiveExecutionEngine:
             status=OrderStatus.PENDING,
             filled_size=0.0,
             signal_ts=signal_ts,
-            send_ts=send_ts if "send_ts" in locals() else time.time(),
+            send_ts=send_ts,
         )
         self._active_orders[order_id] = tracked
         logging.info(
@@ -2465,6 +2466,7 @@ class LiveExecutionEngine:
         usdc_before_snapshot: float | None = None
         if not self.test_mode:
             usdc_before_snapshot = await asyncio.to_thread(self.fetch_usdc_balance)
+        send_ts = time.time()
         order_id, immediate = await self._place_limit_raw(token_id, BUY, price, shares)
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
@@ -2481,7 +2483,7 @@ class LiveExecutionEngine:
             filled_size=shares if immediate else 0.0,
             entry_best_ask=best_ask,
             signal_ts=signal_ts,
-            send_ts=send_ts if "send_ts" in locals() else time.time(),
+            send_ts=send_ts,
         )
         self._active_orders[order_id] = tracked
         self._entry_stats["executed"] += 1
