@@ -59,34 +59,22 @@ def _parse_csv_floats(raw: str) -> list[float]:
 
 def live_buy_reprice_tick() -> float:
     """Extra price added to best_ask on each BUY reprice (smaller = less adverse slippage per step)."""
-    try:
-        return max(0.0001, float(os.getenv("LIVE_BUY_REPRICE_TICK", "0.001")))
-    except ValueError:
-        return 0.001
+    return max(0.0001, float(os.getenv("LIVE_BUY_REPRICE_TICK", "0.001") or "0.001"))
 
 
 def live_sell_reprice_tick() -> float:
     """Amount subtracted from best_bid on each SELL reprice (smaller = less adverse per step)."""
-    try:
-        return max(0.0001, float(os.getenv("LIVE_SELL_REPRICE_TICK", "0.001")))
-    except ValueError:
-        return 0.001
+    return max(0.0001, float(os.getenv("LIVE_SELL_REPRICE_TICK", "0.001") or "0.001"))
 
 
 def live_emergency_buy_bump() -> float:
     """GTC BUY limit = best_ask + bump during emergency exit (lower = less slippage, may rest longer)."""
-    try:
-        return max(0.0, min(0.2, float(os.getenv("LIVE_EMERGENCY_BUY_BUMP", "0.005"))))
-    except ValueError:
-        return 0.005
+    return max(0.0, min(0.2, float(os.getenv("LIVE_EMERGENCY_BUY_BUMP", "0.005") or "0.005")))
 
 
 def live_emergency_cross_bump() -> float:
     """emergency_exit(): BUY at ask+cross, SELL at bid-cross (spread cross aggressiveness)."""
-    try:
-        return max(0.0, min(0.2, float(os.getenv("LIVE_EMERGENCY_SPREAD_CROSS_BUMP", "0.005"))))
-    except ValueError:
-        return 0.005
+    return max(0.0, min(0.2, float(os.getenv("LIVE_EMERGENCY_SPREAD_CROSS_BUMP", "0.005") or "0.005")))
 
 
 def _parse_usdc_verify_delays() -> list[float]:
