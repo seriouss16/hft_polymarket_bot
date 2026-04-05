@@ -59,21 +59,17 @@ from core.engine_sizing import (
 from core.engine_trend import dynamic_edge_threshold as compute_dynamic_edge_threshold
 from core.engine_trend import micro_trend_metrics
 from core.engine_trend import update_trend as apply_update_trend
+from utils.async_debug_logger import AsyncDebugLogger
+from utils.debug_log import set_debug_logger as _set_debug_logger
 
-DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
-DEBUG_SESSION_ID = os.getenv("DEBUG_SESSION_ID")
-_DEBUG_LOG_ENABLED = os.getenv("HFT_DEBUG_LOG_ENABLED", "0") == "1"
+# Async debug logger instance (initialized in HFTEngine.__init__)
+_debug_logger: AsyncDebugLogger | None = None
 
 
 def _append_debug_log(payload: dict) -> None:
-    """Append one NDJSON line to active debug session file (gated by HFT_DEBUG_LOG_ENABLED)."""
-    if not _DEBUG_LOG_ENABLED:
-        return
-    try:
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except OSError:
-        pass
+    """Queue a debug log entry for non-blocking async write."""
+    from utils.debug_log import _append_debug_log as _append
+    _append(payload)
 
 
 def _env_float_default(key: str, default: float) -> float:
@@ -405,6 +401,14 @@ class HFTEngine:
         self._last_filter_diag_log_ts = time.time()
         self._filter_diag_stats: dict[str, int] = {}
         self._init_entry_profiles()
+        
+        # Initialize async debug logger if enabled
+        global _debug_logger
+        if os.getenv("HFT_DEBUG_LOG_ENABLED", "0") == "1":
+            debug_log_path = os.getenv("DEBUG_LOG_PATH", "debug.log")
+            debug_session_id = os.getenv("DEBUG_SESSION_ID", "default")
+            _debug_logger = AsyncDebugLogger(debug_log_path, debug_session_id)
+            _set_debug_logger(_debug_logger)
 
     _PROFILE_ATTRS = (
         "noise_edge",
@@ -2224,3 +2228,22 @@ class HFTEngine:
                 settlement_fill=settlement_fill,
                 performance_key=perf_key,
             )
+
+    def start_debug_logger(self) -> None:
+        """Start the async debug logger background task.
+        
+        Should be called from the main event loop after engine initialization.
+        """
+        global _debug_logger
+        if _debug_logger is not None:
+            _debug_logger.start()
+
+    async def stop_debug_logger(self) -> int:
+        """Stop the async debug logger and flush pending entries.
+        
+        Returns the number of log entries dropped due to queue overflow.
+        """
+        global _debug_logger
+        if _debug_logger is not None:
+            return await _debug_logger.stop()
+        return 0

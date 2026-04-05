@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from utils.debug_log import _append_debug_log
+
 
 def rsi_slope_per_tick(rsi_tick_history) -> float:
     """Approximate RSI slope over the last few engine ticks."""
@@ -69,21 +71,15 @@ def rsi_range_exit_triggered(
     if dynamic_upper is not None and dynamic_lower is not None:
         upper_band = dynamic_upper
         lower_band = dynamic_lower
-        # Debug logging for dynamic bands
-        if os.getenv("HFT_DEBUG_LOG_ENABLED") == "1":
-            import json
-            try:
-                with open(os.getenv("HFT_DEBUG_LOG_PATH", "/dev/null"), "a") as f:
-                    f.write(json.dumps({
-                        "event": "rsi_exit_dynamic_bands",
-                        "position_side": position_side,
-                        "current_rsi": current_rsi,
-                        "dynamic_upper": float(dynamic_upper),
-                        "dynamic_lower": float(dynamic_lower),
-                        "clamped_rsi": float(rx),
-                    }) + "\n")
-            except:
-                pass
+        # Debug logging for dynamic bands (non-blocking)
+        _append_debug_log({
+            "event": "rsi_exit_dynamic_bands",
+            "position_side": position_side,
+            "current_rsi": float(current_rsi),
+            "dynamic_upper": float(dynamic_upper),
+            "dynamic_lower": float(dynamic_lower),
+            "clamped_rsi": float(rx),
+        })
     else:
         # Fallback to static entry bands (backward compatibility)
         if position_side == "UP":
@@ -92,21 +88,15 @@ def rsi_range_exit_triggered(
         else:  # DOWN
             upper_band = eng.rsi_entry_down_high
             lower_band = eng.rsi_entry_down_low
-        # Debug logging for static bands
-        if os.getenv("HFT_DEBUG_LOG_ENABLED") == "1":
-            import json
-            try:
-                with open(os.getenv("HFT_DEBUG_LOG_PATH", "/dev/null"), "a") as f:
-                    f.write(json.dumps({
-                        "event": "rsi_exit_static_bands",
-                        "position_side": position_side,
-                        "current_rsi": current_rsi,
-                        "static_upper": float(upper_band),
-                        "static_lower": float(lower_band),
-                        "clamped_rsi": float(rx),
-                    }) + "\n")
-            except:
-                pass
+        # Debug logging for static bands (non-blocking)
+        _append_debug_log({
+            "event": "rsi_exit_static_bands",
+            "position_side": position_side,
+            "current_rsi": float(current_rsi),
+            "static_upper": float(upper_band),
+            "static_lower": float(lower_band),
+            "clamped_rsi": float(rx),
+        })
     
     if position_side == "UP":
         if rx >= upper_band and unrealized >= tp_line:
