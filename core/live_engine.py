@@ -1924,7 +1924,7 @@ class LiveExecutionEngine:
             return 0.0
         self._confirmed_buys[token_id] = best
         logging.info(
-            "[REST_RECONCILE] [LIVE] probe_chain_shares_for_close: token=%s → %.4f sh (synced _confirmed_buys).",
+            "[REST_RECONCILE] [LIVE] probe_chain_shares_for_close: token=%s -> %.4f sh (synced _confirmed_buys).",
             token_id[:20],
             best,
         )

@@ -1630,7 +1630,7 @@ class HFTEngine:
                 self._entry_context_ready = True
                 self.entry_context = self._entry_context
                 logging.info(
-                    "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | " "strategy=%s profile=%s",
+                    "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | strategy=%s profile=%s",
                     poly_mid,
                     fast_price,
                     fast_price - poly_mid,
