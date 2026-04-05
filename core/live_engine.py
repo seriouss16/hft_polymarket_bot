@@ -23,6 +23,7 @@ import requests
 from dataclasses import dataclass
 
 from utils.env_config import req_float, req_int, req_str
+from utils.resilience import safe_task
 
 from core.live_common import (
     BUY,
@@ -395,6 +396,7 @@ class LiveExecutionEngine:
             self._worker_task = asyncio.create_task(self._event_worker())
             logging.info("[LIVE] Event worker started.")
 
+    @safe_task(task_name="live_event_worker")
     async def _event_worker(self) -> None:
         """Main event loop for processing order and market events."""
         while True:

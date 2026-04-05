@@ -29,6 +29,7 @@ from typing import Any
 import websockets
 
 from core.live_common import _snapshot_from_levels
+from utils.resilience import safe_task
 
 CLOB_MARKET_WS_URL = os.getenv(
     "CLOB_MARKET_WS_URL",
@@ -533,6 +534,7 @@ class ClobMarketBookCache:
             self._custom_features,
         )
 
+    @safe_task(task_name="clob_market_ping")
     async def _ping_loop(self, ws: Any) -> None:
         try:
             while True:
@@ -552,6 +554,7 @@ class ClobMarketBookCache:
             except Exception:
                 pass
 
+    @safe_task(task_name="clob_market_ws")
     async def run_forever(self) -> None:
         """Background task: maintain one market WS connection and update books."""
         if not self.enabled:

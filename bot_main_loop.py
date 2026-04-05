@@ -28,6 +28,7 @@ from data.poly_clob import PolyOrderBook, ClobAsyncHTTPClient
 from data.balance_cache import BalanceCache, ConditionalAllowanceCache
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
+from utils.resilience import safe_task
 from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
 
@@ -70,6 +71,7 @@ class _BackgroundTaskManager:
         return self._shutdown_event.is_set()
 
 
+@safe_task(task_name="stats_logging")
 async def _stats_logging_task(
     stats: StatsCollector,
     balance_cache: BalanceCache | None,
@@ -107,6 +109,7 @@ async def _stats_logging_task(
             pass  # Normal: interval elapsed
 
 
+@safe_task(task_name="pulse_logging")
 async def _pulse_logging_task(
     aggregator: FastPriceAggregator,
     poly_book_ref: list,
@@ -444,6 +447,7 @@ async def main():
     if LIVE_MODE and live_exec.client is not None:
         _heartbeat_interval_sec = req_float("LIVE_HEARTBEAT_INTERVAL_SEC")
 
+        @safe_task(task_name="heartbeat")
         async def _run_heartbeat() -> None:
             """Send Polymarket CLOB heartbeat periodically to keep open orders alive.
 
@@ -466,6 +470,7 @@ async def main():
     _orderbook_refresh_task: asyncio.Task | None = None
     _orderbook_refresh_interval = float(os.getenv("CLOB_ORDERBOOK_REFRESH_SEC", "1.5"))
     
+    @safe_task(task_name="orderbook_refresh")
     async def _run_orderbook_refresh() -> None:
         """Continuously refresh CLOB order book cache in background.
         
@@ -512,6 +517,7 @@ async def main():
     _balance_refresh_task: asyncio.Task | None = None
     _balance_refresh_interval = float(os.getenv("BALANCE_REFRESH_SEC", "30"))
     
+    @safe_task(task_name="balance_refresh")
     async def _run_balance_refresh() -> None:
         """Continuously refresh balance cache in background.
         
@@ -542,6 +548,7 @@ async def main():
     _allowance_refresh_task: asyncio.Task | None = None
     _allowance_refresh_interval = float(os.getenv("ALLOWANCE_REFRESH_INTERVAL_SEC", "60"))
 
+    @safe_task(task_name="allowance_refresh")
     async def _run_allowance_refresh() -> None:
         """Continuously refresh allowance cache in background.
 
