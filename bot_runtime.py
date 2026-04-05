@@ -39,6 +39,7 @@ def load_runtime_env() -> None:
 
     # 3. Day/Night session profile (applied at startup based on UTC time)
     from core.session_profile import apply_profile
+
     apply_profile(force=True)
 
     # 4. SIM slippage defaults

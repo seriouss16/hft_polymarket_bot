@@ -51,4 +51,3 @@ class RiskEngine:
         """Apply post-trade cooldown after a losing trade."""
         if pnl < 0:
             self.cooldown_until = max(self.cooldown_until, now_ts + self.loss_cooldown_sec)
-

@@ -6,9 +6,9 @@ import asyncio
 import logging
 import time
 import traceback
-from typing import Any, Callable, Coroutine, Optional, TypeVar, Generic, Union
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable, Coroutine, Generic, Optional, TypeVar, Union
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +23,14 @@ class CircuitState(Enum):
 
 class CircuitBreakerError(Exception):
     """Exception raised when the circuit breaker is OPEN."""
+
     pass
 
 
 class CircuitBreaker:
     """
     Circuit Breaker pattern implementation for external API resilience.
-    
+
     States:
     - CLOSED: Normal operation. Failures are tracked.
     - OPEN: Circuit is broken. Calls fail immediately.
@@ -45,7 +46,7 @@ class CircuitBreaker:
         self.name = name
         self.error_threshold = error_threshold
         self.recovery_timeout = recovery_timeout
-        
+
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.last_failure_time: float = 0.0
@@ -57,7 +58,7 @@ class CircuitBreaker:
         """
         async with self._lock:
             await self._check_state()
-            
+
             if self.state == CircuitState.OPEN:
                 raise CircuitBreakerError(f"Circuit '{self.name}' is OPEN")
 
@@ -91,7 +92,7 @@ class CircuitBreaker:
         async with self._lock:
             self.failure_count += 1
             self.last_failure_time = time.time()
-            
+
             if self.state == CircuitState.CLOSED:
                 if self.failure_count >= self.error_threshold:
                     logger.warning("Circuit '%s' threshold reached, transitioning to OPEN", self.name)
@@ -104,6 +105,7 @@ class CircuitBreaker:
 @dataclass
 class TaskMetrics:
     """Metrics for a single background task."""
+
     name: str
     start_time: float = 0.0
     last_run: float = 0.0
@@ -165,7 +167,7 @@ class TaskMonitor:
 
     async def mark_task_error(self, name: str, error: str, trigger_alerts: bool = True) -> None:
         """Record an error for a task and mark the run as completed.
-        
+
         Args:
             name: Task name
             error: Error message
@@ -251,6 +253,7 @@ def safe_task(
     Returns:
         Wrapped coroutine function
     """
+
     def decorator(func: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Coroutine[Any, Any, Any]]:
         name = task_name or func.__name__
         mon = monitor or get_monitor()

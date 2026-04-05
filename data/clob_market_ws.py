@@ -85,7 +85,7 @@ class ClobMarketBookCache:
         self._max_stale_sec = float(os.getenv("CLOB_MARKET_WS_MAX_STALE_SEC", "25"))
         self._stale_warn_sec = float(os.getenv("CLOB_WS_STALE_WARN_SEC", "15"))
         self._stale_skip_sec = float(os.getenv("CLOB_WS_STALE_SKIP_SEC", "25"))
-        
+
         # Reconnection backoff parameters
         self._reconnect_base_sec = float(os.getenv("CLOB_WS_RECONNECT_BASE_SEC", "1"))
         self._reconnect_max_sec = float(os.getenv("CLOB_WS_RECONNECT_MAX_SEC", "30"))
@@ -95,7 +95,7 @@ class ClobMarketBookCache:
         self._reconnecting = False
         self._backup_connected = False
         self._backup_ws: Any = None
-        
+
         # Health monitoring
         self._health_log_interval = float(os.getenv("CLOB_WS_HEALTH_LOG_INTERVAL_SEC", "60"))
         self._last_health_log = time.time()
@@ -104,7 +104,7 @@ class ClobMarketBookCache:
         self._message_count = 0
         self._message_rate_window: list[float] = []  # timestamps for rolling rate
         self._max_rate_samples = 1000
-        
+
         self._ping_interval = float(os.getenv("CLOB_MARKET_WS_PING_SEC", "10"))
         self._custom_features = os.getenv("CLOB_MARKET_WS_CUSTOM_FEATURES", "1").strip().lower() in (
             "1",
@@ -123,7 +123,7 @@ class ClobMarketBookCache:
         # Sequence tracking (Data Integrity - Sequence Protection)
         self._last_sequence: dict[str, int] = {}
         self._sequence_gaps: int = 0
-        
+
         # --- HFT Optimization: Cached snapshot with dirty flag ---
         self._cache_enabled = os.getenv("HFT_CACHE_BOOK_SNAPSHOT", "1").strip().lower() in (
             "1",
@@ -178,27 +178,24 @@ class ClobMarketBookCache:
         """Return the same shape as ``_snapshot_from_levels`` or None if no book yet."""
         if not token_id:
             return None
-        
+
         # Check if we can use cached snapshot
-        if (
-            self._cache_enabled
-            and depth == self._top_n
-            and not self._snapshot_dirty.get(token_id, True)
-        ):
+        if self._cache_enabled and depth == self._top_n and not self._snapshot_dirty.get(token_id, True):
             with self._lock:
                 cached = self._cached_snapshot.get(token_id)
                 if cached is not None:
                     return cached
-        
+
         with self._lock:
             bids = self._bids.get(token_id)
             asks = self._asks.get(token_id)
             if not bids and not asks:
                 return None
-            
+
             # Use heapq.nlargest for top-N extraction (optimized)
             if self._cache_enabled and depth == self._top_n:
                 import heapq
+
                 # Get top N bids (highest prices)
                 bid_items = heapq.nlargest(depth, bids.items(), key=lambda x: x[0])
                 # Get top N asks (lowest prices)
@@ -208,9 +205,9 @@ class ClobMarketBookCache:
             else:
                 bid_levels = sorted(bids.items(), key=lambda x: x[0], reverse=True)
                 ask_levels = sorted(asks.items(), key=lambda x: x[0])
-        
+
         snap = _snapshot_from_levels(bid_levels, ask_levels, depth)
-        
+
         # Cache the snapshot if enabled
         if self._cache_enabled and depth == self._top_n:
             with self._lock:
@@ -228,7 +225,7 @@ class ClobMarketBookCache:
                     imbalance = (bid_vol - ask_vol) / total if total > 0 else 0.0
                     self._cached_imbalance[token_id] = imbalance
                 self._mark_snapshot_clean(token_id)
-        
+
         return snap
 
     def get_snapshot_with_imbalance(self, token_id: str, depth: int = 5) -> dict[str, Any] | None:
@@ -241,7 +238,7 @@ class ClobMarketBookCache:
         snap = self.snapshot(token_id, depth)
         if snap is None:
             return None
-        
+
         # Use cached imbalance and volumes if available and fresh
         if (
             self._cache_enabled
@@ -249,21 +246,21 @@ class ClobMarketBookCache:
             and not self._snapshot_dirty.get(token_id, True)
             and token_id in self._cached_imbalance
         ):
-            snap['bid_vol_topn'] = self._total_bid_volume.get(token_id, 0.0)
-            snap['ask_vol_topn'] = self._total_ask_volume.get(token_id, 0.0)
-            snap['imbalance'] = self._cached_imbalance[token_id]
-            total = snap['bid_vol_topn'] + snap['ask_vol_topn']
-            snap['pressure'] = snap['bid_vol_topn'] / total if total > 0 else 0.5
+            snap["bid_vol_topn"] = self._total_bid_volume.get(token_id, 0.0)
+            snap["ask_vol_topn"] = self._total_ask_volume.get(token_id, 0.0)
+            snap["imbalance"] = self._cached_imbalance[token_id]
+            total = snap["bid_vol_topn"] + snap["ask_vol_topn"]
+            snap["pressure"] = snap["bid_vol_topn"] / total if total > 0 else 0.5
         else:
             # Calculate volumes from bid/ask levels (fallback)
-            bid_vol = sum(snap.get('bids', {}).values())
-            ask_vol = sum(snap.get('asks', {}).values())
+            bid_vol = sum(snap.get("bids", {}).values())
+            ask_vol = sum(snap.get("asks", {}).values())
             total = bid_vol + ask_vol
-            snap['bid_vol_topn'] = bid_vol
-            snap['ask_vol_topn'] = ask_vol
-            snap['imbalance'] = (bid_vol - ask_vol) / total if total > 0 else 0.0
-            snap['pressure'] = bid_vol / total if total > 0 else 0.5
-        
+            snap["bid_vol_topn"] = bid_vol
+            snap["ask_vol_topn"] = ask_vol
+            snap["imbalance"] = (bid_vol - ask_vol) / total if total > 0 else 0.0
+            snap["pressure"] = bid_vol / total if total > 0 else 0.5
+
         return snap
 
     def _apply_snapshot(self, snap: dict[str, Any], token_id: str) -> None:
@@ -274,8 +271,8 @@ class ClobMarketBookCache:
         """
         if not token_id or not snap:
             return
-        bids_raw = snap.get('bids', {})
-        asks_raw = snap.get('asks', {})
+        bids_raw = snap.get("bids", {})
+        asks_raw = snap.get("asks", {})
         bids = {float(p): float(s) for p, s in bids_raw.items()} if bids_raw else {}
         asks = {float(p): float(s) for p, s in asks_raw.items()} if asks_raw else {}
         with self._lock:
@@ -314,19 +311,19 @@ class ClobMarketBookCache:
         # During reconnection, extend threshold by 2x to avoid skip gates
         effective_threshold = self._max_stale_sec * (2.0 if self._reconnecting else 1.0)
         return age <= effective_threshold
-    
+
     def get_health_metrics(self) -> dict[str, Any]:
         """Return connection health metrics."""
         now = time.time()
         uptime = (now - self._connection_start_time) if self._connection_start_time else 0.0
-        
+
         # Calculate rolling message rate (messages/sec over recent window)
         if len(self._message_rate_window) > 1:
             time_span = self._message_rate_window[-1] - self._message_rate_window[0]
             msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
         else:
             msg_rate = 0.0
-        
+
         # Last message age: inf when no WS/book timestamps yet (not "fresh" at 0s).
         with self._lock:
             if self._last_ts:
@@ -334,10 +331,8 @@ class ClobMarketBookCache:
                 last_msg_age = now - latest_ts
             else:
                 last_msg_age = math.inf
-        
-        last_age_out: float = (
-            round(last_msg_age, 2) if math.isfinite(last_msg_age) else last_msg_age
-        )
+
+        last_age_out: float = round(last_msg_age, 2) if math.isfinite(last_msg_age) else last_msg_age
         return {
             "uptime_sec": round(uptime, 2),
             "reconnect_count": self._total_reconnects,
@@ -346,13 +341,13 @@ class ClobMarketBookCache:
             "is_reconnecting": self._reconnecting,
             "backup_active": self._backup_connected,
         }
-    
+
     def _log_health_metrics(self) -> None:
         """Log health metrics periodically."""
         now = time.time()
         if now - self._last_health_log < self._health_log_interval:
             return
-        
+
         metrics = self.get_health_metrics()
         lma = metrics["last_message_age_sec"]
         lma_s = f"{lma:.2f}" if isinstance(lma, float) and math.isfinite(lma) else "inf"
@@ -396,28 +391,29 @@ class ClobMarketBookCache:
 
     def _check_sequence(self, asset_id: str, seq: int) -> bool:
         """Return True if event is valid (seq > last_sequence), False if it should be dropped.
-        
+
         Updates _last_sequence and tracks gaps.
         """
         if seq <= 0:
             return True  # Ignore missing/invalid sequence numbers
-            
+
         last = self._last_sequence.get(asset_id, 0)
         if seq <= last:
-            logging.warning(
-                "[WS_SEQ] Dropping stale event for %s: got_seq=%d last_seq=%d",
-                asset_id, seq, last
-            )
+            logging.warning("[WS_SEQ] Dropping stale event for %s: got_seq=%d last_seq=%d", asset_id, seq, last)
             return False
-            
+
         if last > 0 and seq > last + 1:
             gap = seq - last - 1
             self._sequence_gaps += gap
             logging.warning(
                 "[WS_SEQ] Sequence gap for %s: expected=%d got=%d gap=%d total_gaps=%d",
-                asset_id, last + 1, seq, gap, self._sequence_gaps
+                asset_id,
+                last + 1,
+                seq,
+                gap,
+                self._sequence_gaps,
             )
-            
+
         self._last_sequence[asset_id] = seq
         return True
 
@@ -426,15 +422,15 @@ class ClobMarketBookCache:
         aid = str(msg.get("asset_id") or "")
         if not aid:
             return
-            
+
         seq = int(msg.get("sequence") or 0)
-        
+
         bids = _levels_from_side_rows(msg.get("bids"))
         asks = _levels_from_side_rows(msg.get("asks"))
         with self._lock:
             if seq > 0 and not self._check_sequence(aid, seq):
                 return
-                
+
             self._bids[aid] = bids
             self._asks[aid] = asks
             self._touch(aid)
@@ -455,16 +451,16 @@ class ClobMarketBookCache:
             aid = str(ch.get("asset_id") or "")
             if not aid:
                 continue
-                
+
             seq = int(msg.get("sequence") or 0)
-            
+
             price = _parse_num(ch.get("price"))
             size = _parse_num(ch.get("size"))
             side = str(ch.get("side") or "").upper()
             with self._lock:
                 if seq > 0 and not self._check_sequence(aid, seq):
                     continue
-                    
+
                 bids = self._bids.setdefault(aid, {})
                 asks = self._asks.setdefault(aid, {})
                 if side == "BUY":
@@ -498,9 +494,9 @@ class ClobMarketBookCache:
         aid = str(msg.get("asset_id") or "")
         if not aid:
             return
-            
+
         seq = int(msg.get("sequence") or 0)
-        
+
         bb = _parse_num(msg.get("best_bid"))
         ba = _parse_num(msg.get("best_ask"))
         if bb <= 0.0 and ba <= 0.0:
@@ -508,7 +504,7 @@ class ClobMarketBookCache:
         with self._lock:
             if seq > 0 and not self._check_sequence(aid, seq):
                 return
-                
+
             bids = self._bids.setdefault(aid, {})
             asks = self._asks.setdefault(aid, {})
             if bb > 0.0:
@@ -610,20 +606,20 @@ class ClobMarketBookCache:
         if not self.enabled:
             logging.info("CLOB market WS disabled (CLOB_MARKET_WS_ENABLED=0).")
             return
-        
+
         primary_url = CLOB_MARKET_WS_URL
         backup_url = CLOB_MARKET_WS_BACKUP_URL if CLOB_MARKET_WS_BACKUP_URL else None
-        
+
         try:
             while not self._stop.is_set():
                 ids = list(self._asset_ids)
                 if not ids:
                     await asyncio.sleep(0.25)
                     continue
-                
+
                 # Determine which URL to use
                 url = primary_url if not self._backup_connected else (backup_url or primary_url)
-                
+
                 try:
                     async with websockets.connect(
                         url,
@@ -645,7 +641,7 @@ class ClobMarketBookCache:
                             self._backup_connected = False
                         else:
                             logging.info("CLOB market WS connected: %s", url)
-                        
+
                         await self._send_subscribe(ws, ids)
                         ping_task = asyncio.create_task(self._ping_loop(ws))
                         try:
@@ -672,19 +668,19 @@ class ClobMarketBookCache:
                     self._reconnect_attempt += 1
                     if self._reconnect_start_time is None:
                         self._reconnect_start_time = time.time()
-                    
+
                     base = self._reconnect_base_sec
                     max_delay = self._reconnect_max_sec
                     jitter_ms = self._reconnect_jitter_ms
-                    
+
                     # Exponential backoff: base * 2^attempt, capped at max
                     delay = min(base * (2 ** (self._reconnect_attempt - 1)), max_delay)
                     # Add jitter: random 0-jitter_ms
                     jitter = (random.random() if jitter_ms > 0 else 0.0) * (jitter_ms / 1000.0)
                     delay += jitter
-                    
+
                     self._reconnecting = True
-                    
+
                     # Check if we should try backup connection
                     if backup_url and not self._backup_connected and self._reconnect_attempt >= 3:
                         logging.warning(
@@ -704,7 +700,7 @@ class ClobMarketBookCache:
                             self._reconnect_attempt,
                         )
                         await asyncio.sleep(delay)
-                    
+
                     self._total_reconnects += 1
         except asyncio.CancelledError:
             raise

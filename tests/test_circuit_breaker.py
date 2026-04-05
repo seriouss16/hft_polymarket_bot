@@ -1,18 +1,21 @@
 import asyncio
-import pytest
 import time
 from unittest.mock import AsyncMock, MagicMock
-from utils.resilience import CircuitBreaker, CircuitState, CircuitBreakerError
+
+import pytest
+
+from utils.resilience import CircuitBreaker, CircuitBreakerError, CircuitState
+
 
 @pytest.mark.asyncio
 async def test_circuit_breaker_state_transitions():
     cb = CircuitBreaker(name="test", error_threshold=2, recovery_timeout=0.1)
-    
+
     assert cb.state == CircuitState.CLOSED
-    
+
     async def failing_func():
         raise ValueError("fail")
-    
+
     async def success_func():
         return "ok"
 
@@ -34,17 +37,18 @@ async def test_circuit_breaker_state_transitions():
 
     # Wait for recovery timeout
     await asyncio.sleep(0.15)
-    
+
     # Next call should transition to HALF_OPEN then CLOSED on success
     result = await cb.call(success_func)
     assert result == "ok"
     assert cb.state == CircuitState.CLOSED
     assert cb.failure_count == 0
 
+
 @pytest.mark.asyncio
 async def test_circuit_breaker_half_open_to_open():
     cb = CircuitBreaker(name="test", error_threshold=1, recovery_timeout=0.1)
-    
+
     async def failing_func():
         raise ValueError("fail")
 
@@ -55,7 +59,7 @@ async def test_circuit_breaker_half_open_to_open():
 
     # Wait for recovery timeout
     await asyncio.sleep(0.15)
-    
+
     # Call while HALF_OPEN fails -> back to OPEN
     with pytest.raises(ValueError):
         await cb.call(failing_func)

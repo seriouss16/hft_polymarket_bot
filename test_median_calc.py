@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stats import _median_avg
 
+
 def test_median_avg():
     """Test the median average calculation."""
     test_cases = [
@@ -26,7 +27,7 @@ def test_median_avg():
         ([-3, -2, -1, 0, 1, 2, 3], 0.0, "Symmetric odd: median avg = 0"),
         ([-2, -1, 0, 1], -0.5, "Symmetric even: (-1+0)/2 = -0.5"),
     ]
-    
+
     all_passed = True
     for values, expected, description in test_cases:
         result = _median_avg(values)
@@ -38,13 +39,14 @@ def test_median_avg():
         if not passed:
             all_passed = False
         print()
-    
+
     if all_passed:
         print("All tests passed! ✓")
         return 0
     else:
         print("Some tests failed! ✗")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(test_median_avg())

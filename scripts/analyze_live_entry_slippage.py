@@ -21,6 +21,7 @@ From repo root:
 
 Requires log lines from live_engine (BUY placed @) and executor ([LIVE BUY_*] filled @ avg).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,7 +29,6 @@ import re
 import statistics
 import sys
 from pathlib import Path
-
 
 _PLACED = re.compile(
     r"BUY placed:\s+BUY_(UP|DOWN)\s+[\d.]+\s+sh\s+@\s+([\d.]+)",

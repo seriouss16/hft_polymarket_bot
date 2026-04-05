@@ -132,13 +132,9 @@ def validate_required_config(live_mode: bool) -> None:
                 missing.append(f"  {key}  (required for LIVE_MODE=1)")
     if live_mode:
         if not os.environ.get("LIVE_ORDER_SIZE", "").strip():
-            missing.append(
-                "  LIVE_ORDER_SIZE  (or set HFT_DEFAULT_TRADE_USD — unified at startup)"
-            )
+            missing.append("  LIVE_ORDER_SIZE  (or set HFT_DEFAULT_TRADE_USD — unified at startup)")
         if not os.environ.get("LIVE_MAX_SPREAD", "").strip():
-            missing.append(
-                "  LIVE_MAX_SPREAD  (or set HFT_MAX_ENTRY_SPREAD — unified at startup)"
-            )
+            missing.append("  LIVE_MAX_SPREAD  (or set HFT_MAX_ENTRY_SPREAD — unified at startup)")
     if missing:
         lines = "\n".join(missing)
         _abort = (

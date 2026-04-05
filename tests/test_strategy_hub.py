@@ -17,7 +17,14 @@ from core.strategy_hub import StrategyHub, StrategyResult
 class MockStrategy(BaseStrategy):
     """A test strategy that returns configurable results."""
 
-    def __init__(self, name: str, result: dict[str, Any] | None = None, delay: float = 0.0, raise_exc: Exception | None = None, latency_ms: float = 100.0):
+    def __init__(
+        self,
+        name: str,
+        result: dict[str, Any] | None = None,
+        delay: float = 0.0,
+        raise_exc: Exception | None = None,
+        latency_ms: float = 100.0,
+    ):
         """Initialize with test parameters."""
         self.name = name
         self.result = result

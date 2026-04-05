@@ -27,15 +27,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.live_engine import (
-    BUY,
-    SELL_SIDE,
-    LiveExecutionEngine,
-    LiveRiskManager,
-    OrderStatus,
-    TrackedOrder,
-    _collateral_usd_from_balance_allowance_response,
-)
+from core.live_engine import (BUY, SELL_SIDE, LiveExecutionEngine,
+                              LiveRiskManager, OrderStatus, TrackedOrder,
+                              _collateral_usd_from_balance_allowance_response)
 
 # _ORDER_STALE_SEC is read at module import time from the env default (3.0 s).
 # conftest monkeypatching of env vars does NOT retroactively change already-read
@@ -61,12 +55,22 @@ class TestPurgeBuyOrdersForToken:
         eng = make_engine(monkeypatch)
         t = "tok_purge_12345678901234567890"
         o1 = TrackedOrder(
-            order_id="ord-a", token_id=t, side=BUY, price=0.5, size=10.0,
-            status=OrderStatus.FILLED, filled_size=10.0,
+            order_id="ord-a",
+            token_id=t,
+            side=BUY,
+            price=0.5,
+            size=10.0,
+            status=OrderStatus.FILLED,
+            filled_size=10.0,
         )
         o2 = TrackedOrder(
-            order_id="ord-b", token_id=t, side=BUY, price=0.6, size=10.0,
-            status=OrderStatus.FILLED, filled_size=10.0,
+            order_id="ord-b",
+            token_id=t,
+            side=BUY,
+            price=0.6,
+            size=10.0,
+            status=OrderStatus.FILLED,
+            filled_size=10.0,
         )
         eng._active_orders = {"ord-a": o1, "ord-b": o2}
         eng._confirmed_buys[t] = 10.0
@@ -305,8 +309,7 @@ class TestPollOrderBuySubMinPartial:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
-        order = make_order(size=8.0, filled=3.0, status=OrderStatus.PARTIAL,
-                           age_offset=_STALE_AGE)
+        order = make_order(size=8.0, filled=3.0, status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         fak_called_with: list[float] = []
@@ -331,8 +334,7 @@ class TestPollOrderBuySubMinPartial:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
-        order = make_order(size=8.0, filled=5.0, status=OrderStatus.PARTIAL,
-                           age_offset=_STALE_AGE)
+        order = make_order(size=8.0, filled=5.0, status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         fak_called: list = []
@@ -348,11 +350,9 @@ class TestPollOrderBuySubMinPartial:
 
         with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 0):
-                with patch.object(eng, "_get_order_fill",
-                                  return_value=("partially_matched", 5.0)):
+                with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 5.0)):
                     with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
-                        with patch.object(eng, "_emergency_exit_order",
-                                          side_effect=fake_emergency):
+                        with patch.object(eng, "_emergency_exit_order", side_effect=fake_emergency):
                             await eng._poll_order(order)
 
         assert len(fak_called) == 0
@@ -372,8 +372,7 @@ class TestPollOrderSellSubMinRemainder:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
 
-        order = make_order(side=SELL_SIDE, size=8.0, filled=4.0,
-                           status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
+        order = make_order(side=SELL_SIDE, size=8.0, filled=4.0, status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         fak_called_with: list[float] = []
@@ -384,10 +383,8 @@ class TestPollOrderSellSubMinRemainder:
 
         with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
-                with patch.object(eng, "_get_order_fill",
-                                  return_value=("partially_matched", 4.0)):
-                    with patch.object(eng, "get_best_prices",
-                                      return_value=(0.45, 0.55)):
+                with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 4.0)):
+                    with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
                         with patch.object(eng, "_fak_sell", side_effect=fake_fak_sell):
                             await eng._poll_order(order)
 
@@ -435,8 +432,7 @@ class TestPollOrderReprice:
         monkeypatch.setenv("POLY_CLOB_MIN_SHARES", "5")
         eng = make_engine(monkeypatch)
         # filled=6 >= poly_min=5 → goes to reprice path, not FAK-exit.
-        order = make_order(size=10.0, filled=6.0, status=OrderStatus.PARTIAL,
-                           age_offset=_STALE_AGE)
+        order = make_order(size=10.0, filled=6.0, status=OrderStatus.PARTIAL, age_offset=_STALE_AGE)
         eng._active_orders[order.order_id] = order
 
         async def fake_place(token_id, side, price, size):
@@ -444,8 +440,7 @@ class TestPollOrderReprice:
 
         with patch("core.live_common._ORDER_STALE_SEC", 0.0):
             with patch("core.live_engine._ORDER_MAX_REPRICE", 2):
-                with patch.object(eng, "_get_order_fill",
-                                  return_value=("partially_matched", 6.0)):
+                with patch.object(eng, "_get_order_fill", return_value=("partially_matched", 6.0)):
                     with patch.object(eng, "get_best_prices", return_value=(0.45, 0.55)):
                         with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
                             await eng._poll_order(order)
@@ -477,9 +472,7 @@ class TestPollOrderReprice:
                         "get_best_prices",
                         return_value=(0.40, 0.53),
                     ):
-                        with patch.object(
-                            eng, "_place_limit_raw", side_effect=fake_place
-                        ):
+                        with patch.object(eng, "_place_limit_raw", side_effect=fake_place):
                             await eng._poll_order(order)
 
         assert order.status == OrderStatus.CANCELLED
@@ -626,8 +619,11 @@ class TestExecuteSkips:
     async def test_skip_bad_spread(self, monkeypatch):
         """Spread exceeding max_spread must skip."""
         eng = LiveExecutionEngine(
-            private_key=None, funder=None, test_mode=True,
-            min_order_size=4.0, max_spread=0.05,
+            private_key=None,
+            funder=None,
+            test_mode=True,
+            min_order_size=4.0,
+            max_spread=0.05,
         )
         with patch.object(eng, "get_best_prices", return_value=(0.30, 0.60)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
@@ -883,14 +879,16 @@ class TestSellFillAvgPriceHelpers:
     """CLOB order helpers: associate_trades must feed VWAP, not limit price."""
 
     def test_associate_trade_ids_list(self):
-        assert LiveExecutionEngine._associate_trade_ids_from_order(
-            {"associate_trades": ["0xabc", "0xdef"]}
-        ) == ["0xabc", "0xdef"]
+        assert LiveExecutionEngine._associate_trade_ids_from_order({"associate_trades": ["0xabc", "0xdef"]}) == [
+            "0xabc",
+            "0xdef",
+        ]
 
     def test_associate_trade_ids_json_string(self):
-        assert LiveExecutionEngine._associate_trade_ids_from_order(
-            {"associate_trades": '["tid1","tid2"]'}
-        ) == ["tid1", "tid2"]
+        assert LiveExecutionEngine._associate_trade_ids_from_order({"associate_trades": '["tid1","tid2"]'}) == [
+            "tid1",
+            "tid2",
+        ]
 
 
 class TestFreshnessChecks:
@@ -900,7 +898,7 @@ class TestFreshnessChecks:
         """execute() must skip when market data is stale and LIVE_STALE_BLOCK_ACTIONS=1."""
         monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
         eng = make_engine(monkeypatch)
-    
+
         # Mock stale cache (MagicMock for sync is_fresh)
         mock_cache = MagicMock()
         mock_cache.is_fresh.return_value = False
@@ -908,7 +906,7 @@ class TestFreshnessChecks:
 
         with patch.object(eng, "get_best_prices", return_value=(0.48, 0.52)):
             result = await eng.execute("BUY_DOWN", TOKEN, budget_usd=10.0)
-        
+
         assert result == (0.0, 0.0)
         mock_cache.is_fresh.assert_called_with(TOKEN)
 
@@ -916,14 +914,14 @@ class TestFreshnessChecks:
         """close_position() must skip when market data is stale and LIVE_STALE_BLOCK_ACTIONS=1."""
         monkeypatch.setenv("LIVE_STALE_BLOCK_ACTIONS", "1")
         eng = make_engine(monkeypatch)
-        
+
         # Mock stale cache (MagicMock for sync is_fresh)
         mock_cache = MagicMock()
         mock_cache.is_fresh.return_value = False
         eng.set_market_book_cache(mock_cache)
 
         result = await eng.close_position(TOKEN, 10.0)
-        
+
         assert result == (0.0, 0.0)
         mock_cache.is_fresh.assert_called_with(TOKEN)
 

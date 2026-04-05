@@ -44,11 +44,7 @@ class SameMessageDedupeFilter(logging.Filter):
         key = (record.levelno, msg)
         now = time.time()
         with self._lock:
-            if (
-                self._last_key is not None
-                and key == self._last_key
-                and now - self._last_emit_ts < min_sec
-            ):
+            if self._last_key is not None and key == self._last_key and now - self._last_emit_ts < min_sec:
                 record._dedupe_same_msg_allow = False
                 return False
             self._last_key = key

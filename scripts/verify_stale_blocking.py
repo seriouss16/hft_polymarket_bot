@@ -2,18 +2,22 @@ import asyncio
 import logging
 import os
 import time
+
+from core.live_common import OrderStatus, TrackedOrder
 from core.live_engine import LiveExecutionEngine
-from core.live_common import TrackedOrder, OrderStatus
 
 # Setup logging to capture the warning
 logging.basicConfig(level=logging.INFO)
+
 
 class MockCache:
     def __init__(self, fresh=True):
         self._fresh = fresh
         self.enabled = True
+
     def is_fresh(self, *args):
         return self._fresh
+
 
 async def verify():
     # Set required environment variables for LiveExecutionEngine
@@ -31,14 +35,14 @@ async def verify():
     os.environ["LIVE_ORDERBOOK_STALE_SEC_NIGHT"] = "10"
     os.environ["POLY_SIGNATURE_TYPE"] = "1"
     os.environ["CLOB_BOOK_HTTP"] = "http://localhost"
-    
+
     # Force LIVE_STALE_BLOCK_ACTIONS=1
     os.environ["LIVE_STALE_BLOCK_ACTIONS"] = "1"
-    
+
     engine = LiveExecutionEngine(None, None, test_mode=True)
-    market_cache = MockCache(fresh=False) # Stale
+    market_cache = MockCache(fresh=False)  # Stale
     engine.set_market_book_cache(market_cache)
-    
+
     print("--- Testing BUY blocking ---")
     res = await engine.execute("BUY_UP", "token_123", order_size=10.0)
     if res == (0.0, 0.0):
@@ -49,11 +53,12 @@ async def verify():
     print("\n--- Testing POLL blocking ---")
     tracked = TrackedOrder("ord_1", "token_123", "BUY", 0.5, 10.0)
     # Manually make it stale
-    tracked.placed_at = time.time() - 100 
-    
+    tracked.placed_at = time.time() - 100
+
     # Mock _wait_for_order_fill to return "live" so it continues to the freshness check
     async def mock_wait(*args, **kwargs):
         return "live", 0.0
+
     engine._wait_for_order_fill = mock_wait
 
     # Run poll_order in a way that it hits the freshness check
@@ -62,6 +67,7 @@ async def verify():
         await asyncio.wait_for(engine._poll_order(tracked), timeout=2.0)
     except asyncio.TimeoutError:
         print("POLL loop timed out as expected (it should be retrying freshness check)")
+
 
 if __name__ == "__main__":
     asyncio.run(verify())

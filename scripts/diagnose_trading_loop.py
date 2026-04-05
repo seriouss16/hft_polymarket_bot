@@ -165,21 +165,21 @@ def main():
     print("📊 SUMMARY")
     print("=" * 60)
     if "error" not in https_result:
-        https_mean = https_result['mean_ms']
+        https_mean = https_result["mean_ms"]
         print(f"   Network (HTTPS): {https_mean:.1f}ms")
         if https_mean > 200:
             print(f"   ⚠️  HIGH — migration to Ireland recommended")
         else:
             print(f"   ✅ OK")
     if "error" not in ws_result:
-        ws_mean = ws_result['mean_ms']
+        ws_mean = ws_result["mean_ms"]
         print(f"   WS connection:   {ws_mean:.1f}ms")
         if ws_mean > 100:
             print(f"   ⚠️  HIGH")
         else:
             print(f"   ✅ OK")
     if "error" not in ob_result:
-        ob_mean = ob_result['mean_ms']
+        ob_mean = ob_result["mean_ms"]
         print(f"   Order book:      {ob_mean:.1f}ms")
         if ob_mean > 200:
             print(f"   ⚠️  HIGH — same as network latency")

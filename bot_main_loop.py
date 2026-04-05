@@ -11,9 +11,10 @@ import traceback
 from bot_config_log import validate_required_config
 from bot_runtime import UVLOOP_ACTIVE
 from core.executor import PnLTracker, mark_price_for_side
+from core.kill_switch_server import is_shutdown_requested, run_kill_server
+from core.kill_switch_server import set_engine as set_kill_engine
 from core.live_common import reconcile_binary_outcome_books
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
-from core.kill_switch_server import set_engine as set_kill_engine, is_shutdown_requested, run_kill_server
 from core.market_regime import MarketRegimeDetector
 from core.risk_engine import RiskEngine
 from core.selector import MarketSelector
@@ -21,11 +22,11 @@ from core.session_profile import apply_profile, maybe_switch_profile
 from core.strategies import LatencyArbitrageStrategy, PhaseRouterStrategy
 from core.strategy_hub import StrategyHub
 from data.aggregator import FastPriceAggregator
-from data.providers import FastExchangeProvider
+from data.balance_cache import BalanceCache, ConditionalAllowanceCache
 from data.clob_market_ws import ClobMarketBookCache, sync_poly_book_from_cache
 from data.clob_user_ws import ClobUserOrderCache
-from data.poly_clob import PolyOrderBook, ClobAsyncHTTPClient
-from data.balance_cache import BalanceCache, ConditionalAllowanceCache
+from data.poly_clob import ClobAsyncHTTPClient, PolyOrderBook
+from data.providers import FastExchangeProvider
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
 from utils.resilience import safe_task
@@ -123,10 +124,10 @@ async def _pulse_logging_task(
 ) -> None:
     """Periodic background task for pulse logging."""
     import os
-    
+
     # Check if pulse logging is enabled (default disabled for simulation)
     pulse_enabled = os.getenv("HFT_PULSE_LOG_ENABLED", "0") == "1"
-    
+
     # Pre-formatted template (uses % formatting for lazy evaluation)
     _log_template = (
         "Fast: %.2f (CB %s BNC %s smart=%s) | "
@@ -142,7 +143,7 @@ async def _pulse_logging_task(
         "priceToBeat: %.2f Δ=%+.2f | "
         "Forecast: %.2f%s"
     )
-    
+
     while not shutdown_event.is_set():
         try:
             poly_book = poly_book_ref[0] if poly_book_ref else None
@@ -150,12 +151,12 @@ async def _pulse_logging_task(
                 await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
                 continue
 
-            poly_btc = float(
-                poly_book.book.get("btc_oracle")
-                or poly_book.book.get("mid")
-                or 0.0
+            poly_btc = float(poly_book.book.get("btc_oracle") or poly_book.book.get("mid") or 0.0)
+            fast_price = (
+                aggregator.get_weighted_price()
+                if use_smart_fast
+                else aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             )
-            fast_price = aggregator.get_weighted_price() if use_smart_fast else aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             if fast_price is None or poly_btc <= 0:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=interval)
                 continue
@@ -220,9 +221,7 @@ async def _pulse_logging_task(
             up_ask = float(poly_book.book.get("ask", 0.0))
             d_bid = float(poly_book.book.get("down_bid", 0.0))
             d_ask = float(poly_book.book.get("down_ask", 0.0))
-            book_focus = (
-                f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
-            )
+            book_focus = f"UP b/a {up_bid:.3f}/{up_ask:.3f} | DOWN b/a {d_bid:.3f}/{d_ask:.3f}"
             _ft = aggregator.feed_timing(float(poly_book.book.get("ts", 0.0)))
             latency_ms = float(_ft["staleness_ms"])
             skew_ms = float(_ft["skew_ms"])
@@ -231,18 +230,37 @@ async def _pulse_logging_task(
             # Use lazy % formatting for logging
             logging.info(
                 _log_template,
-                fast_price, cb_s, bn_s, use_smart_fast,
+                fast_price,
+                cb_s,
+                bn_s,
+                use_smart_fast,
                 poly_btc,
-                diff, aggregator.get_zscore(),
-                trend['trend'], trend['speed'], trend['depth'], trend['age'], _pulse_adx_s, _pm_s, _tt_s, _eta_s, _stale_s,
+                diff,
+                aggregator.get_zscore(),
+                trend["trend"],
+                trend["speed"],
+                trend["depth"],
+                trend["age"],
+                _pulse_adx_s,
+                _pm_s,
+                _tt_s,
+                _eta_s,
+                _stale_s,
                 book_focus,
                 _rsi_line,
-                imbalance, upnl,
-                latency_ms, skew_ms, float(_ft['coinbase_age_ms']), float(_ft['poly_age_ms']), float(_ft['binance_age_ms']),
-                risk.drawdown_pct(pnl.balance + upnl)*100,
+                imbalance,
+                upnl,
+                latency_ms,
+                skew_ms,
+                float(_ft["coinbase_age_ms"]),
+                float(_ft["poly_age_ms"]),
+                float(_ft["binance_age_ms"]),
+                risk.drawdown_pct(pnl.balance + upnl) * 100,
                 regime_detector.get_regime(),
-                slot_price_to_beat, fast_price - slot_price_to_beat,
-                fast_price, profile_suffix,
+                slot_price_to_beat,
+                fast_price - slot_price_to_beat,
+                fast_price,
+                profile_suffix,
             )
         except Exception as exc:
             logging.debug("Pulse logging task error: %s", exc)
@@ -295,6 +313,7 @@ async def main():
 
     # Centralized validation of all configuration parameters
     from utils.config_validation import validate_config
+
     validate_config()
 
     # Apply day/night session profile before any strategy objects read env vars.
@@ -358,7 +377,7 @@ async def main():
         clob_user_cache = ClobUserOrderCache(lambda: live_exec.get_api_creds())
         live_exec.set_user_order_cache(clob_user_cache)
         clob_user_task = asyncio.create_task(clob_user_cache.run_forever())
-        
+
         # Phase 3 WebSocket Migration: Initialize balance cache (MANDATORY in LIVE mode)
         # Polymarket does not provide balance updates via WebSocket, so we use
         # cached HTTP polling with configurable staleness thresholds.
@@ -373,11 +392,11 @@ async def main():
         )
         if balance_cache is None:
             raise RuntimeError("BalanceCache initialization failed in LIVE mode")
-        
+
         # Pre-emptive conditional allowance cache (eliminates blocking API calls from critical path)
         allowance_cache = ConditionalAllowanceCache()
         live_exec.set_allowance_cache(allowance_cache)
-        
+
         # Async HTTP client for non-blocking order book fetches
         clob_async_http = ClobAsyncHTTPClient()
     live_risk = LiveRiskManager(max_session_loss=float(os.environ["LIVE_MAX_SESSION_LOSS"]))
@@ -387,7 +406,7 @@ async def main():
         loss_cooldown_sec=float(os.environ["LOSS_COOLDOWN_SEC"]),
     )
     journal = TradeJournal(path=req_str("TRADE_JOURNAL_PATH"))
-    
+
     # Background task manager for non-critical async operations
     bg_tasks = _BackgroundTaskManager()
 
@@ -415,7 +434,9 @@ async def main():
         if _effective_account > 0.0:
             logging.info(
                 "💰 Account balance check: session=%.2f USD  account=%.2f USD  margin=%.2f USD",
-                _session_deposit, _effective_account, _effective_account - _session_deposit,
+                _session_deposit,
+                _effective_account,
+                _effective_account - _session_deposit,
             )
         else:
             logging.warning(
@@ -424,17 +445,16 @@ async def main():
                 "Set LIVE_ACCOUNT_BALANCE in config for offline validation.",
                 _session_deposit,
             )
-    
+
     if ENABLE_LSTM:
         import tensorflow as tf
-        tf.config.set_visible_devices([], 'GPU')
+
+        tf.config.set_visible_devices([], "GPU")
 
     # --- Start fast price providers (Coinbase anchor; Binance optional) ---
     providers: list[FastExchangeProvider] = []
     if not DISABLE_BINANCE_FAST:
-        providers.append(
-            FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update)
-        )
+        providers.append(FastExchangeProvider("binance", "wss://stream.binance.com:9443", "BTC", aggregator.update))
     else:
         logging.info(
             "Fast feeds: Binance disabled (HFT_DISABLE_BINANCE_FAST=1) — using Coinbase only.",
@@ -442,9 +462,7 @@ async def main():
     providers.append(
         FastExchangeProvider("coinbase", "wss://ws-feed.exchange.coinbase.com", "BTC-USD", aggregator.update)
     )
-    provider_tasks: list[asyncio.Task] = [
-        asyncio.create_task(p.connect()) for p in providers
-    ]
+    provider_tasks: list[asyncio.Task] = [asyncio.create_task(p.connect()) for p in providers]
     poly_connect_task: asyncio.Task | None = None
     _heartbeat_task: asyncio.Task | None = None
 
@@ -463,7 +481,9 @@ async def main():
             while True:
                 try:
                     resp = await asyncio.to_thread(live_exec.client.post_heartbeat, _hb_id)
-                    _hb_id = resp.get("heartbeat_id", "") if isinstance(resp, dict) else getattr(resp, "heartbeat_id", "")
+                    _hb_id = (
+                        resp.get("heartbeat_id", "") if isinstance(resp, dict) else getattr(resp, "heartbeat_id", "")
+                    )
                 except Exception as _hb_exc:
                     logging.debug("[LIVE] Heartbeat failed: %s", _hb_exc)
                 await asyncio.sleep(_heartbeat_interval_sec)
@@ -473,11 +493,11 @@ async def main():
     # Background order book refresh task (pre-warms cache, avoids blocking HTTP in main loop)
     _orderbook_refresh_task: asyncio.Task | None = None
     _orderbook_refresh_interval = float(os.getenv("CLOB_ORDERBOOK_REFRESH_SEC", "1.5"))
-    
+
     @safe_task(task_name="orderbook_refresh")
     async def _run_orderbook_refresh() -> None:
         """Continuously refresh CLOB order book cache in background.
-        
+
         This task runs every _orderbook_refresh_interval seconds and pre-warms
         the poly_book cache so the main loop doesn't need to block on HTTP calls.
         """
@@ -488,14 +508,12 @@ async def main():
                 if not token_up_id:
                     await asyncio.sleep(_orderbook_refresh_interval)
                     continue
-                    
-                up_snap, down_snap = await clob_async_http.fetch_orderbook_pair(
-                    token_up_id, token_down_id, depth=5
-                )
-                
+
+                up_snap, down_snap = await clob_async_http.fetch_orderbook_pair(token_up_id, token_down_id, depth=5)
+
                 up_valid = 0.0 < up_snap.get("best_bid", 0.0) < up_snap.get("best_ask", 1.0) <= 1.0
                 down_valid = 0.0 < down_snap.get("best_bid", 0.0) < down_snap.get("best_ask", 1.0) <= 1.0
-                
+
                 if poly_book is not None:
                     if up_valid:
                         poly_book.book["bid"] = up_snap["best_bid"]
@@ -507,7 +525,7 @@ async def main():
                         poly_book.book["down_ask"] = down_snap["best_ask"]
                         poly_book.book["down_bid_size_top"] = down_snap.get("bid_size_top", 0.0)
                         poly_book.book["down_ask_size_top"] = down_snap.get("ask_size_top", 0.0)
-                    
+
                     if up_valid and (not token_down_id or down_valid):
                         nonlocal last_clob_book_success_time
                         last_clob_book_success_time = time.time()
@@ -516,15 +534,15 @@ async def main():
             except Exception as exc:
                 logging.debug("Background order book refresh failed: %s", exc)
             await asyncio.sleep(_orderbook_refresh_interval)
-    
+
     # Background balance refresh task (pre-warms balance cache)
     _balance_refresh_task: asyncio.Task | None = None
     _balance_refresh_interval = float(os.getenv("BALANCE_REFRESH_SEC", "30"))
-    
+
     @safe_task(task_name="balance_refresh")
     async def _run_balance_refresh() -> None:
         """Continuously refresh balance cache in background.
-        
+
         This task runs every _balance_refresh_interval seconds and pre-warms
         the balance cache so the main loop can read from cache without blocking.
         """
@@ -536,7 +554,7 @@ async def main():
                 usdc_bal = live_exec.fetch_usdc_balance()
                 if usdc_bal is not None:
                     logging.debug("Background balance refresh: USDC=%.2f", usdc_bal)
-                
+
                 # Fetch conditional balances for active tokens
                 if token_up_id:
                     live_exec.fetch_conditional_balance(token_up_id)
@@ -613,6 +631,7 @@ async def main():
         if not token_ids:
             return
         try:
+
             async def _refresh_one(tid: str) -> None:
                 await asyncio.to_thread(live_exec.ensure_conditional_allowance, tid)
 
@@ -627,8 +646,7 @@ async def main():
             if failed:
                 for tid, exc in failed:
                     logging.debug(
-                        "[ALLOWANCE] ensure_conditional_allowance failed in batch_refresh "
-                        "for token=%s: %s",
+                        "[ALLOWANCE] ensure_conditional_allowance failed in batch_refresh " "for token=%s: %s",
                         tid[:20],
                         exc,
                         exc_info=(type(exc), exc, exc.__traceback__),
@@ -706,11 +724,7 @@ async def main():
                 # Chain truth beats stale in-memory FILLED rows in _active_orders after
                 # clear_filled_buy() (mem can show 5.47 sh while chain is dust — phantom
                 # adopt; see bot_300326_* logs).
-                if (
-                    _ch is not None
-                    and _chv < _poly_min - 1e-6
-                    and _mem >= _poly_min - 1e-6
-                ):
+                if _ch is not None and _chv < _poly_min - 1e-6 and _mem >= _poly_min - 1e-6:
                     logging.debug(
                         "[LIVE] inventory reconcile skip token=%s: mem=%.4f sh but "
                         "chain=%.4f — stale filled_buy_shares.",
@@ -735,8 +749,7 @@ async def main():
             return
         if len(_cands) >= 2:
             logging.warning(
-                "🛟 [LIVE] INVENTORY RECONCILE: balance on both outcome tokens — "
-                "using larger position.",
+                "🛟 [LIVE] INVENTORY RECONCILE: balance on both outcome tokens — " "using larger position.",
             )
             _cands.sort(key=lambda x: -x[2])
         if not _cands:
@@ -769,9 +782,7 @@ async def main():
             "_engine",
             None,
         )
-        if _hft_eng is not None and getattr(
-            _hft_eng, "_live_entry_sync_pending", False
-        ):
+        if _hft_eng is not None and getattr(_hft_eng, "_live_entry_sync_pending", False):
             _apply_fast = fast_price
             if USE_SMART_FAST:
                 _nf = aggregator.get_weighted_price()
@@ -779,11 +790,7 @@ async def main():
                 _nf = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             if _nf is not None:
                 _apply_fast = float(_nf)
-            _book_px = float(
-                _book.get("down_ask", 0.0)
-                if _sig == "BUY_DOWN"
-                else _book.get("ask", 0.0)
-            )
+            _book_px = float(_book.get("down_ask", 0.0) if _sig == "BUY_DOWN" else _book.get("ask", 0.0))
             _hft_eng.apply_live_entry_after_fill(
                 _book,
                 _apply_fast,
@@ -800,9 +807,7 @@ async def main():
     if ENABLE_LSTM:
         logging.info("HFT_ENABLE_LSTM=1: TensorFlow LSTM inference on (higher CPU).")
     else:
-        logging.info(
-            "HFT_ENABLE_LSTM=0: LSTM off; forecast tracks spot. Set HFT_ENABLE_LSTM=1 to enable."
-        )
+        logging.info("HFT_ENABLE_LSTM=0: LSTM off; forecast tracks spot. Set HFT_ENABLE_LSTM=1 to enable.")
 
     _session_wall_start = time.time()
     _max_runtime_sec = _max_runtime_sec_from_env()
@@ -814,7 +819,7 @@ async def main():
         )
 
     shutdown_reason = "shutdown"
-    
+
     # Start background refresh tasks (LIVE mode only)
     if LIVE_MODE:
         if _orderbook_refresh_interval > 0:
@@ -823,33 +828,40 @@ async def main():
             _balance_refresh_task = asyncio.create_task(_run_balance_refresh())
         if _allowance_refresh_interval > 0 and allowance_cache is not None:
             _allowance_refresh_task = asyncio.create_task(_run_allowance_refresh())
-    
+
     # Start async journal writer
     journal.start_async_writer()
-    
+
     # Start background stats logging task
     _stats_task = bg_tasks.create_task(
         _stats_logging_task(stats, balance_cache, live_exec, STATS_INTERVAL, bg_tasks._shutdown_event, LIVE_MODE),
         name="stats_logging",
     )
-    
+
     # Start background pulse logging task (poly_book_ref holds mutable reference to current poly_book)
     _poly_book_ref = [poly_book]
     _pulse_task = bg_tasks.create_task(
         _pulse_logging_task(
-            aggregator, _poly_book_ref, pnl, strategy_hub, regime_detector, risk,
-            pulse_log_period, bg_tasks._shutdown_event, USE_SMART_FAST,
+            aggregator,
+            _poly_book_ref,
+            pnl,
+            strategy_hub,
+            regime_detector,
+            risk,
+            pulse_log_period,
+            bg_tasks._shutdown_event,
+            USE_SMART_FAST,
         ),
         name="pulse_logging",
     )
-    
+
     # Start kill-switch server as background task (LIVE mode only)
     _kill_server_task: asyncio.Task | None = None
     if LIVE_MODE:
         set_kill_engine(live_exec)
         _kill_server_task = asyncio.create_task(run_kill_server())
         logging.info("🛡️ Kill-switch server started as background task")
-    
+
     try:
         while True:
             now = asyncio.get_event_loop().time()
@@ -864,8 +876,7 @@ async def main():
 
             if LIVE_MODE and live_risk.session_loss_breached():
                 logging.error(
-                    "🛑 Session loss limit reached — stopping bot "
-                    "(session_pnl=%.4f, LIVE_MAX_SESSION_LOSS=%.4f).",
+                    "🛑 Session loss limit reached — stopping bot " "(session_pnl=%.4f, LIVE_MAX_SESSION_LOSS=%.4f).",
                     live_risk.pnl,
                     live_risk.max_session_loss,
                 )
@@ -916,20 +927,23 @@ async def main():
                             "⚠️ Token ID change detected while position open "
                             "(inventory=%.4f side=%s) — deferring until position closed. "
                             "Old up=%s down=%s | New up=%s down=%s",
-                            pnl.inventory, pnl.position_side,
-                            (token_up_id or "")[:16], (token_down_id or "")[:16],
-                            up_id[:16], (down_id or "")[:16],
+                            pnl.inventory,
+                            pnl.position_side,
+                            (token_up_id or "")[:16],
+                            (token_down_id or "")[:16],
+                            up_id[:16],
+                            (down_id or "")[:16],
                         )
                     else:
                         _ptb = await selector.fetch_event_price_to_beat(slug)
                         if _ptb is not None and _ptb > 0.0:
                             slot_price_to_beat = float(_ptb)
                         else:
-                            _fallback = float(
-                                poly_book.book.get("btc_oracle")
-                                or poly_book.book.get("mid")
-                                or 0.0
-                            ) if poly_book is not None else 0.0
+                            _fallback = (
+                                float(poly_book.book.get("btc_oracle") or poly_book.book.get("mid") or 0.0)
+                                if poly_book is not None
+                                else 0.0
+                            )
                             if _fallback > 0.0:
                                 slot_price_to_beat = _fallback
                             else:
@@ -945,12 +959,10 @@ async def main():
                         _sub = [token_up_id] + ([token_down_id] if token_down_id else [])
                         await clob_ws_cache.set_asset_ids_async(_sub)
                         if clob_user_cache is not None:
-                            await clob_user_cache.set_markets_async(
-                                [condition_id] if condition_id else []
-                            )
+                            await clob_user_cache.set_markets_async([condition_id] if condition_id else [])
                         strategy_hub.reset_for_new_market()
                         # Reset orderbook cache to avoid stale data from previous market
-                        if poly_book and hasattr(poly_book, 'book'):
+                        if poly_book and hasattr(poly_book, "book"):
                             poly_book.book.clear()
                             poly_book.book["bid"] = 0.0
                             poly_book.book["ask"] = 1.0
@@ -984,10 +996,12 @@ async def main():
             primary_data = aggregator.get_primary_history()
             if _net_dbg:
                 _nw_t1 = time.perf_counter()
-            
+
             # 3. LSTM is optional: engine ignores forecast; keep off by default for lower CPU latency.
-            if ENABLE_LSTM and primary_data and (
-                LSTM_MIN_INTERVAL <= 0.0 or (now - last_lstm_time) >= LSTM_MIN_INTERVAL
+            if (
+                ENABLE_LSTM
+                and primary_data
+                and (LSTM_MIN_INTERVAL <= 0.0 or (now - last_lstm_time) >= LSTM_MIN_INTERVAL)
             ):
                 forecast = await lstm.predict(primary_data)
                 last_lstm_time = now
@@ -1001,17 +1015,9 @@ async def main():
             # 4. Analysis and pulse log
             poly_btc = 0.0
             if poly_book is not None:
-                poly_btc = float(
-                    poly_book.book.get("btc_oracle")
-                    or poly_book.book.get("mid")
-                    or 0.0
-                )
+                poly_btc = float(poly_book.book.get("btc_oracle") or poly_book.book.get("mid") or 0.0)
             # RTDS fallback when Gamma did not return priceToBeat (or fetch failed).
-            if (
-                slot_price_to_beat <= 0.0
-                and token_up_id
-                and poly_btc > 0.0
-            ):
+            if slot_price_to_beat <= 0.0 and token_up_id and poly_btc > 0.0:
                 slot_price_to_beat = float(poly_btc)
                 logging.info(
                     "🎯 priceToBeat latched from Chainlink RTDS (fallback): %.2f",
@@ -1020,10 +1026,7 @@ async def main():
             if fast_price and poly_book is not None and poly_btc > 0:
                 if token_up_id:
                     _ws_filled = False
-                    if (
-                        clob_ws_cache.enabled
-                        and clob_ws_cache.has_valid_pair(token_up_id, token_down_id)
-                    ):
+                    if clob_ws_cache.enabled and clob_ws_cache.has_valid_pair(token_up_id, token_down_id):
                         _loop_ts = asyncio.get_running_loop().time()
                         _ws_filled = sync_poly_book_from_cache(
                             poly_book.book,
@@ -1134,13 +1137,21 @@ async def main():
                     if (now - last_book_mismatch_warn_time) >= 90.0:
                         logging.info(
                             "Book mismatch corrected before engine: UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f",
-                            _ub, _ua, _db, _da, _up_mid_chk + _dn_mid_chk,
+                            _ub,
+                            _ua,
+                            _db,
+                            _da,
+                            _up_mid_chk + _dn_mid_chk,
                         )
                         last_book_mismatch_warn_time = now
                     else:
                         logging.debug(
                             "Book mismatch corrected (suppressed repeat): UP %.3f/%.3f + DOWN %.3f/%.3f sum=%.3f",
-                            _ub, _ua, _db, _da, _up_mid_chk + _dn_mid_chk,
+                            _ub,
+                            _ua,
+                            _db,
+                            _da,
+                            _up_mid_chk + _dn_mid_chk,
                         )
                 reconcile_binary_outcome_books(poly_book.book)
 
@@ -1167,9 +1178,7 @@ async def main():
                         # TREND_FLIP_EXIT changes decision["side"] to the new direction,
                         # which would select the wrong token and cause phantom close.
                         _close_side = pnl.position_side or decision.get("side")
-                        _close_tid = _conditional_token_for_position_side(
-                            _close_side, token_up_id, token_down_id
-                        )
+                        _close_tid = _conditional_token_for_position_side(_close_side, token_up_id, token_down_id)
                         logging.info(
                             "[LIVE] CLOSE routing: side=%s token=%s (up=%s down=%s)",
                             _close_side,
@@ -1180,8 +1189,8 @@ async def main():
                         _live_filled = live_exec.filled_buy_shares(_close_tid)
                         if _live_filled == 0 and live_exec.has_pending_buy(_close_tid):
                             logging.info(
-                                "[LIVE] BUY still PENDING at close signal — waiting for fill "
-                                "(token=%s).", _close_tid[:20],
+                                "[LIVE] BUY still PENDING at close signal — waiting for fill " "(token=%s).",
+                                _close_tid[:20],
                             )
                             _live_filled = await live_exec.wait_for_buy_fill(_close_tid, timeout_sec=2.0)
                         if _live_filled == 0:
@@ -1211,15 +1220,15 @@ async def main():
                         if _live_filled > 0:
                             logging.info(
                                 "[LIVE] Close: selling %.4f live-filled shares token=%s",
-                                _live_filled, _close_tid[:20],
+                                _live_filled,
+                                _close_tid[:20],
                             )
-                            _sell_filled, _sell_px = await live_exec.close_position(
-                                _close_tid, _live_filled
-                            )
+                            _sell_filled, _sell_px = await live_exec.close_position(_close_tid, _live_filled)
                             if _sell_filled > 0 and _sell_px > 0:
                                 live_exec.clear_filled_buy(_close_tid)
                                 _live_pnl = pnl.live_close(
-                                    _sell_filled, _sell_px,
+                                    _sell_filled,
+                                    _sell_px,
                                     strategy_name=decision.get("strategy_name") or "",
                                     performance_key=decision.get("performance_key"),
                                 )
@@ -1303,17 +1312,13 @@ async def main():
                         if _open_signal in ("BUY_UP", "BUY_DOWN"):
                             _trade_info = decision.get("trade") or {}
                             _live_order_cap = float(os.environ["LIVE_ORDER_SIZE"])
-                            _cost_usd = (
-                                float(_trade_info.get("amount_usd") or 0.0)
-                                or _live_order_cap
-                            )
+                            _cost_usd = float(_trade_info.get("amount_usd") or 0.0) or _live_order_cap
                             # Engine dynamic sizing (_calc_dynamic_amount) can exceed
                             # LIVE_ORDER_SIZE; reprice/emergency do not add USD — only this
                             # path can overshoot if we trust amount_usd blindly.
                             if _cost_usd > _live_order_cap:
                                 logging.info(
-                                    "[LIVE] Capping engine notional %.4f USD → "
-                                    "LIVE_ORDER_SIZE %.4f USD.",
+                                    "[LIVE] Capping engine notional %.4f USD → " "LIVE_ORDER_SIZE %.4f USD.",
                                     _cost_usd,
                                     _live_order_cap,
                                 )
@@ -1335,12 +1340,17 @@ async def main():
                             # "not enough balance" rejections when account dropped
                             # below the configured LIVE_ORDER_SIZE after a loss.
                             # Use non-blocking cached balance read
-                            _real_usdc = balance_cache.get_cached_usdc_balance() if balance_cache else await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                            _real_usdc = (
+                                balance_cache.get_cached_usdc_balance()
+                                if balance_cache
+                                else await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                            )
                             if _real_usdc is not None and _real_usdc < _cost_usd:
                                 logging.warning(
                                     "⚠️ [LIVE] Real USDC balance %.4f < order size %.4f "
                                     "— capping to available balance.",
-                                    _real_usdc, _cost_usd,
+                                    _real_usdc,
+                                    _cost_usd,
                                 )
                                 _cost_usd = _real_usdc
                             # Polymarket CLOB has a $1 minimum order size (USD).
@@ -1355,21 +1365,16 @@ async def main():
                             # Use entry ask price from decision if available to estimate shares.
                             _poly_min_sh = float(os.getenv("POLY_CLOB_MIN_SHARES"))
                             _trade_dict = decision.get("trade") or {}
-                            _entry_ask = float(
-                                _trade_dict.get("exec_px")
-                                or _trade_dict.get("book_px")
-                                or 0.0
-                            )
-                            _budget_too_low = (
-                                _entry_ask > 0.0
-                                and (_cost_usd / _entry_ask) < _poly_min_sh
-                            )
+                            _entry_ask = float(_trade_dict.get("exec_px") or _trade_dict.get("book_px") or 0.0)
+                            _budget_too_low = _entry_ask > 0.0 and (_cost_usd / _entry_ask) < _poly_min_sh
                             if _budget_too_low:
                                 logging.warning(
                                     "⚠️ [LIVE] Budget %.4f USD @ %.4f = %.2f shares < "
                                     "CLOB min %.0f — skipping entry (insufficient balance).",
-                                    _cost_usd, _entry_ask,
-                                    _cost_usd / _entry_ask, _poly_min_sh,
+                                    _cost_usd,
+                                    _entry_ask,
+                                    _cost_usd / _entry_ask,
+                                    _poly_min_sh,
                                 )
                                 _live_skip_until = now + _live_skip_cooldown_sec
                             if now < _live_skip_until:
@@ -1378,15 +1383,11 @@ async def main():
                                     _live_skip_until - now,
                                 )
                             else:
-                                _live_tid = (
-                                    token_up_id if _open_signal == "BUY_UP"
-                                    else (token_down_id or token_up_id)
-                                )
+                                _live_tid = token_up_id if _open_signal == "BUY_UP" else (token_down_id or token_up_id)
                                 _pending_buy = live_exec.filled_buy_shares(_live_tid)
                                 if pnl.inventory > 1e-9:
                                     logging.warning(
-                                        "⚠️ [LIVE] Skip OPEN: position already open "
-                                        "(inventory=%.6f sh).",
+                                        "⚠️ [LIVE] Skip OPEN: position already open " "(inventory=%.6f sh).",
                                         pnl.inventory,
                                     )
                                 elif _pending_buy > 1e-9:
@@ -1394,8 +1395,7 @@ async def main():
                                     await _reconcile_live_inventory_maybe(poly_book)
                                     if pnl.inventory > 1e-9:
                                         logging.info(
-                                            "[LIVE] Orphan fill adopted before OPEN — "
-                                            "position tracked for EXIT.",
+                                            "[LIVE] Orphan fill adopted before OPEN — " "position tracked for EXIT.",
                                         )
                                     else:
                                         logging.warning(
@@ -1411,12 +1411,8 @@ async def main():
                                             _live_bb = float(poly_book.book.get("bid", 0.0) or 0.0)
                                             _live_ba = float(poly_book.book.get("ask", 0.0) or 0.0)
                                         else:
-                                            _live_bb = float(
-                                                poly_book.book.get("down_bid", 0.0) or 0.0
-                                            )
-                                            _live_ba = float(
-                                                poly_book.book.get("down_ask", 0.0) or 0.0
-                                            )
+                                            _live_bb = float(poly_book.book.get("down_bid", 0.0) or 0.0)
+                                            _live_ba = float(poly_book.book.get("down_ask", 0.0) or 0.0)
                                     _exec_kw = {}
                                     if _live_bb > 0.0 and _live_ba > 0.0:
                                         _exec_kw = {
@@ -1460,7 +1456,9 @@ async def main():
                                         _buy_cash_usd = float(_filled_sh) * float(_filled_px)
                                         _live_skip_until = 0.0
                                         pnl.live_open(
-                                            _open_signal, _filled_sh, _filled_px,
+                                            _open_signal,
+                                            _filled_sh,
+                                            _filled_px,
                                             _buy_cash_usd,
                                             strategy_name=decision.get("strategy_name") or "",
                                         )
@@ -1469,20 +1467,14 @@ async def main():
                                             "_engine",
                                             None,
                                         )
-                                        if (
-                                            _hft_eng is not None
-                                            and getattr(
-                                                _hft_eng, "_live_entry_sync_pending", False
-                                            )
+                                        if _hft_eng is not None and getattr(
+                                            _hft_eng, "_live_entry_sync_pending", False
                                         ):
                                             _apply_fast = fast_price
                                             if USE_SMART_FAST:
                                                 _nf = aggregator.get_weighted_price()
                                             else:
-                                                _nf = (
-                                                    aggregator.get_coinbase_price()
-                                                    or aggregator.get_weighted_price()
-                                                )
+                                                _nf = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
                                             if _nf is not None:
                                                 _apply_fast = float(_nf)
                                             _book_px = float(
@@ -1506,10 +1498,7 @@ async def main():
                                         if allowance_cache is not None:
                                             allowance_cache.schedule_refresh(_live_tid)
                                             # Also schedule opposite token for batch refresh
-                                            _opp_tid = (
-                                                token_down_id if _live_tid == token_up_id
-                                                else token_up_id
-                                            )
+                                            _opp_tid = token_down_id if _live_tid == token_up_id else token_up_id
                                             if _opp_tid:
                                                 allowance_cache.schedule_refresh(_opp_tid)
                                         # Async queue-based write (non-blocking)
@@ -1519,9 +1508,7 @@ async def main():
                                             avg_price=float(_filled_px),
                                             amount_usd=float(_buy_cash_usd),
                                             rsi_state=strategy_hub.get_rsi_v5_state(),
-                                            book_snapshot=poly_book.book
-                                            if poly_book is not None
-                                            else None,
+                                            book_snapshot=poly_book.book if poly_book is not None else None,
                                         )
                                     else:
                                         _hft_eng = getattr(
@@ -1531,20 +1518,13 @@ async def main():
                                         )
                                         if _hft_eng is not None:
                                             _hft_eng.rollback_live_open_signal()
-                                        _buy_skip = getattr(
-                                            live_exec, "_last_buy_skip_reason", None
-                                        )
+                                        _buy_skip = getattr(live_exec, "_last_buy_skip_reason", None)
                                         _slip_abort = _buy_skip == "slippage_abort"
                                         _cooldown_on_slip = (
-                                            os.getenv(
-                                                "LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0"
-                                            )
-                                            == "1"
+                                            os.getenv("LIVE_SKIP_COOLDOWN_ON_SLIPPAGE_ABORT", "0") == "1"
                                         )
                                         # Slippage guard: optional no-cooldown (existing behaviour).
-                                        _apply_cd = not (
-                                            _slip_abort and not _cooldown_on_slip
-                                        )
+                                        _apply_cd = not (_slip_abort and not _cooldown_on_slip)
                                         # Stale / emergency placement failure: liquidity/timing, not a
                                         # rejected bad trade — default is no cooldown so the next tick
                                         # can retry. Set LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL=1 to force.
@@ -1553,9 +1533,7 @@ async def main():
                                             "emergency_buy_failed",
                                             "strict_chain_timeout",
                                         ):
-                                            if os.getenv(
-                                                "LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL", "0"
-                                            ) != "1":
+                                            if os.getenv("LIVE_APPLY_COOLDOWN_ON_STALE_NO_FILL", "0") != "1":
                                                 _apply_cd = False
                                                 logging.info(
                                                     "[LIVE] BUY not filled (%s) — no skip cooldown "
@@ -1566,7 +1544,8 @@ async def main():
                                             _live_skip_until = now + _live_skip_cooldown_sec
                                             logging.info(
                                                 "[LIVE] Skip cooldown active for %.0fs (until %.1f).",
-                                                _live_skip_cooldown_sec, _live_skip_until,
+                                                _live_skip_cooldown_sec,
+                                                _live_skip_until,
                                             )
                                         elif _slip_abort:
                                             logging.info(
@@ -1595,12 +1574,12 @@ async def main():
     finally:
         # Signal shutdown of background tasks before any cleanup
         await bg_tasks.shutdown(timeout=5.0)
-        
+
         # Stop async journal writer and flush remaining entries
         _dropped = await journal.stop_async_writer()
         if _dropped > 0:
             logging.warning("Journal: %d entries dropped due to queue overflow", _dropped)
-        
+
         if LIVE_MODE and token_up_id and pnl.inventory > 0:
             logging.warning(
                 "🚨 Shutdown with open live position (%.4f shares) — emergency exit.",
@@ -1608,9 +1587,7 @@ async def main():
             )
             try:
                 _exit_side_name = pnl.position_side or "BUY_UP"
-                _exit_tid = _conditional_token_for_position_side(
-                    _exit_side_name, token_up_id, token_down_id
-                )
+                _exit_tid = _conditional_token_for_position_side(_exit_side_name, token_up_id, token_down_id)
                 await live_exec.emergency_exit(_exit_tid, pnl.inventory)
                 await asyncio.sleep(2.0)
             except Exception as _exc:
@@ -1656,9 +1633,7 @@ async def main():
                     timeout=5.0,
                 )
             except asyncio.TimeoutError:
-                logging.warning(
-                    "Shutdown timeout while cancelling background tasks; exiting anyway."
-                )
+                logging.warning("Shutdown timeout while cancelling background tasks; exiting anyway.")
         try:
             if LIVE_MODE:
                 try:
@@ -1666,18 +1641,21 @@ async def main():
                     if clob_async_http is not None:
                         await clob_async_http.close()
                     # Use cached balance for final report
-                    _fin_usdc = balance_cache.get_cached_usdc_balance() if balance_cache else await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                    _fin_usdc = (
+                        balance_cache.get_cached_usdc_balance()
+                        if balance_cache
+                        else await asyncio.to_thread(live_exec.fetch_usdc_balance)
+                    )
                     stats.set_live_wallet_usdc(_fin_usdc)
                     # Phase 2 WebSocket Migration: Set WS/HTTP metrics for final report
-                    if hasattr(live_exec, '_get_ws_metrics'):
+                    if hasattr(live_exec, "_get_ws_metrics"):
                         ws_metrics = live_exec._get_ws_metrics()
                         stats.set_ws_metrics(ws_metrics)
-                    if hasattr(live_exec, '_http_metrics'):
+                    if hasattr(live_exec, "_http_metrics"):
                         stats.set_http_metrics(live_exec._http_metrics)
                     # Log final WS/HTTP metrics
                     logging.info(
-                        "[WS_METRICS] Final report: ws_events=%d http_fallbacks=%d "
-                        "ws_latency_avg=%.2fms",
+                        "[WS_METRICS] Final report: ws_events=%d http_fallbacks=%d " "ws_latency_avg=%.2fms",
                         ws_metrics.get("ws_events_received", 0),
                         live_exec._http_metrics.get("http_fallbacks_total", 0),
                         ws_metrics.get("ws_latency_avg_ms", 0.0),

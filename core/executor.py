@@ -9,12 +9,7 @@ from core.strategy_performance import StrategyPerformanceBook
 
 def _up_outcome_quotes_ok(up_bid: float, up_ask: float) -> bool:
     """Return True when bid/ask look like UP-outcome token prices in (0, 1)."""
-    return (
-        0.0 < up_bid < 1.0
-        and 0.0 < up_ask <= 1.0
-        and up_ask > up_bid
-        and (up_ask - up_bid) < 0.45
-    )
+    return 0.0 < up_bid < 1.0 and 0.0 < up_ask <= 1.0 and up_ask > up_bid and (up_ask - up_bid) < 0.45
 
 
 def mark_price_for_side(book: dict, side: Optional[str]) -> float:
@@ -169,9 +164,7 @@ class PnLTracker:
         self.last_close_ts = 0.0
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
 
-        self.recent_pnls = deque(
-            maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME"))
-        )
+        self.recent_pnls = deque(maxlen=int(os.getenv("HFT_RECENT_TRADES_FOR_REGIME")))
         self.regime_cooldown_until = 0.0
         self._good_regime_winrate = float(os.getenv("HFT_GOOD_REGIME_WINRATE"))
         self.strategy_performance = StrategyPerformanceBook()
@@ -229,7 +222,8 @@ class PnLTracker:
             if self.position_side and self.position_side != new_side:
                 logging.warning(
                     "Mixed-side live_open blocked: held %s, attempted %s.",
-                    self.position_side, new_side,
+                    self.position_side,
+                    new_side,
                 )
                 return
             total_cost = self.entry_price * self.inventory + amount_usd
@@ -245,7 +239,13 @@ class PnLTracker:
         _tag = f"{side} {strategy_name}".strip() if strategy_name else side
         logging.info(
             "🟢 [LIVE %s] filled=%.4f sh @ CLOB %.4f | cash %.2f$ @ eff %.4f (pos %.4f @ avg %.4f)",
-            _tag, filled_shares, avg_price, amount_usd, _cash_px, self.inventory, self.entry_price,
+            _tag,
+            filled_shares,
+            avg_price,
+            amount_usd,
+            _cash_px,
+            self.inventory,
+            self.entry_price,
         )
 
     def live_close(
@@ -303,7 +303,13 @@ class PnLTracker:
         _tag = f"{strategy_name}".strip() if strategy_name else ""
         logging.info(
             "🔴 [LIVE SELL%s] filled=%.4f sh @ avg %.4f | proceeds %.2f$ | PnL %+.2f$ (net %+.2f$) | WR %.1f%%",
-            f" {_tag}" if _tag else "", filled_shares, avg_price, proceeds, pnl, net_pnl, wr,
+            f" {_tag}" if _tag else "",
+            filled_shares,
+            avg_price,
+            proceeds,
+            pnl,
+            net_pnl,
+            wr,
         )
         return pnl
 
@@ -398,7 +404,8 @@ class PnLTracker:
             if self.balance < amount_usd:
                 logging.warning(
                     "Balance %.2f USD is below trade notional %.2f USD — skipping entry.",
-                    self.balance, amount_usd,
+                    self.balance,
+                    amount_usd,
                 )
                 return None
 
@@ -412,7 +419,8 @@ class PnLTracker:
                 if self.position_side and self.position_side != new_side:
                     logging.warning(
                         "Mixed-side add blocked: held %s, attempted %s.",
-                        self.position_side, new_side,
+                        self.position_side,
+                        new_side,
                     )
                     return None
                 total_cost = self.entry_price * self.inventory + exec_price * new_shares
@@ -475,7 +483,9 @@ class PnLTracker:
                 logging.error(
                     "🛑 ANOMALY: session balance went negative after SELL "
                     "(%.4f USD). proceeds=%.4f cost=%.4f. Clamping to 0.",
-                    self.balance, proceeds_usd, cost_basis_usd,
+                    self.balance,
+                    proceeds_usd,
+                    cost_basis_usd,
                 )
                 self.balance = 0.0
             self.total_pnl += profit
@@ -490,9 +500,7 @@ class PnLTracker:
             if performance_key:
                 self.strategy_performance.record_close(performance_key, profit)
             if len(self.recent_pnls) >= 6:
-                winrate = sum(1 for p in self.recent_pnls if p > 0) / len(
-                    self.recent_pnls
-                )
+                winrate = sum(1 for p in self.recent_pnls if p > 0) / len(self.recent_pnls)
                 avg_pnl = sum(self.recent_pnls) / len(self.recent_pnls)
                 bad_wr = float(os.getenv("HFT_BAD_REGIME_WINRATE"))
                 cooldown_sec = float(os.getenv("HFT_REGIME_COOLDOWN_SEC"))

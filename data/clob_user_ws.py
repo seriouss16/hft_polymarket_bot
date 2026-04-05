@@ -36,16 +36,18 @@ _CLOB_USER_WS_OPEN_TIMEOUT = float(os.getenv("CLOB_USER_WS_OPEN_TIMEOUT_SEC", "3
 
 class OrderState(Enum):
     """Order state machine states for event-driven tracking."""
+
     PENDING = "pending"  # Order placed, waiting for fill
     PARTIAL = "partial"  # Partially filled
-    FILLED = "filled"    # Fully filled
+    FILLED = "filled"  # Fully filled
     CANCELLED = "cancelled"  # Order cancelled
-    FAILED = "failed"    # Order failed
-    STALE = "stale"      # Order stale, awaiting reprice/exit
+    FAILED = "failed"  # Order failed
+    STALE = "stale"  # Order stale, awaiting reprice/exit
 
 
 class OrderEventType(Enum):
     """Types of order events from WebSocket."""
+
     PLACEMENT = "placement"
     UPDATE = "update"
     CANCELLATION = "cancellation"
@@ -56,6 +58,7 @@ class OrderEventType(Enum):
 @dataclass(slots=True)
 class OrderStateInfo:
     """Complete order state information with event history."""
+
     order_id: str
     state: OrderState
     status: str
@@ -134,7 +137,7 @@ class ClobUserOrderCache:
 
     Supports event-driven order tracking via callbacks for immediate notification
     of order events (PLACEMENT, UPDATE, CANCELLATION, TRADE).
-    
+
     Implements a complete order state machine with:
     - Event-driven state transitions
     - Server sequence gap detection when the feed includes a sequence field
@@ -155,7 +158,7 @@ class ClobUserOrderCache:
         self._max_stale_sec = float(os.getenv("CLOB_USER_WS_MAX_STALE_SEC", "25"))
         self._stale_warn_sec = float(os.getenv("CLOB_WS_STALE_WARN_SEC", "15"))
         self._stale_skip_sec = float(os.getenv("CLOB_WS_STALE_SKIP_SEC", "25"))
-        
+
         # Reconnection backoff parameters
         self._reconnect_base_sec = float(os.getenv("CLOB_WS_RECONNECT_BASE_SEC", "1"))
         self._reconnect_max_sec = float(os.getenv("CLOB_WS_RECONNECT_MAX_SEC", "30"))
@@ -165,7 +168,7 @@ class ClobUserOrderCache:
         self._reconnecting = False
         self._backup_connected = False
         self._backup_ws: Any = None
-        
+
         # Health monitoring
         self._health_log_interval = float(os.getenv("CLOB_WS_HEALTH_LOG_INTERVAL_SEC", "60"))
         self._last_health_log = time.time()
@@ -174,7 +177,7 @@ class ClobUserOrderCache:
         self._message_count = 0
         self._message_rate_window: list[float] = []  # timestamps for rolling rate
         self._max_rate_samples = 1000
-        
+
         self._ping_interval = float(os.getenv("CLOB_USER_WS_PING_SEC", "10"))
         self._lock = threading.RLock()
         self._orders: dict[str, dict[str, Any]] = {}
@@ -184,23 +187,23 @@ class ClobUserOrderCache:
         self._stop = asyncio.Event()
         # Callback for event-driven order tracking: callback(order_id, status, filled)
         self._callback: Callable[[str, str, float], None] | None = None
-        
+
         # Event-driven waiting: order_id -> list of asyncio.Event to set on update
         self._order_events: dict[str, list[asyncio.Event]] = {}
-        
+
         # Server-side stream sequence (gap detection when payloads include a seq field)
         self._last_sequence_seen: int = 0
         self._sequence_gaps_detected: int = 0
         self._client_annotation_seq: int = 0  # optional _seq stamp; not used for gap logic
-        
+
         # Reconnection event buffering
         self._reconnect_buffer: collections.deque[dict[str, Any]] = collections.deque(maxlen=1000)
         self._is_reconnecting: bool = False
         self._buffer_during_reconnect: bool = False
-        
+
         # Order lifecycle tracking: order_id -> creation_time
         self._pending_orders: dict[str, float] = {}
-        
+
         # Metrics tracking
         self._ws_events_total: int = 0
         self._http_fallbacks_total: int = 0
@@ -265,7 +268,7 @@ class ClobUserOrderCache:
                 if age <= effective_threshold:
                     # Fresh cache available, return it
                     return str(row.get("status", "unknown")), float(row.get("filled", 0.0))
-            
+
             # No fresh cache — return None, caller should continue waiting for WS event
             return None
 
@@ -291,22 +294,21 @@ class ClobUserOrderCache:
             )
         return self._state_machine[oid]
 
-    def _transition_state(self, state_info: OrderStateInfo, new_state: OrderState,
-                          status: str, filled: float) -> bool:
+    def _transition_state(self, state_info: OrderStateInfo, new_state: OrderState, status: str, filled: float) -> bool:
         """Transition order to new state, return True if state changed."""
         old_state = state_info.state
         if old_state == new_state:
             return False
-        
+
         state_info.state = new_state
         state_info.status = status
         state_info.filled_size = filled
         state_info.last_updated = time.time()
         state_info.event_count += 1
-        
+
         # Track state transition
         self._state_transitions[(old_state, new_state)] += 1
-        
+
         # Log state transition with details
         logging.info(
             "[WS] Order state transition: id=%s %s → %s status=%s filled=%.4f/%.4f "
@@ -320,11 +322,12 @@ class ClobUserOrderCache:
             state_info.ws_events_received,
             state_info.http_fallback_count,
         )
-        
+
         return True
 
-    def _touch(self, oid: str, status: str, filled: float, original_size: float = 0.0,
-                ws_latency_ms: float = 0.0) -> None:
+    def _touch(
+        self, oid: str, status: str, filled: float, original_size: float = 0.0, ws_latency_ms: float = 0.0
+    ) -> None:
         """Merge order state (best-effort) and invoke callback if registered."""
         now = time.time()
         with self._lock:
@@ -333,28 +336,28 @@ class ClobUserOrderCache:
                 "filled": filled,
                 "ts": now,
             }
-            
+
             # Update state machine
             state_info = self._init_order_state(oid, original_size)
             state_info.filled_size = filled
             state_info.last_updated = now
             state_info.last_ws_event_ts = now
             state_info.ws_events_received += 1
-            
+
             # Track latency
             if ws_latency_ms > 0:
                 self._ws_latency_samples.append(ws_latency_ms)
                 if len(self._ws_latency_samples) > self._max_latency_samples:
                     self._ws_latency_samples.pop(0)
-            
+
             self._ws_events_total += 1
-            
+
             # Track message rate
             self._message_rate_window.append(now)
             if len(self._message_rate_window) > self._max_rate_samples:
                 self._message_rate_window.pop(0)
             self._message_count += 1
-            
+
             # Determine state from status
             status_lower = status.lower()
             if status_lower in ("matched", "filled"):
@@ -378,15 +381,14 @@ class ClobUserOrderCache:
                 self._pending_orders.pop(oid, None)
             else:
                 new_state = OrderState.PENDING
-            
+
             self._transition_state(state_info, new_state, status_lower, filled)
-            
+
             # Comprehensive logging for WS events
             log_level = logging.INFO if new_state in (OrderState.FILLED, OrderState.CANCELLED) else logging.DEBUG
             logging.log(
                 log_level,
-                "[WS] Event received: id=%s status=%s filled=%.4f/%s state=%s "
-                "latency=%.2fms events_received=%d",
+                "[WS] Event received: id=%s status=%s filled=%.4f/%s state=%s " "latency=%.2fms events_received=%d",
                 oid[:20],
                 status,
                 filled,
@@ -403,7 +405,7 @@ class ClobUserOrderCache:
                 self._callback(oid, status_lower, filled)
             except Exception as exc:
                 logging.debug("Order callback error: %s", exc)
-        
+
         # Notify any waiters that an order update has been received
         self._notify_order_update(oid)
 
@@ -417,11 +419,11 @@ class ClobUserOrderCache:
             return
         oid = _norm_oid(str(oid_raw))
         sm, orig = _parse_size_fields(msg)
-        
+
         # Calculate WS latency (time between event and processing)
         event_ts = msg.get("ts") or msg.get("timestamp") or time.time()
         ws_latency_ms = (time.time() - event_ts) * 1000 if isinstance(event_ts, (int, float)) else 0.0
-        
+
         if inner == "CANCELLATION":
             self._events_by_type[OrderEventType.CANCELLATION] += 1
             self._touch(oid, "canceled", sm, orig, ws_latency_ms)
@@ -453,11 +455,11 @@ class ClobUserOrderCache:
         sz = _float(msg.get("size"))
         if sz > 1000:
             sz /= 1_000_000.0
-        
+
         # Calculate WS latency
         event_ts = msg.get("ts") or msg.get("timestamp") or time.time()
         ws_latency_ms = (time.time() - event_ts) * 1000 if isinstance(event_ts, (int, float)) else 0.0
-        
+
         taker = msg.get("taker_order_id") or msg.get("takerOrderId")
         if taker:
             oid = _norm_oid(str(taker))
@@ -541,21 +543,21 @@ class ClobUserOrderCache:
         if not self.enabled:
             logging.info("CLOB user WS disabled (CLOB_USER_WS_ENABLED=0).")
             return
-        
+
         primary_url = CLOB_USER_WS_URL
         # Note: backup URL not typically used for user WS (auth required), but support it if configured
         backup_url = os.getenv("CLOB_USER_WS_BACKUP_URL", "")
-        
+
         try:
             while not self._stop.is_set():
                 creds = self._creds_getter()
                 if _auth_dict(creds) is None:
                     await asyncio.sleep(1.0)
                     continue
-                
+
                 # Determine which URL to use
                 url = primary_url if not self._backup_connected else (backup_url or primary_url)
-                
+
                 try:
                     async with websockets.connect(
                         url,
@@ -570,14 +572,14 @@ class ClobUserOrderCache:
                         self._reconnect_attempt = 0
                         self._reconnecting = False
                         self._reconnect_start_time = None
-                        
+
                         # Log connection success
                         if self._backup_connected and backup_url:
                             logging.info("CLOB user WS reverted to primary endpoint")
                             self._backup_connected = False
                         else:
                             logging.info("CLOB user WS connected: %s", url)
-                        
+
                         await self._send_subscribe(ws)
                         self.stop_reconnect_buffering()
                         ping_task = asyncio.create_task(self._ping_loop(ws))
@@ -605,19 +607,19 @@ class ClobUserOrderCache:
                     self._reconnect_attempt += 1
                     if self._reconnect_start_time is None:
                         self._reconnect_start_time = time.time()
-                    
+
                     base = self._reconnect_base_sec
                     max_delay = self._reconnect_max_sec
                     jitter_ms = self._reconnect_jitter_ms
-                    
+
                     # Exponential backoff: base * 2^attempt, capped at max
                     delay = min(base * (2 ** (self._reconnect_attempt - 1)), max_delay)
                     # Add jitter: random 0-jitter_ms
                     jitter = (random.random() if jitter_ms > 0 else 0.0) * (jitter_ms / 1000.0)
                     delay += jitter
-                    
+
                     self._reconnecting = True
-                    
+
                     # Check if we should try backup connection
                     if backup_url and not self._backup_connected and self._reconnect_attempt >= 3:
                         logging.warning(
@@ -639,7 +641,7 @@ class ClobUserOrderCache:
                         # Buffer until subscribe completes on the next connection
                         self.start_reconnect_buffering()
                         await asyncio.sleep(delay)
-                    
+
                     self._total_reconnects += 1
         except asyncio.CancelledError:
             raise
@@ -652,21 +654,21 @@ class ClobUserOrderCache:
 
     async def wait_for_order_update(self, order_id: str, timeout: float | None = None) -> bool:
         """Wait for an order update event via WebSocket.
-        
+
         Returns True if an event was received within timeout, False otherwise.
         This is used by LiveExecutionEngine for event-driven order tracking.
         """
         if timeout is None:
             timeout = 30.0
-        
+
         oid = _norm_oid(order_id)
         event = asyncio.Event()
-        
+
         with self._lock:
             if oid not in self._order_events:
                 self._order_events[oid] = []
             self._order_events[oid].append(event)
-        
+
         try:
             # Wait for the event to be set by _notify_order_update
             await asyncio.wait_for(event.wait(), timeout)
@@ -681,20 +683,20 @@ class ClobUserOrderCache:
                     self._order_events[oid].remove(event)
                     if not self._order_events[oid]:
                         self._order_events.pop(oid, None)
-    
+
     def _notify_order_update(self, order_id: str) -> None:
         """Notify all waiters that an order update has been received."""
         oid = _norm_oid(order_id)
         with self._lock:
             events = self._order_events.get(oid, []).copy()
-        
+
         # Set all waiting events
         for event in events:
             try:
                 event.set()
             except Exception:
                 pass
-    
+
     def get_order_state(self, order_id: str) -> OrderStateInfo | None:
         """Get complete order state information from state machine."""
         with self._lock:
@@ -713,21 +715,21 @@ class ClobUserOrderCache:
             avg_latency = sum(ws_latency) / len(ws_latency) if ws_latency else 0.0
             min_latency = min(ws_latency) if ws_latency else 0.0
             max_latency = max(ws_latency) if ws_latency else 0.0
-            
+
             # Calculate rolling message rate
             if len(self._message_rate_window) > 1:
                 time_span = self._message_rate_window[-1] - self._message_rate_window[0]
                 msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
             else:
                 msg_rate = 0.0
-            
+
             # Last message age
             if self._orders:
                 latest_ts = max(float(row.get("ts", 0.0)) for row in self._orders.values())
                 last_msg_age = time.time() - latest_ts
             else:
                 last_msg_age = 0.0
-            
+
             return {
                 "ws_events_total": self._ws_events_total,
                 "http_fallbacks_total": self._http_fallbacks_total,
@@ -736,23 +738,22 @@ class ClobUserOrderCache:
                 "ws_latency_max_ms": round(max_latency, 2),
                 "ws_latency_samples": len(ws_latency),
                 "events_by_type": {k.value: v for k, v in self._events_by_type.items()},
-                "state_transitions": {
-                    f"{k[0].value}→{k[1].value}": v
-                    for k, v in self._state_transitions.items()
-                },
+                "state_transitions": {f"{k[0].value}→{k[1].value}": v for k, v in self._state_transitions.items()},
                 "active_orders": len(self._state_machine),
                 "sequence_number": self._last_sequence_seen,
                 "sequence_gaps_detected": self._sequence_gaps_detected,
                 "pending_orders": len(self._pending_orders),
                 "reconnect_buffer_size": len(self._reconnect_buffer),
                 # Health metrics
-                "uptime_sec": round((time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2),
+                "uptime_sec": round(
+                    (time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2
+                ),
                 "reconnect_count": self._total_reconnects,
                 "messages_per_sec": round(msg_rate, 2),
                 "last_message_age_sec": round(last_msg_age, 2),
                 "is_reconnecting": self._reconnecting,
             }
-    
+
     def get_health_metrics(self) -> dict[str, Any]:
         """Return connection health metrics (subset of get_metrics)."""
         with self._lock:
@@ -762,29 +763,31 @@ class ClobUserOrderCache:
                 msg_rate = len(self._message_rate_window) / max(time_span, 0.001)
             else:
                 msg_rate = 0.0
-            
+
             # Last message age
             if self._orders:
                 latest_ts = max(float(row.get("ts", 0.0)) for row in self._orders.values())
                 last_msg_age = time.time() - latest_ts
             else:
                 last_msg_age = 0.0
-            
+
             return {
-                "uptime_sec": round((time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2),
+                "uptime_sec": round(
+                    (time.time() - self._connection_start_time) if self._connection_start_time else 0.0, 2
+                ),
                 "reconnect_count": self._total_reconnects,
                 "messages_per_sec": round(msg_rate, 2),
                 "last_message_age_sec": round(last_msg_age, 2),
                 "is_reconnecting": self._reconnecting,
                 "backup_active": self._backup_connected,
             }
-    
+
     def _log_health_metrics(self) -> None:
         """Log health metrics periodically."""
         now = time.time()
         if now - self._last_health_log < self._health_log_interval:
             return
-        
+
         metrics = self.get_health_metrics()
         logging.info(
             "[WS_HEALTH] uptime=%.1fs reconnects=%d msg_rate=%.2f/s last_msg_age=%.2fs reconnecting=%s backup=%s",
@@ -837,15 +840,16 @@ class ClobUserOrderCache:
     def _check_sequence_gap(self, seq: int) -> bool:
         """Compare *server* stream sequence to the last seen value; return True if a gap was detected."""
         with self._lock:
-            gap_detected = (
-                self._last_sequence_seen > 0 and seq > self._last_sequence_seen + 1
-            )
+            gap_detected = self._last_sequence_seen > 0 and seq > self._last_sequence_seen + 1
             if gap_detected:
                 gap = seq - self._last_sequence_seen - 1
                 self._sequence_gaps_detected += gap
                 logging.warning(
                     "[WS] Sequence gap detected: expected=%d got=%d gap=%d total_gaps=%d",
-                    self._last_sequence_seen + 1, seq, gap, self._sequence_gaps_detected,
+                    self._last_sequence_seen + 1,
+                    seq,
+                    gap,
+                    self._sequence_gaps_detected,
                 )
             self._last_sequence_seen = seq
             return gap_detected
@@ -866,7 +870,7 @@ class ClobUserOrderCache:
         with self._lock:
             buffered = list(self._reconnect_buffer)
             self._reconnect_buffer.clear()
-        
+
         for msg in buffered:
             try:
                 if isinstance(msg, dict):
@@ -877,7 +881,7 @@ class ClobUserOrderCache:
                     replayed += 1
             except Exception as exc:
                 logging.debug("[WS] Error replaying buffered event: %s", exc)
-        
+
         if replayed > 0:
             logging.info("[WS] Replayed %d buffered events after reconnection", replayed)
         return replayed
@@ -930,28 +934,26 @@ class ClobUserOrderCache:
                     stale.append((oid, age))
         return stale
 
-    async def wait_for_fill_with_timeout(
-        self, order_id: str, timeout: float = 3.0
-    ) -> tuple[str, float] | None:
+    async def wait_for_fill_with_timeout(self, order_id: str, timeout: float = 3.0) -> tuple[str, float] | None:
         """Wait for a specific order to be filled with configurable timeout.
-        
+
         Uses asyncio.wait_for() for efficient event-driven waiting.
         Returns (status, filled_size) tuple when fill arrives, None on timeout.
         """
         oid = _norm_oid(order_id)
-        
+
         # Check cache first
         cached = self.get_order_fill(oid)
         if cached is not None:
             status, filled = cached
             if status in ("matched", "filled", "partially_matched"):
                 return cached
-        
+
         # Wait for event-driven update
         event_received = await self.wait_for_order_update(oid, timeout=timeout)
         if event_received:
             return self.get_order_fill(oid)
-        
+
         return None
 
     def handle_ws_message_with_sequence(self, raw: str) -> None:
@@ -966,7 +968,7 @@ class ClobUserOrderCache:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             return
-        
+
         # Buffer during reconnection (one deque entry per event dict; replay expects dicts).
         with self._lock:
             buffering = self._buffer_during_reconnect

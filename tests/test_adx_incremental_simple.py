@@ -45,7 +45,7 @@ class TestIncrementalADXUpdateLogic(unittest.TestCase):
                 high_i = low_i = close_i = price
             else:
                 start = max(0, i - period + 1)
-                window = px_adx[start:i+1]
+                window = px_adx[start : i + 1]
                 high_i = float(np.max(window))
                 low_i = float(np.min(window))
                 close_i = price
@@ -60,7 +60,7 @@ class TestIncrementalADXUpdateLogic(unittest.TestCase):
         adx1 = adx_calc.get_last_adx()
 
         # Simulate second tick: add one more price (index 60)
-        px_adx = all_prices[:adx_tick_len + 1]
+        px_adx = all_prices[: adx_tick_len + 1]
         current_len = len(px_adx)
 
         # Process only new prices (incremental)
@@ -68,7 +68,7 @@ class TestIncrementalADXUpdateLogic(unittest.TestCase):
             for i in range(last_processed_index + 1, current_len):
                 price = px_adx[i]
                 start = max(0, i - period + 1)
-                window = px_adx[start:i+1]
+                window = px_adx[start : i + 1]
                 high_i = float(np.max(window))
                 low_i = float(np.min(window))
                 close_i = price
@@ -129,7 +129,7 @@ class TestIncrementalADXUpdateLogic(unittest.TestCase):
         for i in range(current_len):
             price = px_adx[i]
             start = max(0, i - period + 1)
-            window = px_adx[start:i+1]
+            window = px_adx[start : i + 1]
             high_i = float(np.max(window))
             low_i = float(np.min(window))
             close_i = price
@@ -150,7 +150,7 @@ class TestIncrementalADXUpdateLogic(unittest.TestCase):
                 for i in range(last_processed + 1, current_len):
                     price = px_adx[i]
                     start = max(0, i - period + 1)
-                    window = px_adx[start:i+1]
+                    window = px_adx[start : i + 1]
                     high_i = float(np.max(window))
                     low_i = float(np.min(window))
                     close_i = price

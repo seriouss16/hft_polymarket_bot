@@ -7,15 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from utils.stats import StatsCollector
-from utils.trade_journal import (
-    JOURNAL_FIELDNAMES,
-    JournalEntryComposer,
-    TradeJournal,
-    migrate_journal_schema_if_needed,
-)
 from core.executor import PnLTracker
-
+from utils.stats import StatsCollector
+from utils.trade_journal import (JOURNAL_FIELDNAMES, JournalEntryComposer,
+                                 TradeJournal,
+                                 migrate_journal_schema_if_needed)
 
 # Legacy header (before exit_rsi_raw + row_kind) — matches pre-refactor _FIELDNAMES
 _LEGACY_HEADER = (
@@ -37,7 +33,10 @@ def test_journal_fieldnames_include_row_kind_and_exit_rsi_raw():
 
 def test_migrate_old_header_adds_new_columns(tmp_path: Path):
     p = tmp_path / "j.csv"
-    p.write_text(_LEGACY_HEADER + "1.0,UP,0.1,,,,,,,0.5,1.2,TP,50,,,,0.4,0.41,,,10,10,4,,4,,,,,,,,,lat,prof,key\n", encoding="utf-8")
+    p.write_text(
+        _LEGACY_HEADER + "1.0,UP,0.1,,,,,,,0.5,1.2,TP,50,,,,0.4,0.41,,,10,10,4,,4,,,,,,,,,lat,prof,key\n",
+        encoding="utf-8",
+    )
     migrate_journal_schema_if_needed(p, JOURNAL_FIELDNAMES)
     first = p.read_text(encoding="utf-8").splitlines()[0]
     assert "row_kind" in first

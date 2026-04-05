@@ -23,20 +23,14 @@ def cache(monkeypatch):
 
 
 def test_handle_order_update_partial(cache: ClobUserOrderCache):
-    cache._handle_raw(
-        '{"event_type":"order","type":"UPDATE","id":"0xabc","size_matched":"3",'
-        '"original_size":"10"}'
-    )
+    cache._handle_raw('{"event_type":"order","type":"UPDATE","id":"0xabc","size_matched":"3",' '"original_size":"10"}')
     st, filled = cache.get_order_fill("0xabc")
     assert st == "partially_matched"
     assert abs(filled - 3.0) < 1e-9
 
 
 def test_handle_order_update_full(cache: ClobUserOrderCache):
-    cache._handle_raw(
-        '{"event_type":"order","type":"UPDATE","id":"0xabc","size_matched":"10",'
-        '"original_size":"10"}'
-    )
+    cache._handle_raw('{"event_type":"order","type":"UPDATE","id":"0xabc","size_matched":"10",' '"original_size":"10"}')
     st, filled = cache.get_order_fill("0xabc")
     assert st == "matched"
     assert abs(filled - 10.0) < 1e-9
@@ -52,17 +46,13 @@ def test_handle_order_without_event_type_uses_inner_type(cache: ClobUserOrderCac
 def test_stale_row_returns_none(cache: ClobUserOrderCache, monkeypatch):
     monkeypatch.setenv("CLOB_USER_WS_MAX_STALE_SEC", "0.001")
     cache._max_stale_sec = 0.001
-    cache._handle_raw(
-        '{"event_type":"order","type":"UPDATE","id":"0xold","size_matched":"1","original_size":"2"}'
-    )
+    cache._handle_raw('{"event_type":"order","type":"UPDATE","id":"0xold","size_matched":"1","original_size":"2"}')
     time.sleep(0.05)
     assert cache.get_order_fill("0xold") is None
 
 
 def test_trade_without_event_type(cache: ClobUserOrderCache):
-    cache._handle_raw(
-        '{"type":"TRADE","status":"MATCHED","size":"2","taker_order_id":"0xt"}'
-    )
+    cache._handle_raw('{"type":"TRADE","status":"MATCHED","size":"2","taker_order_id":"0xt"}')
     st, filled = cache.get_order_fill("0xt")
     assert st == "matched"
     assert abs(filled - 2.0) < 1e-9
@@ -76,12 +66,10 @@ def test_extract_server_sequence_common_keys() -> None:
 
 def test_server_sequence_gap_detected_on_handle_raw(cache: ClobUserOrderCache):
     cache._handle_raw(
-        '{"event_type":"order","type":"UPDATE","id":"0xs1","seq":1,'
-        '"size_matched":"0","original_size":"1"}'
+        '{"event_type":"order","type":"UPDATE","id":"0xs1","seq":1,' '"size_matched":"0","original_size":"1"}'
     )
     cache._handle_raw(
-        '{"event_type":"order","type":"UPDATE","id":"0xs2","seq":3,'
-        '"size_matched":"0","original_size":"1"}'
+        '{"event_type":"order","type":"UPDATE","id":"0xs2","seq":3,' '"size_matched":"0","original_size":"1"}'
     )
     m = cache.get_metrics()
     assert m["sequence_gaps_detected"] == 1
@@ -91,8 +79,7 @@ def test_server_sequence_gap_detected_on_handle_raw(cache: ClobUserOrderCache):
 def test_reconnect_buffer_replays_after_stop(cache: ClobUserOrderCache):
     cache.start_reconnect_buffering()
     cache.handle_ws_message_with_sequence(
-        '{"event_type":"order","type":"UPDATE","id":"0xbuf","size_matched":"1",'
-        '"original_size":"10"}'
+        '{"event_type":"order","type":"UPDATE","id":"0xbuf","size_matched":"1",' '"original_size":"10"}'
     )
     assert cache.get_order_fill("0xbuf") is None
     replayed = cache.stop_reconnect_buffering()

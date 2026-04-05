@@ -222,10 +222,7 @@ class ConfigValidator:
 
         # Z-score parameters
         self._add_int("HFT_ENTRY_ZSCORE_STRICT_TICKS", min=0, required=False)
-        self._add_str_enum(
-            "HFT_ZSCORE_MONOTONIC_STRICTNESS", {"strict", "relaxed", "off"},
-            required=False
-        )
+        self._add_str_enum("HFT_ZSCORE_MONOTONIC_STRICTNESS", {"strict", "relaxed", "off"}, required=False)
 
         # ==============================================================================
         # BOOK AND LIQUIDITY

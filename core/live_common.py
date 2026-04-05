@@ -128,6 +128,7 @@ class OrderStatus(str, Enum):
 @dataclass(slots=True, frozen=True)
 class WsOrderEvent:
     """Event from user WebSocket channel."""
+
     order_id: str
     status: str
     filled: float
@@ -137,6 +138,7 @@ class WsOrderEvent:
 @dataclass(slots=True, frozen=True)
 class RestResponseEvent:
     """Event from REST API response (e.g. order placement)."""
+
     order_id: str | None
     success: bool
     status: str | None = None
@@ -147,12 +149,14 @@ class RestResponseEvent:
 @dataclass(slots=True, frozen=True)
 class TimerEvent:
     """Periodic timer event for stale checks and repricing."""
+
     timestamp: float = field(default_factory=time.time)
 
 
 @dataclass(slots=True)
 class TrackedOrder:
     """Single tracked CLOB order with lifecycle metadata."""
+
     order_id: str
     token_id: str
     side: str
@@ -181,10 +185,7 @@ class TrackedOrder:
         Applies to both PENDING and PARTIAL states since a partial fill can also
         stall indefinitely when the book moves away.
         """
-        return (
-            self.age_sec >= _ORDER_STALE_SEC
-            and self.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
-        )
+        return self.age_sec >= _ORDER_STALE_SEC and self.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
 
 
 def _levels_from_book_rows(rows: list | None) -> list[tuple[float, float]]:
@@ -287,9 +288,7 @@ def reconcile_binary_outcome_books(
     ext_dn = abs(mid_down - 0.5)
     up_spread = _ua - _ub
     dn_spread = _da - _db
-    trust_up = ext_up > ext_dn or (
-        abs(ext_up - ext_dn) < 1e-9 and up_spread <= dn_spread
-    )
+    trust_up = ext_up > ext_dn or (abs(ext_up - ext_dn) < 1e-9 and up_spread <= dn_spread)
 
     if trust_up:
         nb, na = _pair_from_up()
@@ -313,7 +312,8 @@ def reconcile_binary_outcome_books(
 try:
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import OrderArgs, OrderType
-    from py_clob_client.order_builder.constants import BUY, SELL as SELL_SIDE
+    from py_clob_client.order_builder.constants import BUY
+    from py_clob_client.order_builder.constants import SELL as SELL_SIDE
 except Exception:  # pragma: no cover - optional runtime dependency
     ClobClient = None
     OrderArgs = None
@@ -369,6 +369,7 @@ def _paper_aligned_buy_price_allows(signal: str, best_ask: float, max_entry_ask:
 @dataclass(slots=True)
 class LiveRiskManager:
     """Session realized-PnL guard and trade counter (bot process lifetime)."""
+
     max_session_loss: float = -50.0
     pnl: float = 0.0
     trades: int = 0
@@ -395,7 +396,10 @@ class LiveRiskManager:
         """Log current risk state for diagnostics."""
         logging.info(
             "[LIVE RISK] session_pnl=%.4f max_session_loss=%.4f trades=%d can_trade=%s",
-            self.pnl, self.max_session_loss, self.trades, self.can_trade(),
+            self.pnl,
+            self.max_session_loss,
+            self.trades,
+            self.can_trade(),
         )
 
 

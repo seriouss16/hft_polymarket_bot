@@ -100,7 +100,9 @@ def migrate_journal_schema_if_needed(path: Path, target_fields: list[str]) -> No
                     normalized[k] = row.get(k) if row.get(k) is not None else ""
             rows.append(normalized)
     fd, tmp_path = tempfile.mkstemp(
-        suffix=".csv", dir=path.parent, text=True,
+        suffix=".csv",
+        dir=path.parent,
+        text=True,
     )
     os.close(fd)
     tmp_path = Path(tmp_path)

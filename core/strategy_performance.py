@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 @dataclass(slots=True)
 class StrategyPerformanceSlice:
     """Cumulative stats for one attribution key (e.g. phase_router:soft_flow)."""
+
     trades: int = 0
     wins: int = 0
     pnl_sum: float = 0.0
@@ -16,6 +17,7 @@ class StrategyPerformanceSlice:
 @dataclass(slots=True)
 class StrategyPerformanceBook:
     """Track closed-trade PnL by performance_key across a session."""
+
     slices: dict[str, StrategyPerformanceSlice] = field(default_factory=dict)
 
     def record_close(self, performance_key: str | None, pnl: float) -> None:
@@ -57,9 +59,7 @@ class StrategyPerformanceBook:
         for key in sorted(self.slices.keys()):
             sl = self.slices[key]
             wr = (sl.wins / sl.trades * 100.0) if sl.trades > 0 else 0.0
-            lines.append(
-                f"  {key:<42} trades={sl.trades:>4}  WR={wr:>5.1f}%  PnL={sl.pnl_sum:>+10.4f} USD"
-            )
+            lines.append(f"  {key:<42} trades={sl.trades:>4}  WR={wr:>5.1f}%  PnL={sl.pnl_sum:>+10.4f} USD")
         lines.append(f"  {'TOTAL (sum of slices)':<42} PnL={self.total_pnl_all_keys():>+10.4f} USD")
         return lines
 

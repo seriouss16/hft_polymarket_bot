@@ -93,6 +93,7 @@ class TestAsyncDebugLogger:
         assert len(lines) == 3
         for line, expected in zip(lines, entries):
             import json
+
             assert json.loads(line) == expected
 
     @pytest.mark.asyncio
@@ -192,6 +193,7 @@ class TestBalanceCacheDoubleCheckedLocking:
     def test_concurrent_access_does_not_corrupt_state(self, mock_fetchers):
         """Test that concurrent calls don't cause race conditions or corrupted state."""
         import threading
+
         usdc_fetcher, conditional_fetcher = mock_fetchers
         from data.balance_cache import BalanceCache
 

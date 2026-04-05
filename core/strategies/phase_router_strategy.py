@@ -72,9 +72,8 @@ class PhaseRouterStrategy(BaseStrategy):
                 diag.get("soft_eligible"),
             )
         if os.getenv("HFT_LOG_PHASE_DIAGNOSTICS") == "1":
-            if (
-                profile != self._last_applied
-                or now - self._last_diag_log_ts >= float(os.getenv("HFT_LOG_PHASE_DIAGNOSTICS_SEC"))
+            if profile != self._last_applied or now - self._last_diag_log_ts >= float(
+                os.getenv("HFT_LOG_PHASE_DIAGNOSTICS_SEC")
             ):
                 obs = diag.get("observed") or {}
                 logging.info(

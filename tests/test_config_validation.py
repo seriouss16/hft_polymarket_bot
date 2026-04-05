@@ -11,25 +11,39 @@ import pytest
 # Allow imports from hft_bot root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils.config_validation import (
-    ConfigValidator,
-    ValidationError,
-    validate_config,
-)
+from utils.config_validation import (ConfigValidator, ValidationError,
+                                     validate_config)
 
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     """Ensure a clean environment for each test."""
     # Clear any existing HFT_* variables
-    keys_to_remove = [k for k in os.environ if k.startswith("HFT_") or k in {
-        "REGIME_WINDOW_TICKS", "REGIME_CALM_SPEED_MAX", "REGIME_ACTIVE_SPEED_MIN",
-        "REGIME_CALM_STALE_MIN_MS", "REGIME_LOG_MIN_SEC", "REGIME_HYSTERESIS_TICKS",
-        "HFT_DEPOSIT_USD", "HFT_DEFAULT_TRADE_USD", "HFT_MAX_POSITION_USD",
-        "STATS_INTERVAL_SEC", "HFT_BUY_EDGE", "HFT_SELL_EDGE_ABS", "HFT_MIN_HOLD_SEC",
-        "HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC", "HFT_REGIME_FILTER_ENABLED",
-        "HFT_TRAILING_TP_ENABLED", "HFT_TRAILING_SL_ENABLED",
-    }]
+    keys_to_remove = [
+        k
+        for k in os.environ
+        if k.startswith("HFT_")
+        or k
+        in {
+            "REGIME_WINDOW_TICKS",
+            "REGIME_CALM_SPEED_MAX",
+            "REGIME_ACTIVE_SPEED_MIN",
+            "REGIME_CALM_STALE_MIN_MS",
+            "REGIME_LOG_MIN_SEC",
+            "REGIME_HYSTERESIS_TICKS",
+            "HFT_DEPOSIT_USD",
+            "HFT_DEFAULT_TRADE_USD",
+            "HFT_MAX_POSITION_USD",
+            "STATS_INTERVAL_SEC",
+            "HFT_BUY_EDGE",
+            "HFT_SELL_EDGE_ABS",
+            "HFT_MIN_HOLD_SEC",
+            "HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC",
+            "HFT_REGIME_FILTER_ENABLED",
+            "HFT_TRAILING_TP_ENABLED",
+            "HFT_TRAILING_SL_ENABLED",
+        }
+    ]
     for key in keys_to_remove:
         monkeypatch.delenv(key, raising=False)
 
@@ -457,6 +471,7 @@ class TestConfigValidator:
             monkeypatch.setenv("HFT_REGIME_FILTER_ENABLED", raw)
             # Need to reimport to test parsing, but we'll just test the validator's internal method
             from utils.config_validation import ConfigValidator
+
             validator = ConfigValidator()
             result = validator._parse_bool(raw)
             assert result == expected, f"{raw} should parse to {expected}, got {result}"
@@ -658,6 +673,7 @@ class TestRealConfigFiles:
 
         # Parse the file and set environment variables
         from utils.env_merge import merge_env_file
+
         # We need to load it into os.environ for validation
         # But we should restore original state after
         original_env = os.environ.copy()
@@ -696,6 +712,7 @@ class TestRealConfigFiles:
             pytest.skip(f"{day_env} not found")
 
         from utils.env_merge import merge_env_file
+
         original_env = os.environ.copy()
         try:
             merge_env_file(day_env, overwrite=True)
@@ -732,6 +749,7 @@ class TestRealConfigFiles:
             pytest.skip(f"{night_env} not found")
 
         from utils.env_merge import merge_env_file
+
         original_env = os.environ.copy()
         try:
             merge_env_file(night_env, overwrite=True)

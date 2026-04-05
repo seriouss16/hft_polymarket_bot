@@ -26,16 +26,18 @@ import argparse
 import asyncio
 import csv
 import json
-import os
 import math
+import os
 import statistics
 import sys
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
+
 import websockets
+
 try:
     from tqdm.auto import tqdm
 except Exception:  # pragma: no cover - optional dependency for UX only
@@ -129,9 +131,7 @@ def _fmt_ms_stats(label: str, xs: list[float]) -> str:
     return f"{label}: n={len(xs)}  min/mean/median/max = {lo:.1f} / {mean:.1f} / {med:.1f} / {hi:.1f} ms"
 
 
-def _fmt_triplet(
-    lo: float | None, mid: float | None, hi: float | None, suffix: str = ""
-) -> str:
+def _fmt_triplet(lo: float | None, mid: float | None, hi: float | None, suffix: str = "") -> str:
     if lo is None:
         return "n/a"
     return f"{lo:.1f}{suffix} / {mid:.1f}{suffix} / {hi:.1f}{suffix}"
@@ -264,12 +264,7 @@ def _geo_by_ip_tag() -> tuple[str, str]:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 continue
-            country = (
-                data.get("country_name")
-                or data.get("country")
-                or data.get("countryCode")
-                or ""
-            )
+            country = data.get("country_name") or data.get("country") or data.get("countryCode") or ""
             city = data.get("city") or data.get("region") or ""
             ctry = _sanitize_tag_part(str(country))
             cty = _sanitize_tag_part(str(city))
@@ -917,9 +912,7 @@ async def _bench(
     print(f"  {gap_last_cb}")
 
     print()
-    print(
-        f"--- Catch-up: after Binance move ≥ {move_threshold_usd:.1f} USD, delay to next Poly tick ---"
-    )
+    print(f"--- Catch-up: after Binance move ≥ {move_threshold_usd:.1f} USD, delay to next Poly tick ---")
     catchup_bn = _fmt_ms_stats("Binance move -> next Poly", state.catchup_bn_to_poly_ms)
     print(f"  {catchup_bn}")
 
@@ -940,9 +933,7 @@ async def _bench(
         max_lag_sec=lag_max_sec,
     )
     print()
-    print(
-        f"--- Curve lag (1 Hz, window={lag_window_sec}s, search lag=0..{lag_max_sec}s) ---"
-    )
+    print(f"--- Curve lag (1 Hz, window={lag_window_sec}s, search lag=0..{lag_max_sec}s) ---")
     if bn_lags:
         curve_bn = (
             "Binance -> Poly lag(sec): "
@@ -980,10 +971,7 @@ async def _bench(
             bn_lag_sec=bn_lag_sec,
             cb_lag_sec=cb_lag_sec,
         )
-        print(
-            f"  Alignment CSV saved: {out_csv} "
-            f"(poly shift: binance={bn_lag_sec}s, coinbase={cb_lag_sec}s)"
-        )
+        print(f"  Alignment CSV saved: {out_csv} " f"(poly shift: binance={bn_lag_sec}s, coinbase={cb_lag_sec}s)")
         if _plot_alignment_png_from_arrays(
             out_png,
             bn_1hz=bn_1hz,
@@ -996,15 +984,9 @@ async def _bench(
         else:
             print("  Alignment plot skipped: matplotlib is not available")
         out_md = str(Path(out_csv).with_suffix(".md"))
-        inter_bn = _fmt_triplet(
-            *_gap_stats_ms(series["binance"].inter_arrival_ms())
-        )
-        inter_cb = _fmt_triplet(
-            *_gap_stats_ms(series["coinbase"].inter_arrival_ms())
-        )
-        inter_poly = _fmt_triplet(
-            *_gap_stats_ms(series["polymarket_rtds"].inter_arrival_ms())
-        )
+        inter_bn = _fmt_triplet(*_gap_stats_ms(series["binance"].inter_arrival_ms()))
+        inter_cb = _fmt_triplet(*_gap_stats_ms(series["coinbase"].inter_arrival_ms()))
+        inter_poly = _fmt_triplet(*_gap_stats_ms(series["polymarket_rtds"].inter_arrival_ms()))
         skew_bn = _fmt_skew_line(state.skew_ms["binance"])
         skew_cb = _fmt_skew_line(state.skew_ms["coinbase"])
         _write_markdown_report(
@@ -1041,10 +1023,14 @@ async def _bench(
 
     print()
     print("--- Supplement: inter-arrival gap between ticks (ms) ---")
-    feed_order = ("binance", "coinbase", "kraken", "polymarket_rtds") if kraken else (
-        "binance",
-        "coinbase",
-        "polymarket_rtds",
+    feed_order = (
+        ("binance", "coinbase", "kraken", "polymarket_rtds")
+        if kraken
+        else (
+            "binance",
+            "coinbase",
+            "polymarket_rtds",
+        )
     )
     for key in feed_order:
         s = series[key]
@@ -1062,9 +1048,7 @@ async def _bench(
         print(f"HTTPS GET {CLOB_HTTPS} (3 requests):")
         times, last_err = await asyncio.to_thread(_http_clob_ms, 3)
         if times:
-            print(
-                f"  min/mean/max ms = {_fmt_triplet(min(times), statistics.fmean(times), max(times))}"
-            )
+            print(f"  min/mean/max ms = {_fmt_triplet(min(times), statistics.fmean(times), max(times))}")
         else:
             print(f"  (all failed){f' — {last_err}' if last_err else ''}")
     print()

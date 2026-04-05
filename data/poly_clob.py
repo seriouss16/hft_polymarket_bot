@@ -25,6 +25,7 @@ import websockets
 
 try:
     import aiohttp
+
     _AIOHTTP_AVAILABLE = True
 except ImportError:
     _AIOHTTP_AVAILABLE = False
@@ -230,9 +231,7 @@ class ClobAsyncHTTPClient:
             await self._session.close()
             self._session = None
 
-    async def fetch_orderbook(
-        self, token_id: str, depth: int = 5
-    ) -> Optional[dict]:
+    async def fetch_orderbook(self, token_id: str, depth: int = 5) -> Optional[dict]:
         """Fetch order book snapshot asynchronously.
 
         Returns dict with best_bid, best_ask, bid_size_top, ask_size_top, etc.
@@ -258,9 +257,7 @@ class ClobAsyncHTTPClient:
         }
 
         try:
-            async with self._session.get(
-                self._base_url, params={"token_id": token_id}
-            ) as resp:
+            async with self._session.get(self._base_url, params={"token_id": token_id}) as resp:
                 if resp.status != 200:
                     logging.debug("CLOB HTTP order book failed token=%s…: %d", token_id[:28], resp.status)
                     return empty

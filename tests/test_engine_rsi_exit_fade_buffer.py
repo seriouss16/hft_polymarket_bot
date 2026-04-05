@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 
-from core.engine_rsi_exit import rsi_range_exit_triggered, exit_rsi
+import pytest
+
+from core.engine_rsi_exit import exit_rsi, rsi_range_exit_triggered
 
 
 def _eng(**kwargs) -> SimpleNamespace:
@@ -57,7 +58,7 @@ def test_exit_rsi_uses_np_clip():
     assert exit_rsi(0.0, 99.0, 1.0) == 1.0
     assert exit_rsi(150.0, 99.0, 1.0) == 99.0
     assert exit_rsi(-10.0, 99.0, 1.0) == 1.0
-    
+
     # Edge cases
     assert exit_rsi(1.0, 99.0, 1.0) == 1.0  # exactly at lower bound
     assert exit_rsi(99.0, 99.0, 1.0) == 99.0  # exactly at upper bound
@@ -68,10 +69,10 @@ def test_exit_rsi_validation_raises_on_invalid_config():
     # Equal values
     with pytest.raises(ValueError, match="Invalid RSI exit clamp configuration"):
         exit_rsi(50.0, 50.0, 50.0)
-    
+
     # high < low
     with pytest.raises(ValueError, match="Invalid RSI exit clamp configuration"):
         exit_rsi(50.0, 30.0, 70.0)
-    
+
     # Negative values but high > low should work
     assert exit_rsi(50.0, 10.0, -10.0) == 10.0

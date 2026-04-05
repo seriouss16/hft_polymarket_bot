@@ -18,6 +18,8 @@ Requires-Dist: mypy>=1.20.0
 Requires-Dist: vulture>=2.16
 Requires-Dist: pylint>=2.3.0
 Requires-Dist: pip-audit>=2.10.0
+Requires-Dist: black>=26.3.1
+Requires-Dist: isort>=8.0.1
 Provides-Extra: scripts
 Requires-Dist: matplotlib>=3.8.0; extra == "scripts"
 

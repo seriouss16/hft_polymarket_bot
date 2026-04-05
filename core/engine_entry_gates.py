@@ -92,10 +92,7 @@ def entry_edge_jump_ok(
     edge_window: deque,
 ) -> bool:
     """Return False when oracle edge jumps too far in one tick (bad CEX print vs Poly)."""
-    if (
-        entry_edge_jump_bypass_abs_speed > 0.0
-        and abs(float(edge_speed)) >= entry_edge_jump_bypass_abs_speed
-    ):
+    if entry_edge_jump_bypass_abs_speed > 0.0 and abs(float(edge_speed)) >= entry_edge_jump_bypass_abs_speed:
         return True
     if entry_max_edge_jump_pts <= 0.0:
         return True
@@ -213,16 +210,11 @@ def entry_zscore_trend_ok(
     monotonic_strictness: str = "strict",
 ) -> bool:
     """Require z-score to move monotonically with the intended side for several ticks."""
-    if (
-        entry_zscore_bypass_abs_speed > 0.0
-        and abs(float(edge_speed)) >= entry_zscore_bypass_abs_speed
-    ):
+    if entry_zscore_bypass_abs_speed > 0.0 and abs(float(edge_speed)) >= entry_zscore_bypass_abs_speed:
         return True
     if not entry_zscore_trend_enabled:
         return True
-    return zscore_monotonic_for_direction(
-        zscore_samples, entry_zscore_strict_ticks, trend_dir, monotonic_strictness
-    )
+    return zscore_monotonic_for_direction(zscore_samples, entry_zscore_strict_ticks, trend_dir, monotonic_strictness)
 
 
 def zscore_monotonic_for_direction(
@@ -293,11 +285,7 @@ def latency_expiry_edge_multiplier(
         m *= eng.latency_high_edge_mult
     elif latency_ms > 250.0:
         m *= 1.10
-    if (
-        seconds_to_expiry is not None
-        and seconds_to_expiry >= 0.0
-        and seconds_to_expiry < eng.expiry_tight_sec
-    ):
+    if seconds_to_expiry is not None and seconds_to_expiry >= 0.0 and seconds_to_expiry < eng.expiry_tight_sec:
         m *= eng.expiry_edge_mult
     return m
 
@@ -317,9 +305,7 @@ def entry_slot_window_allows(eng: Any, seconds_to_expiry: float | None) -> bool:
 
 
 def _price_to_beat_filter_enabled() -> bool:
-    return os.getenv("HFT_PRICE_TO_BEAT_FILTER_ENABLED") == "1" or os.getenv(
-        "HFT_ANCHOR_FILTER_ENABLED"
-    ) == "1"
+    return os.getenv("HFT_PRICE_TO_BEAT_FILTER_ENABLED") == "1" or os.getenv("HFT_ANCHOR_FILTER_ENABLED") == "1"
 
 
 def _price_to_beat_counter_min_delta_pct() -> float:

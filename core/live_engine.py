@@ -16,47 +16,31 @@ import math
 import os
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
-from dataclasses import dataclass
 
+from core.live_common import (_CLOB_BOOK_HTTP_TIMEOUT, _ORDER_FILL_POLL_SEC,
+                              _ORDER_MAX_REPRICE, _ORDER_STALE_SEC,
+                              _REPRICE_POST_CANCEL_FILL_POLLS,
+                              _REPRICE_POST_CANCEL_POLL_SEC,
+                              _REPRICE_POST_CANCEL_SLEEP_SEC, BUY,
+                              CLOB_BOOK_HTTP, SELL_SIDE, ClobClient,
+                              LiveRiskManager, OrderArgs, OrderStatus,
+                              OrderType, RestResponseEvent, TimerEvent,
+                              TrackedOrder, WsOrderEvent,
+                              _collateral_usd_from_balance_allowance_response,
+                              _levels_from_book_rows,
+                              _paper_aligned_buy_price_allows,
+                              _parse_csv_floats, _parse_usdc_verify_delays,
+                              _snapshot_from_levels, is_fresh_for_trading,
+                              live_buy_reprice_tick, live_emergency_buy_bump,
+                              live_emergency_cross_bump,
+                              live_sell_reprice_tick)
 from utils.env_config import req_float, req_int, req_str
-from utils.resilience import safe_task, CircuitBreaker, CircuitBreakerError
-
-from core.live_common import (
-    BUY,
-    CLOB_BOOK_HTTP,
-    ClobClient,
-    LiveRiskManager,
-    OrderArgs,
-    OrderStatus,
-    OrderType,
-    RestResponseEvent,
-    SELL_SIDE,
-    TimerEvent,
-    TrackedOrder,
-    WsOrderEvent,
-    _CLOB_BOOK_HTTP_TIMEOUT,
-    _ORDER_FILL_POLL_SEC,
-    _ORDER_MAX_REPRICE,
-    _ORDER_STALE_SEC,
-    _REPRICE_POST_CANCEL_FILL_POLLS,
-    _REPRICE_POST_CANCEL_POLL_SEC,
-    _REPRICE_POST_CANCEL_SLEEP_SEC,
-    _collateral_usd_from_balance_allowance_response,
-    _levels_from_book_rows,
-    _paper_aligned_buy_price_allows,
-    _parse_csv_floats,
-    _parse_usdc_verify_delays,
-    _snapshot_from_levels,
-    live_buy_reprice_tick,
-    live_emergency_buy_bump,
-    live_emergency_cross_bump,
-    is_fresh_for_trading,
-    live_sell_reprice_tick,
-)
+from utils.resilience import CircuitBreaker, CircuitBreakerError, safe_task
 
 
 class OrderFSM:
@@ -149,7 +133,9 @@ class OrderFSM:
                 return
 
         if tracked.reprice_count >= _ORDER_MAX_REPRICE:
-            logging.warning("⚠️ Order %s stale after %d reprices — emergency exit.", tracked.order_id, tracked.reprice_count)
+            logging.warning(
+                "⚠️ Order %s stale after %d reprices — emergency exit.", tracked.order_id, tracked.reprice_count
+            )
             self.engine._cancel_order(tracked.order_id)
             tracked.status = OrderStatus.STALE
             await self.engine._emergency_exit_order(tracked)
@@ -187,14 +173,16 @@ class OrderFSM:
         old_id = tracked.order_id
         self.engine._cancel_order(old_id)
         await self.engine._recover_fill_after_cancel(tracked, old_id)
-        
+
         if tracked.remaining <= 0:
             tracked.status = OrderStatus.FILLED
             return
 
         tracked.reprice_count += 1
-        new_id, immediate = await self.engine._place_limit_raw(tracked.token_id, tracked.side, new_price, tracked.remaining)
-        
+        new_id, immediate = await self.engine._place_limit_raw(
+            tracked.token_id, tracked.side, new_price, tracked.remaining
+        )
+
         if new_id:
             # Update FSM mapping in engine
             self.engine._fsms.pop(old_id, None)
@@ -294,17 +282,21 @@ class LiveExecutionEngine:
         self._ws_metrics_last_log = time.time()
         self._ws_metrics_log_interval = 60.0  # Log metrics every 60 seconds
         self._allowance_cache = allowance_cache
-        
+
         # Event Queue and Worker
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: asyncio.Task | None = None
         self._fsms: dict[str, OrderFSM] = {}
-        
+
         # Circuit Breaker for Polymarket API
         self.circuit_breaker = CircuitBreaker(
             name="PolymarketAPI",
-            error_threshold=req_int("HFT_CIRCUIT_BREAKER_THRESHOLD") if os.getenv("HFT_CIRCUIT_BREAKER_THRESHOLD") else 5,
-            recovery_timeout=req_float("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") if os.getenv("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") else 60.0,
+            error_threshold=(
+                req_int("HFT_CIRCUIT_BREAKER_THRESHOLD") if os.getenv("HFT_CIRCUIT_BREAKER_THRESHOLD") else 5
+            ),
+            recovery_timeout=(
+                req_float("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") if os.getenv("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") else 60.0
+            ),
         )
 
         if ClobClient is None:
@@ -374,7 +366,9 @@ class LiveExecutionEngine:
                 if order.status in (OrderStatus.PENDING, OrderStatus.PARTIAL):
                     logging.warning(
                         "[SAFETY] Anti-doubling: active BUY order %s exists for token %s (status=%s) — blocking new entry",
-                        order.order_id[:12], token_id[:12], order.status,
+                        order.order_id[:12],
+                        token_id[:12],
+                        order.status,
                     )
                     return False
 
@@ -384,7 +378,8 @@ class LiveExecutionEngine:
             if existing_shares >= req_float("POLY_CLOB_MIN_SHARES"):
                 logging.warning(
                     "[SAFETY] Anti-doubling: confirmed position exists for token %s (shares=%.4f) — blocking new entry",
-                    token_id[:12], existing_shares,
+                    token_id[:12],
+                    existing_shares,
                 )
                 return False
 
@@ -456,7 +451,8 @@ class LiveExecutionEngine:
                 # Cache hit (fresh or stale) — skip API call
                 logging.debug(
                     "[ALLOWANCE] Cache hit for token=%s (allowance=%.0f)",
-                    token_id[:20], cached,
+                    token_id[:20],
+                    cached,
                 )
                 return
             # Cache miss or expired — call API and update cache
@@ -483,7 +479,9 @@ class LiveExecutionEngine:
         if self.test_mode or self.client is None:
             return
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client.clob_types import (AssetType,
+                                                   BalanceAllowanceParams)
+
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
@@ -493,7 +491,8 @@ class LiveExecutionEngine:
             logging.info("[LIVE] COLLATERAL allowance refreshed: %s", resp)
         except Exception as exc:
             logging.error(
-                "[LIVE] ensure_allowances failed: %s — BUY orders may be rejected.", exc,
+                "[LIVE] ensure_allowances failed: %s — BUY orders may be rejected.",
+                exc,
             )
 
     def ensure_conditional_allowance(self, token_id: str) -> None:
@@ -506,7 +505,9 @@ class LiveExecutionEngine:
         if self.test_mode or self.client is None:
             return
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client.clob_types import (AssetType,
+                                                   BalanceAllowanceParams)
+
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
@@ -516,13 +517,14 @@ class LiveExecutionEngine:
             resp = self.client.update_balance_allowance(params=params)
             logging.info(
                 "[LIVE] CONDITIONAL allowance refreshed: token=%s resp=%s",
-                token_id[:20], resp,
+                token_id[:20],
+                resp,
             )
         except Exception as exc:
             logging.error(
-                "[LIVE] ensure_conditional_allowance failed for token=%s: %s "
-                "— SELL may be rejected.",
-                token_id[:20], exc,
+                "[LIVE] ensure_conditional_allowance failed for token=%s: %s " "— SELL may be rejected.",
+                token_id[:20],
+                exc,
             )
 
     def fetch_conditional_balance(self, token_id: str) -> float | None:
@@ -539,7 +541,9 @@ class LiveExecutionEngine:
             return None
 
         async def _fetch():
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client.clob_types import (AssetType,
+                                                   BalanceAllowanceParams)
+
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
@@ -548,16 +552,15 @@ class LiveExecutionEngine:
             )
             # Use to_thread because SDK calls are blocking
             resp = await asyncio.to_thread(self.client.get_balance_allowance, params=params)
-            raw = (
-                resp.get("balance") if isinstance(resp, dict)
-                else getattr(resp, "balance", None)
-            )
+            raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", None)
             if raw is None:
                 return None
             bal = float(raw) / 1_000_000.0
             logging.debug(
                 "[LIVE] Conditional balance: token=%s raw=%s → %.6f shares",
-                token_id[:20], raw, bal,
+                token_id[:20],
+                raw,
+                bal,
             )
             return bal
 
@@ -570,6 +573,7 @@ class LiveExecutionEngine:
                 # or we just accept that sync calls to this from the main loop are bad.
                 # However, most calls are from to_thread(fetch_conditional_balance).
                 import threading
+
                 if threading.current_thread() is threading.main_thread():
                     # This is dangerous if called from the main thread's async loop.
                     # But the engine's sync methods shouldn't be called from the main loop directly.
@@ -585,7 +589,9 @@ class LiveExecutionEngine:
             return None
         except Exception as exc:
             logging.warning(
-                "[LIVE] fetch_conditional_balance failed token=%s: %s", token_id[:20], exc,
+                "[LIVE] fetch_conditional_balance failed token=%s: %s",
+                token_id[:20],
+                exc,
             )
             return None
 
@@ -599,7 +605,9 @@ class LiveExecutionEngine:
             return None
 
         async def _fetch():
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client.clob_types import (AssetType,
+                                                   BalanceAllowanceParams)
+
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
@@ -612,6 +620,7 @@ class LiveExecutionEngine:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import threading
+
                 if threading.current_thread() is threading.main_thread():
                     return loop.run_until_complete(self.circuit_breaker.call(_fetch))
                 else:
@@ -672,16 +681,14 @@ class LiveExecutionEngine:
             delta = usdc_before - after
             if delta < -1e-6:
                 logging.error(
-                    "[LIVE] USDC debit verify: balance rose during BUY "
-                    "(before=%.4f after=%.4f) — refusing fill.",
+                    "[LIVE] USDC debit verify: balance rose during BUY " "(before=%.4f after=%.4f) — refusing fill.",
                     usdc_before,
                     after,
                 )
                 return False
             if delta + 1e-9 >= min_drop:
                 logging.info(
-                    "[LIVE] USDC debit verify OK: before=%.4f after=%.4f Δ=%.4f "
-                    "(expected≈%.4f tol±%.4f)",
+                    "[LIVE] USDC debit verify OK: before=%.4f after=%.4f Δ=%.4f " "(expected≈%.4f tol±%.4f)",
                     usdc_before,
                     after,
                     delta,
@@ -697,8 +704,7 @@ class LiveExecutionEngine:
             )
         if not any_after:
             logging.warning(
-                "[LIVE] USDC debit verify inconclusive (all post-order fetches failed) "
-                "— allowing fill.",
+                "[LIVE] USDC debit verify inconclusive (all post-order fetches failed) " "— allowing fill.",
             )
             return True
         delta_final = usdc_before - last_after if last_after is not None else None
@@ -738,9 +744,7 @@ class LiveExecutionEngine:
         snap = self.get_orderbook_snapshot(token_id, depth=1)
         return float(snap["best_bid"]), float(snap["best_ask"])
 
-    def _orderbook_snapshot_http(
-        self, token_id: str, depth: int, *, log_errors: bool = True
-    ) -> dict:
+    def _orderbook_snapshot_http(self, token_id: str, depth: int, *, log_errors: bool = True) -> dict:
         """Fetch and summarize the order book from the public CLOB HTTP endpoint."""
         empty = {
             "best_bid": 0.0,
@@ -782,7 +786,7 @@ class LiveExecutionEngine:
         cache = self._market_book_cache
         ws_enabled = getattr(cache, "enabled", True) if cache else False
         ws_primary = os.getenv("CLOB_MARKET_WS_PRIMARY", "1").strip().lower() in ("1", "true", "yes")
-        
+
         # 1. Try WS cache first (always)
         if cache is not None and ws_enabled:
             try:
@@ -796,17 +800,18 @@ class LiveExecutionEngine:
                         if ws_primary:
                             logging.debug(
                                 "[STALE_ORDERBOOK] [WS] Book cache stale for %s (age>%.1fs), returning cached data",
-                                token_id[:8], cache._max_stale_sec
+                                token_id[:8],
+                                cache._max_stale_sec,
                             )
                             return snap
             except Exception as exc:
                 logging.debug("Market book cache read failed: %s", exc)
-        
+
         # 2. HTTP fallback only if no WS or WS failed AND we need fresh data
         if self.client is None:
             logging.warning("[WS_RECONNECT] WS cache unavailable, falling back to HTTP")
             return self._orderbook_snapshot_http(token_id, depth, log_errors=True)
-        
+
         # Try SDK once, then HTTP
         try:
             book = self.client.get_order_book(token_id)
@@ -886,7 +891,6 @@ class LiveExecutionEngine:
         event = WsOrderEvent(order_id=order_id, status=status, filled=filled)
         self._event_queue.put_nowait(event)
 
-    
     def _track_ws_latency(self, latency_ms: float) -> None:
         """Track WebSocket latency metrics."""
         self._ws_metrics["ws_latency_samples"] += 1
@@ -895,34 +899,36 @@ class LiveExecutionEngine:
             self._ws_metrics["ws_latency_min_ms"] = latency_ms
         if latency_ms > self._ws_metrics["ws_latency_max_ms"]:
             self._ws_metrics["ws_latency_max_ms"] = latency_ms
-    
+
     def _get_ws_metrics(self) -> dict[str, Any]:
         """Get WebSocket metrics summary."""
         metrics = dict(self._ws_metrics)
         if metrics["ws_latency_samples"] > 0:
-            metrics["ws_latency_avg_ms"] = round(
-                metrics["ws_latency_total_ms"] / metrics["ws_latency_samples"], 2
-            )
+            metrics["ws_latency_avg_ms"] = round(metrics["ws_latency_total_ms"] / metrics["ws_latency_samples"], 2)
         else:
             metrics["ws_latency_avg_ms"] = 0.0
             metrics["ws_latency_min_ms"] = 0.0
         return metrics
-    
+
     def _log_ws_metrics(self, reason: str = "periodic") -> None:
         """Log WebSocket metrics."""
         metrics = self._get_ws_metrics()
         ws_events = metrics["ws_events_received"]
         http_fallbacks = self._http_metrics["http_fallbacks_total"]
         ws_latency = metrics["ws_latency_avg_ms"]
-        
+
         ws_rate = ws_events / (time.time() - self._ws_metrics_last_log) if ws_events > 0 else 0
-        
+
         logging.info(
             "[WS_METRICS] %s: ws_events=%d http_fallbacks=%d "
             "ws_latency_avg=%.2fms min=%.2fms max=%.2fms "
             "ws_rate=%.2f/s",
-            reason, ws_events, http_fallbacks,
-            ws_latency, metrics["ws_latency_min_ms"], metrics["ws_latency_max_ms"],
+            reason,
+            ws_events,
+            http_fallbacks,
+            ws_latency,
+            metrics["ws_latency_min_ms"],
+            metrics["ws_latency_max_ms"],
             ws_rate,
         )
         self._ws_metrics_last_log = time.time()
@@ -1015,7 +1021,9 @@ class LiveExecutionEngine:
                 if 0.01 <= px <= 0.99:
                     logging.debug(
                         "[LIVE] SELL VWAP from order.%s=%.4f (limit was %.4f)",
-                        key, px, tracked.price,
+                        key,
+                        px,
+                        tracked.price,
                     )
                     return px
             except (TypeError, ValueError):
@@ -1080,6 +1088,7 @@ class LiveExecutionEngine:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 import threading
+
                 if threading.current_thread() is threading.main_thread():
                     return loop.run_until_complete(self.circuit_breaker.call(_cancel))
                 else:
@@ -1194,9 +1203,7 @@ class LiveExecutionEngine:
         for attempt in range(_REPRICE_POST_CANCEL_FILL_POLLS):
             status_str, clob_filled = await _poll_once()
             if status_str in ("matched", "filled") or clob_filled >= tracked.size - 1e-6:
-                tracked.filled_size = min(
-                    tracked.size, max(tracked.filled_size, clob_filled)
-                )
+                tracked.filled_size = min(tracked.size, max(tracked.filled_size, clob_filled))
                 tracked.status = OrderStatus.FILLED
                 logging.info(
                     "✅ [LIVE] Fill synced after cancel: id=%s %s filled=%.4f / %.4f @ %.4f",
@@ -1210,8 +1217,7 @@ class LiveExecutionEngine:
 
             if status_str in ("partially_matched",) or (
                 clob_filled > tracked.filled_size + 1e-9
-                and status_str
-                not in ("canceled", "cancelled", "canceled_market_resolved")
+                and status_str not in ("canceled", "cancelled", "canceled_market_resolved")
             ):
                 if _apply_matched_size(clob_filled):
                     return True
@@ -1240,9 +1246,7 @@ class LiveExecutionEngine:
 
         status_str, clob_filled = await _poll_once()
         if status_str in ("matched", "filled") or clob_filled >= tracked.size - 1e-6:
-            tracked.filled_size = min(
-                tracked.size, max(tracked.filled_size, clob_filled)
-            )
+            tracked.filled_size = min(tracked.size, max(tracked.filled_size, clob_filled))
             tracked.status = OrderStatus.FILLED
             logging.info(
                 "✅ [LIVE] Late fill after cancel polls: id=%s filled=%.4f",
@@ -1276,8 +1280,9 @@ class LiveExecutionEngine:
             if not is_valid:
                 logging.error("FAK SELL validation failed: %s", error_msg)
                 return (0.0, 0.0)
-            
+
             from py_clob_client.clob_types import MarketOrderArgs
+
             best_bid, _ = self.get_best_prices(token_id)
             _fak_worst_mult = max(0.01, min(1.0, req_float("LIVE_FAK_SELL_WORST_BID_MULT")))
             worst_price = max(0.01, round(best_bid * _fak_worst_mult, 4))
@@ -1289,17 +1294,19 @@ class LiveExecutionEngine:
             )
             order = self.client.create_market_order(order_args)
             resp = self.client.post_order(order, OrderType.FAK)
-            status = str(
-                resp.get("status", "") if isinstance(resp, dict)
-                else getattr(resp, "status", "")
-            ).lower()
+            status = str(resp.get("status", "") if isinstance(resp, dict) else getattr(resp, "status", "")).lower()
             order_id = str(
                 resp.get("orderID") or resp.get("order_id", "")
-                if isinstance(resp, dict) else getattr(resp, "order_id", "")
+                if isinstance(resp, dict)
+                else getattr(resp, "order_id", "")
             )
             logging.info(
                 "[LIVE FAK SELL] size=%.4f worst_px=%.4f → id=%s status=%s token=%s",
-                size, worst_price, order_id[:20] if order_id else "?", status, token_id[:20],
+                size,
+                worst_price,
+                order_id[:20] if order_id else "?",
+                status,
+                token_id[:20],
             )
             if status in ("matched", "filled", "live", "delayed", "unmatched"):
                 # FAK may fill partially or fully — poll the actual fill amount.
@@ -1340,6 +1347,7 @@ class LiveExecutionEngine:
             return []
         try:
             from py_clob_client.clob_types import OpenOrderParams
+
             params = OpenOrderParams(asset_id=token_id) if token_id else None
             resp = self.client.get_orders(params) if params else self.client.get_orders()
             if isinstance(resp, list):
@@ -1349,15 +1357,13 @@ class LiveExecutionEngine:
             logging.warning("get_open_orders failed: %s", exc)
             return []
 
-    async def _place_limit_raw(
-        self, token_id: str, side: str, price: float, size: float
-    ) -> tuple[str | None, bool]:
+    async def _place_limit_raw(self, token_id: str, side: str, price: float, size: float) -> tuple[str | None, bool]:
         """Submit a GTC limit order; return (order_id, immediate_fill) or (None, False).
 
         immediate_fill is True when the CLOB responds with status='matched' meaning
         the order was fully filled synchronously (no need to poll).
         The order_id key in Polymarket CLOB dict responses is 'orderID' (capital D).
-        
+
         Phase 2 Optimization: Non-blocking order placement using executor to avoid
         blocking the event loop during EIP-712 signing and HTTP request.
         """
@@ -1365,7 +1371,11 @@ class LiveExecutionEngine:
             fake_id = f"sim-{side}-{int(time.time() * 1000)}"
             logging.info(
                 "[SIM LIMIT] %s size=%.2f @ %.4f token=%s id=%s",
-                side, size, price, token_id, fake_id,
+                side,
+                size,
+                price,
+                token_id,
+                fake_id,
             )
             return fake_id, False
         if OrderArgs is None or self.client is None:
@@ -1377,14 +1387,14 @@ class LiveExecutionEngine:
             if not is_valid:
                 logging.error("Order validation failed: %s", error_msg)
                 return None, False
-            
+
             # Create order args (fast, CPU-bound)
             order = OrderArgs(token_id=token_id, price=price, size=size, side=side)
-            
+
             # Non-blocking EIP-712 signing (5-10ms CPU-bound)
             loop = asyncio.get_running_loop()
             signed = await loop.run_in_executor(None, self.client.create_order, order)
-            
+
             # Non-blocking HTTP request (620ms network-bound from Portugal, ~20ms from Ireland)
             # Wrapped in Circuit Breaker
             try:
@@ -1404,12 +1414,19 @@ class LiveExecutionEngine:
             if not order_id:
                 logging.error(
                     "Order placement: no order_id in response %s @ %.4f resp=%s",
-                    side, price, resp,
+                    side,
+                    price,
+                    resp,
                 )
                 return None, False
             logging.info(
                 "[LIVE] %s size=%.2f @ %.4f token=%s -> id=%s immediate_fill=%s",
-                side, size, price, token_id[:20], order_id[:20], immediate,
+                side,
+                size,
+                price,
+                token_id[:20],
+                order_id[:20],
+                immediate,
             )
             return order_id, immediate
         except Exception as exc:
@@ -1426,12 +1443,16 @@ class LiveExecutionEngine:
         if filled > 0:
             logging.info(
                 "🔴 [LIVE] FAK SELL done: filled=%.4f / %.4f @ %.4f token=%s",
-                filled, size, price, token_id[:20],
+                filled,
+                size,
+                price,
+                token_id[:20],
             )
         else:
             logging.error(
                 "🛑 FAK SELL failed: %.4f shares token=%s — manual intervention required.",
-                size, token_id[:20],
+                size,
+                token_id[:20],
             )
         return filled
 
@@ -1513,15 +1534,17 @@ class LiveExecutionEngine:
         """
         self._entry_stats["emergency_exits"] += 1
         poly_min = req_float("POLY_CLOB_MIN_SHARES")
-        remaining = tracked.remaining if tracked.status in (
-            OrderStatus.PARTIAL, OrderStatus.STALE
-        ) else tracked.size
+        remaining = tracked.remaining if tracked.status in (OrderStatus.PARTIAL, OrderStatus.STALE) else tracked.size
         if remaining <= 0:
             return
 
         logging.warning(
             "🚨 EMERGENCY EXIT: %s %.2f token=%s (min=%.0f filled=%.2f)",
-            tracked.side, remaining, tracked.token_id[:20], poly_min, tracked.filled_size,
+            tracked.side,
+            remaining,
+            tracked.token_id[:20],
+            poly_min,
+            tracked.filled_size,
         )
 
         # Freshness check before emergency exit
@@ -1530,26 +1553,32 @@ class LiveExecutionEngine:
         ):
             logging.warning(
                 "[STALE_ORDERBOOK] [EMERGENCY] Proceeding with emergency exit for %s despite stale data (safety first)",
-                tracked.token_id[:8]
+                tracked.token_id[:8],
             )
-        
+
         # Diagnostic: track intended vs actual exit price for slippage analysis
         intended_price = tracked.price if tracked.price > 0 else 0.0
-        
+
         if tracked.side == SELL_SIDE:
             # FAK handles any size including sub-minimum — preferred for all SELL exits.
             fak_filled = await self._fak_sell(tracked.token_id, remaining)
             tracked.filled_size += fak_filled
-            
+
             # Log emergency exit slippage
             if fak_filled > 0:
                 actual_avg_price = tracked.filled_size / tracked.size if tracked.size > 0 else 0.0
-                slippage_pct = ((actual_avg_price - intended_price) / intended_price * 100) if intended_price > 0 else 0.0
+                slippage_pct = (
+                    ((actual_avg_price - intended_price) / intended_price * 100) if intended_price > 0 else 0.0
+                )
                 logging.warning(
                     "EMERGENCY_EXIT_SLIPPAGE: side=%s intended_price=%.4f actual_price=%.4f "
                     "slippage_pct=%.2f%% filled=%.4f/%.4f",
-                    tracked.side, intended_price, actual_avg_price, slippage_pct,
-                    tracked.filled_size, tracked.size,
+                    tracked.side,
+                    intended_price,
+                    actual_avg_price,
+                    slippage_pct,
+                    tracked.filled_size,
+                    tracked.size,
                 )
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, tracked.token_id)
@@ -1559,14 +1588,19 @@ class LiveExecutionEngine:
             if em_size <= 0.0 or em_size < poly_min:
                 logging.error(
                     "Emergency BUY: cannot afford %.4f sh at %.4f (got %.4f, min=%.0f).",
-                    remaining, price, em_size, poly_min,
+                    remaining,
+                    price,
+                    em_size,
+                    poly_min,
                 )
                 self._last_buy_skip_reason = "emergency_buy_failed"
                 return
             if em_size < remaining - 1e-6:
                 logging.warning(
                     "Emergency BUY: size %.4f → %.4f to fit USDC at %.4f.",
-                    remaining, em_size, price,
+                    remaining,
+                    em_size,
+                    price,
                 )
             # CLOB compares order cost to balance in micro-USDC; leave headroom so
             # rounding does not trigger "not enough balance" when spend ≈ wallet.
@@ -1593,9 +1627,7 @@ class LiveExecutionEngine:
                 )
                 self._last_buy_skip_reason = "emergency_buy_failed"
                 return
-            order_id, immediate = await self._place_limit_raw(
-                tracked.token_id, tracked.side, price, em_size
-            )
+            order_id, immediate = await self._place_limit_raw(tracked.token_id, tracked.side, price, em_size)
             if order_id:
                 emergency = TrackedOrder(
                     order_id=order_id,
@@ -1617,13 +1649,10 @@ class LiveExecutionEngine:
                     if _prev_f <= 0.0:
                         tracked.price = _em_px
                     else:
-                        tracked.price = (
-                            _prev_f * float(tracked.price) + _add * _em_px
-                        ) / tracked.filled_size
+                        tracked.price = (_prev_f * float(tracked.price) + _add * _em_px) / tracked.filled_size
             else:
                 logging.error(
-                    "🛑 Emergency BUY placement FAILED token=%s remaining=%.2f"
-                    " — manual intervention required.",
+                    "🛑 Emergency BUY placement FAILED token=%s remaining=%.2f" " — manual intervention required.",
                     tracked.token_id,
                     remaining,
                 )
@@ -1650,7 +1679,7 @@ class LiveExecutionEngine:
         ):
             logging.warning(
                 "[STALE_ORDERBOOK] [EMERGENCY_EXIT] Proceeding with aggressive exit for %s despite stale data",
-                token_id[:8]
+                token_id[:8],
             )
 
         best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
@@ -1666,13 +1695,16 @@ class LiveExecutionEngine:
             if place_sz <= 0.0:
                 logging.error(
                     "🛑 EMERGENCY CLOSE BUY: zero affordable size @ %.4f token=%s.",
-                    price, token_id[:20],
+                    price,
+                    token_id[:20],
                 )
                 return
             if place_sz < size - 1e-6:
                 logging.warning(
                     "EMERGENCY CLOSE BUY: size %.2f → %.2f (USDC cap) @ %.4f.",
-                    size, place_sz, price,
+                    size,
+                    place_sz,
+                    price,
                 )
 
         poly_min = req_float("POLY_CLOB_MIN_SHARES")
@@ -1704,9 +1736,7 @@ class LiveExecutionEngine:
         if not is_valid:
             logging.error("Emergency order validation failed: %s", error_msg)
             return
-        order_id, immediate = await self._place_limit_raw(
-            token_id, side, price, place_sz
-        )
+        order_id, immediate = await self._place_limit_raw(token_id, side, price, place_sz)
         if order_id:
             tracked = TrackedOrder(
                 order_id=order_id,
@@ -1721,9 +1751,7 @@ class LiveExecutionEngine:
             if not immediate:
                 asyncio.ensure_future(self._poll_order(tracked))
         else:
-            logging.error(
-                "🛑 Emergency close FAILED token=%s — manual intervention required.", token_id
-            )
+            logging.error("🛑 Emergency close FAILED token=%s — manual intervention required.", token_id)
 
     def _purge_buy_orders_for_token(self, token_id: str) -> None:
         """Drop all in-memory BUY trackers and confirmed keys for this outcome token.
@@ -1787,18 +1815,14 @@ class LiveExecutionEngine:
         BUY order has been confirmed filled by the CLOB poll loop.
         """
         return any(
-            o.token_id == token_id
-            and o.side == BUY
-            and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
+            o.token_id == token_id and o.side == BUY and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
             for o in self._active_orders.values()
         )
 
     def has_pending_sell(self, token_id: str) -> bool:
         """Return True when a non-terminal SELL order is still tracked for token_id."""
         return any(
-            o.token_id == token_id
-            and o.side == SELL_SIDE
-            and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
+            o.token_id == token_id and o.side == SELL_SIDE and o.status in (OrderStatus.PENDING, OrderStatus.PARTIAL)
             for o in self._active_orders.values()
         )
 
@@ -1814,24 +1838,24 @@ class LiveExecutionEngine:
             pending = [o for o in self._active_orders.values() if o.token_id == token_id and o.side == BUY]
             if not pending:
                 break
-            
+
             # Wait for any of the pending FSMs to finish or timeout
             fsms = [self._fsms[o.order_id] for o in pending if o.order_id in self._fsms]
             if fsms:
                 try:
                     await asyncio.wait_for(
-                        asyncio.gather(*(f.wait() for f in fsms)),
-                        timeout=max(0.1, deadline - time.monotonic())
+                        asyncio.gather(*(f.wait() for f in fsms)), timeout=max(0.1, deadline - time.monotonic())
                     )
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     pass
             else:
                 await asyncio.sleep(0.1)
-                
+
         filled = self.filled_buy_shares(token_id)
         logging.info(
             "[LIVE] wait_for_buy_fill done: token=%s filled=%.4f shares",
-            token_id[:20], filled,
+            token_id[:20],
+            filled,
         )
         return filled
 
@@ -1853,8 +1877,7 @@ class LiveExecutionEngine:
                 if fsms:
                     try:
                         await asyncio.wait_for(
-                            asyncio.gather(*(f.wait() for f in fsms)),
-                            timeout=max(0.1, deadline - time.monotonic())
+                            asyncio.gather(*(f.wait() for f in fsms)), timeout=max(0.1, deadline - time.monotonic())
                         )
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         pass
@@ -1864,7 +1887,7 @@ class LiveExecutionEngine:
 
             open_list = await asyncio.to_thread(self.get_open_orders, token_id)
             if open_list:
-                await asyncio.sleep(0.5) # Longer sleep for HTTP poll
+                await asyncio.sleep(0.5)  # Longer sleep for HTTP poll
                 continue
             return
         logging.warning(
@@ -1934,7 +1957,7 @@ class LiveExecutionEngine:
 
     def _log_entry_stats_if_due(self) -> None:
         """Emit aggregated live entry stats periodically for gate diagnostics.
-        
+
         Phase 2 WebSocket Migration: Includes WS/HTTP metrics.
         """
         if self.skip_stats_log_sec <= 0:
@@ -1942,25 +1965,30 @@ class LiveExecutionEngine:
         now = time.time()
         if now - self._last_skip_stats_log_ts < self.skip_stats_log_sec:
             return
-        
+
         # Log WS metrics periodically
         if now - self._ws_metrics_last_log >= self._ws_metrics_log_interval:
             self._log_ws_metrics("periodic")
-        
+
         st = self._entry_stats
         logging.info(
             "Live entry stats: attempts=%s executed=%s skip_ask_cap=%s "
             "skip_spread=%s skip_signal=%s reprice=%s emergency=%s active_orders=%s "
             "ws_events=%d http_fallbacks=%d ws_latency_avg=%.2fms.",
-            st["attempts"], st["executed"], st["skip_ask_cap"],
-            st["skip_spread"], st["skip_signal"], st["reprice_total"],
-            st["emergency_exits"], len(self._active_orders),
+            st["attempts"],
+            st["executed"],
+            st["skip_ask_cap"],
+            st["skip_spread"],
+            st["skip_signal"],
+            st["reprice_total"],
+            st["emergency_exits"],
+            len(self._active_orders),
             self._ws_metrics["ws_events_received"],
             self._http_metrics["http_fallbacks_total"],
             self._get_ws_metrics()["ws_latency_avg_ms"],
         )
         self._last_skip_stats_log_ts = now
-    
+
     async def shutdown(self) -> None:
         """Shutdown execution engine and log final metrics."""
         if self._worker_task:
@@ -1973,8 +2001,7 @@ class LiveExecutionEngine:
 
         self._log_ws_metrics("shutdown")
         logging.info(
-            "[LIVE] Final metrics: ws_events=%d http_fallbacks=%d "
-            "ws_latency_avg=%.2fms active_orders=%d",
+            "[LIVE] Final metrics: ws_events=%d http_fallbacks=%d " "ws_latency_avg=%.2fms active_orders=%d",
             self._ws_metrics["ws_events_received"],
             self._http_metrics["http_fallbacks_total"],
             self._get_ws_metrics()["ws_latency_avg_ms"],
@@ -2051,6 +2078,7 @@ class LiveExecutionEngine:
 
         # Circuit Breaker check
         from utils.resilience import CircuitState
+
         if self.circuit_breaker.state == CircuitState.OPEN:
             logging.warning("[CIRCUIT] Blocking close_position: Circuit is OPEN")
             # We still return (0.0, 0.0) but this is more critical as it's an exit
@@ -2060,18 +2088,14 @@ class LiveExecutionEngine:
         if self.stale_block_actions and not is_fresh_for_trading(
             token_id, self._market_book_cache, self._user_order_cache
         ):
-            logging.warning(
-                "[STALE_ORDERBOOK] [SELL] Blocking close_position for %s: data not fresh",
-                token_id[:8]
-            )
+            logging.warning("[STALE_ORDERBOOK] [SELL] Blocking close_position for %s: data not fresh", token_id[:8])
             return (0.0, 0.0)
 
         if token_id in self._confirmed_buys:
             cb = float(self._confirmed_buys[token_id])
             if cb > 0.0 and abs(size - cb) > 1e-6:
                 logging.info(
-                    "[LIVE] close_position: SELL size set to confirmed BUY fill=%.4f "
-                    "(caller passed %.4f) token=%s",
+                    "[LIVE] close_position: SELL size set to confirmed BUY fill=%.4f " "(caller passed %.4f) token=%s",
                     cb,
                     size,
                     token_id[:20],
@@ -2108,8 +2132,7 @@ class LiveExecutionEngine:
                 )
             else:
                 logging.warning(
-                    "⚠️ [LIVE] SELL size corrected: %.4f → %.4f "
-                    "(on-chain balance after fee) token=%s",
+                    "⚠️ [LIVE] SELL size corrected: %.4f → %.4f " "(on-chain balance after fee) token=%s",
                     size,
                     actual_bal,
                     token_id[:20],
@@ -2117,9 +2140,9 @@ class LiveExecutionEngine:
                 size = actual_bal
         elif actual_bal is not None and actual_bal == 0:
             logging.warning(
-                "⚠️ [LIVE] close_position: on-chain balance=0 (possible lag) — "
-                "keeping requested size=%.4f token=%s",
-                size, token_id[:20],
+                "⚠️ [LIVE] close_position: on-chain balance=0 (possible lag) — " "keeping requested size=%.4f token=%s",
+                size,
+                token_id[:20],
             )
             if not self.test_mode:
                 await asyncio.to_thread(self.ensure_conditional_allowance, token_id)
@@ -2128,7 +2151,8 @@ class LiveExecutionEngine:
                     size = min(size, _wait_bal)
                     logging.info(
                         "[LIVE] close_position: balance appeared after wait → %.4f sh token=%s",
-                        size, token_id[:20],
+                        size,
+                        token_id[:20],
                     )
         if size <= 0:
             logging.error(
@@ -2140,13 +2164,16 @@ class LiveExecutionEngine:
         if size < poly_min:
             logging.warning(
                 "⚠️ [LIVE] close_position: size %.2f < min %.0f — FAK market sell.",
-                size, poly_min,
+                size,
+                poly_min,
             )
             filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
             if filled > 0:
                 logging.info(
                     "🔴 [LIVE] FAK SELL done: %.4f @ %.4f token=%s",
-                    filled, price, token_id[:20],
+                    filled,
+                    price,
+                    token_id[:20],
                 )
                 return (filled, price)
             logging.error("🛑 [LIVE] FAK SELL failed: size=%.2f token=%s.", size, token_id[:20])
@@ -2165,20 +2192,18 @@ class LiveExecutionEngine:
         immediate = False
         for _att in range(sell_attempts):
             await self._ensure_allowance_cached(token_id)
-            order_id, immediate = await self._place_limit_raw(
-                token_id, SELL_SIDE, price, size
-            )
+            order_id, immediate = await self._place_limit_raw(token_id, SELL_SIDE, price, size)
             if order_id:
                 break
             if _att + 1 < sell_attempts:
                 logging.warning(
                     "[LIVE] SELL GTC placement failed — retry %d/%d (balance/allowance lag) token=%s.",
-                    _att + 1, sell_attempts, token_id[:20],
+                    _att + 1,
+                    sell_attempts,
+                    token_id[:20],
                 )
                 await self._await_sellable_balance(token_id, size)
-                await asyncio.sleep(
-                    req_float("LIVE_SELL_PLACE_RETRY_SLEEP_SEC")
-                )
+                await asyncio.sleep(req_float("LIVE_SELL_PLACE_RETRY_SLEEP_SEC"))
         if not order_id:
             logging.warning("⚠️ [LIVE] SELL GTC failed, trying FAK token=%s.", token_id[:20])
             fak_attempts = max(1, req_int("LIVE_SELL_FAK_ATTEMPTS"))
@@ -2187,22 +2212,22 @@ class LiveExecutionEngine:
                 await self._ensure_allowance_cached(token_id)
                 if _fa > 0:
                     await self._await_sellable_balance(token_id, size)
-                    await asyncio.sleep(
-                        req_float("LIVE_SELL_FAK_RETRY_SLEEP_SEC")
-                    )
-                filled, fak_price = await asyncio.to_thread(
-                    self._place_fak_sell, token_id, size
-                )
+                    await asyncio.sleep(req_float("LIVE_SELL_FAK_RETRY_SLEEP_SEC"))
+                filled, fak_price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
                 if filled > 0:
                     logging.info(
                         "🔴 [LIVE] FAK SELL done (GTC fallback): %.4f @ %.4f token=%s",
-                        filled, fak_price, token_id[:20],
+                        filled,
+                        fak_price,
+                        token_id[:20],
                     )
                     return (filled, fak_price)
                 if _fa + 1 < fak_attempts:
                     logging.warning(
                         "[LIVE] FAK SELL failed — retry %d/%d token=%s.",
-                        _fa + 1, fak_attempts, token_id[:20],
+                        _fa + 1,
+                        fak_attempts,
+                        token_id[:20],
                     )
             await self.emergency_exit(token_id, size, side=SELL_SIDE)
             return (0.0, 0.0)
@@ -2219,12 +2244,18 @@ class LiveExecutionEngine:
         self._active_orders[order_id] = tracked
         logging.info(
             "🔴 [LIVE] SELL placed: %.4f @ %.4f id=%s immediate=%s token=%s — polling fill",
-            size, price, order_id[:20], immediate, token_id[:20],
+            size,
+            price,
+            order_id[:20],
+            immediate,
+            token_id[:20],
         )
         await self._poll_order(tracked)
 
-        total_filled = tracked.filled_size if tracked.filled_size > 0 else (
-            tracked.size if tracked.status == OrderStatus.FILLED else 0.0
+        total_filled = (
+            tracked.filled_size
+            if tracked.filled_size > 0
+            else (tracked.size if tracked.status == OrderStatus.FILLED else 0.0)
         )
         avg_price = self._sell_fill_avg_price(tracked, total_filled)
         if total_filled > 0 and not self.test_mode:
@@ -2234,12 +2265,17 @@ class LiveExecutionEngine:
         if total_filled > 0:
             logging.info(
                 "🔴 [LIVE] SELL confirmed: filled=%.4f / %.4f @ %.4f token=%s",
-                total_filled, size, avg_price, token_id[:20],
+                total_filled,
+                size,
+                avg_price,
+                token_id[:20],
             )
         else:
             logging.error(
                 "🛑 [LIVE] SELL not filled: size=%.4f @ %.4f token=%s",
-                size, avg_price, token_id[:20],
+                size,
+                avg_price,
+                token_id[:20],
             )
         return (total_filled, avg_price)
 
@@ -2283,6 +2319,7 @@ class LiveExecutionEngine:
 
         # Circuit Breaker check
         from utils.resilience import CircuitState
+
         if self.circuit_breaker.state == CircuitState.OPEN:
             logging.warning("[CIRCUIT] Blocking execute: Circuit is OPEN")
             return _SKIP
@@ -2291,10 +2328,7 @@ class LiveExecutionEngine:
         if self.stale_block_actions and not is_fresh_for_trading(
             token_id, self._market_book_cache, self._user_order_cache
         ):
-            logging.warning(
-                "[STALE_ORDERBOOK] [BUY] Blocking execute for %s: data not fresh",
-                token_id[:8]
-            )
+            logging.warning("[STALE_ORDERBOOK] [BUY] Blocking execute for %s: data not fresh", token_id[:8])
             return _SKIP
 
         # Anti-doubling safety gate: prevent entering if already have position or pending order
@@ -2303,12 +2337,7 @@ class LiveExecutionEngine:
             self._log_entry_stats_if_due()
             return _SKIP
 
-        if (
-            best_bid is not None
-            and best_ask is not None
-            and best_ask > 0.0
-            and best_bid >= 0.0
-        ):
+        if best_bid is not None and best_ask is not None and best_ask > 0.0 and best_bid >= 0.0:
             best_bid, best_ask = float(best_bid), float(best_ask)
         else:
             best_bid, best_ask = await asyncio.to_thread(self.get_best_prices, token_id)
@@ -2318,7 +2347,9 @@ class LiveExecutionEngine:
             logging.warning(
                 "Skip %s: best_ask %.4f outside paper-aligned gates (global max HFT_MAX_ENTRY_ASK=%.4f "
                 "+ per-outcome HFT_ENTRY_*_ASK_UP/DOWN).",
-                signal, best_ask, self.max_entry_ask,
+                signal,
+                best_ask,
+                self.max_entry_ask,
             )
             self._log_entry_stats_if_due()
             return _SKIP
@@ -2328,7 +2359,11 @@ class LiveExecutionEngine:
             self._entry_stats["skip_spread"] += 1
             logging.warning(
                 "[SPREAD_TOO_WIDE] ⚠️ Bad spread %.4f (bid=%.4f ask=%.4f max=%.4f), skip signal %s.",
-                spread, best_bid, best_ask, self.max_spread, signal,
+                spread,
+                best_bid,
+                best_ask,
+                self.max_spread,
+                signal,
             )
             self._log_entry_stats_if_due()
             return _SKIP
@@ -2359,7 +2394,12 @@ class LiveExecutionEngine:
             logging.warning(
                 "⚠️ Skip %s: budget %.2f USD → %.2f shares < CLOB minimum %.0f shares "
                 "(need %.2f USD @ limit %.4f). Insufficient balance.",
-                signal, usd_notional, shares, poly_min_shares, min_cost, price,
+                signal,
+                usd_notional,
+                shares,
+                poly_min_shares,
+                min_cost,
+                price,
             )
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
@@ -2375,7 +2415,10 @@ class LiveExecutionEngine:
         if shares < poly_min_shares:
             logging.warning(
                 "⚠️ Skip %s: USDC balance only allows %.2f sh < min %.0f at %.4f.",
-                signal, shares, poly_min_shares, price,
+                signal,
+                shares,
+                poly_min_shares,
+                price,
             )
             self._entry_stats["skip_signal"] += 1
             self._log_entry_stats_if_due()
@@ -2388,7 +2431,9 @@ class LiveExecutionEngine:
             if ask_size_top > 0.0 and ask_size_top < shares:
                 logging.warning(
                     "⚠️ Skip %s: top ask size %.2f < desired shares %.2f (insufficient liquidity).",
-                    signal, ask_size_top, shares,
+                    signal,
+                    ask_size_top,
+                    shares,
                 )
                 self._entry_stats["skip_signal"] += 1
                 self._log_entry_stats_if_due()
@@ -2398,9 +2443,7 @@ class LiveExecutionEngine:
         usdc_before_snapshot: float | None = None
         if not self.test_mode:
             usdc_before_snapshot = await asyncio.to_thread(self.fetch_usdc_balance)
-        order_id, immediate = await self._place_limit_raw(
-            token_id, BUY, price, shares
-        )
+        order_id, immediate = await self._place_limit_raw(token_id, BUY, price, shares)
         if not order_id:
             logging.error("execute: BUY placement failed for signal %s.", signal)
             self._log_entry_stats_if_due()
@@ -2420,7 +2463,13 @@ class LiveExecutionEngine:
         self._entry_stats["executed"] += 1
         logging.info(
             "🟢 [LIVE] BUY placed: %s %.2f sh @ %.4f (%.2f USD) token=%s id=%s immediate=%s",
-            signal, shares, price, shares * price, token_id[:20], order_id[:20], immediate,
+            signal,
+            shares,
+            price,
+            shares * price,
+            token_id[:20],
+            order_id[:20],
+            immediate,
         )
 
         if not immediate:
@@ -2429,8 +2478,10 @@ class LiveExecutionEngine:
             # Wait for _poll_order to confirm fill
             await self._poll_order(tracked)
 
-        filled = tracked.filled_size if tracked.filled_size > 0 else (
-            tracked.size if tracked.status == OrderStatus.FILLED else 0.0
+        filled = (
+            tracked.filled_size
+            if tracked.filled_size > 0
+            else (tracked.size if tracked.status == OrderStatus.FILLED else 0.0)
         )
         avg_price = tracked.price
 
@@ -2446,14 +2497,18 @@ class LiveExecutionEngine:
                 logging.warning(
                     "⚠️ [LIVE] BUY order %s status=%s but on-chain balance=%.4f sh — "
                     "treating as partial fill to avoid phantom position.",
-                    tracked.order_id[:20], tracked.status, _rescue_bal,
+                    tracked.order_id[:20],
+                    tracked.status,
+                    _rescue_bal,
                 )
                 self._confirmed_buys[token_id] = _rescue_bal
                 self._active_orders.pop(tracked.order_id, None)
                 return (_rescue_bal, tracked.price)
             logging.warning(
                 "⚠️ [LIVE] BUY order %s (status=%s, on-chain=%.4f) — skip.",
-                tracked.order_id[:20], tracked.status, _rescue_bal or 0.0,
+                tracked.order_id[:20],
+                tracked.status,
+                _rescue_bal or 0.0,
             )
             self._active_orders.pop(tracked.order_id, None)
             return _SKIP
@@ -2467,7 +2522,8 @@ class LiveExecutionEngine:
             if self._last_buy_skip_reason is None and tracked.status == OrderStatus.STALE:
                 self._last_buy_skip_reason = "stale_no_fill"
             logging.warning(
-                "⚠️ [LIVE] BUY status=%s but filled=0 — skip.", tracked.status,
+                "⚠️ [LIVE] BUY status=%s but filled=0 — skip.",
+                tracked.status,
             )
             return _SKIP
 
@@ -2492,17 +2548,21 @@ class LiveExecutionEngine:
             if _b is not None and _b >= filled * _bal_min_frac:
                 actual_bal = _b
                 logging.info(
-                    "🟢 [LIVE] On-chain balance confirmed: %.4f sh "
-                    "(attempt %d, delay %.1fs) token=%s",
-                    actual_bal, _i + 1, _delay, token_id[:20],
+                    "🟢 [LIVE] On-chain balance confirmed: %.4f sh " "(attempt %d, delay %.1fs) token=%s",
+                    actual_bal,
+                    _i + 1,
+                    _delay,
+                    token_id[:20],
                 )
                 break
             next_delay = _bal_delays[_i + 1] if _i + 1 < len(_bal_delays) else 0
             logging.debug(
-                "[LIVE] Balance %.4f < threshold %.4f on attempt %d "
-                "— retrying in %.1fs token=%s",
-                _b or 0.0, filled * _bal_min_frac,
-                _i + 1, next_delay, token_id[:20],
+                "[LIVE] Balance %.4f < threshold %.4f on attempt %d " "— retrying in %.1fs token=%s",
+                _b or 0.0,
+                filled * _bal_min_frac,
+                _i + 1,
+                next_delay,
+                token_id[:20],
             )
 
         if actual_bal is None and self.test_mode and filled > 0:
@@ -2526,8 +2586,7 @@ class LiveExecutionEngine:
                 if _b is not None and _b >= filled * _bal_min_frac:
                     actual_bal = _b
                     logging.info(
-                        "🟢 [LIVE] On-chain balance confirmed (strict extra poll %d): "
-                        "%.4f sh token=%s",
+                        "🟢 [LIVE] On-chain balance confirmed (strict extra poll %d): " "%.4f sh token=%s",
                         _ep + 1,
                         actual_bal,
                         token_id[:20],
@@ -2539,9 +2598,11 @@ class LiveExecutionEngine:
             filled_clob = float(filled)
             if abs(actual_bal - filled) > 0.005:
                 logging.warning(
-                    "⚠️ [LIVE] BUY adjusted for protocol fee: reported=%.4f actual=%.4f "
-                    "(fee=%.4f sh) token=%s",
-                    filled, actual_bal, filled - actual_bal, token_id[:20],
+                    "⚠️ [LIVE] BUY adjusted for protocol fee: reported=%.4f actual=%.4f " "(fee=%.4f sh) token=%s",
+                    filled,
+                    actual_bal,
+                    filled - actual_bal,
+                    token_id[:20],
                 )
             filled = float(actual_bal)
             if filled > 0.0 and filled_clob > filled + 1e-9:
@@ -2566,7 +2627,9 @@ class LiveExecutionEngine:
                 "⚠️ [LIVE] On-chain balance not confirmed after %d retries "
                 "— trusting CLOB fill=%.4f token=%s (trust CLOB; set "
                 "LIVE_TRUST_CLOB_WITHOUT_CHAIN_BALANCE=0 for strict chain-only).",
-                len(_bal_delays), filled, token_id[:20],
+                len(_bal_delays),
+                filled,
+                token_id[:20],
             )
 
         _expected_spend = float(filled) * float(avg_price)
@@ -2581,14 +2644,16 @@ class LiveExecutionEngine:
             # chain — any remaining balance must still be tracked so the engine can EXIT
             # (close_position uses FAK for sub-min SELL) instead of leaving phantom flat.
             logging.warning(
-                "⚠️ [LIVE] Confirmed balance %.4f sh < min %.0f — "
-                "attempting FAK residual exit. token=%s",
-                filled, poly_min_shares, token_id[:20],
+                "⚠️ [LIVE] Confirmed balance %.4f sh < min %.0f — " "attempting FAK residual exit. token=%s",
+                filled,
+                poly_min_shares,
+                token_id[:20],
             )
             fak_filled = await self._fak_sell(token_id, filled)
             logging.info(
                 "🔴 [LIVE] FAK residual exit: sold=%.4f token=%s",
-                fak_filled, token_id[:20],
+                fak_filled,
+                token_id[:20],
             )
             self._active_orders.pop(tracked.order_id, None)
             _dust = req_float("LIVE_INVENTORY_DUST_SHARES")
@@ -2597,12 +2662,15 @@ class LiveExecutionEngine:
                 logging.warning(
                     "⚠️ [LIVE] Wallet still holds %.4f sh after residual FAK "
                     "(failed or partial) — syncing open position for strategy EXIT. token=%s",
-                    _bal_after, token_id[:20],
+                    _bal_after,
+                    token_id[:20],
                 )
                 filled = float(_bal_after)
                 logging.info(
                     "🟢 [LIVE] BUY confirmed (sub-min shares): %.4f @ %.4f token=%s",
-                    filled, avg_price, token_id[:20],
+                    filled,
+                    avg_price,
+                    token_id[:20],
                 )
                 self._confirmed_buys[token_id] = filled
                 return (filled, avg_price)
@@ -2610,7 +2678,9 @@ class LiveExecutionEngine:
 
         logging.info(
             "🟢 [LIVE] BUY confirmed: %.4f shares @ %.4f token=%s",
-            filled, avg_price, token_id[:20],
+            filled,
+            avg_price,
+            token_id[:20],
         )
         # Persist fill so close_position can find shares even after _active_orders cleanup.
         self._confirmed_buys[token_id] = filled

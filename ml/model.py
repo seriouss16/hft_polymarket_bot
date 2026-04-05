@@ -15,6 +15,7 @@ def _get_tf():
     global _tf
     if _tf is None:
         import tensorflow as tf
+
         _tf = tf
     return _tf
 
@@ -24,6 +25,7 @@ def _get_ort():
     global _ort
     if _ort is None:
         import onnxruntime as ort
+
         _ort = ort
     return _ort
 
@@ -54,17 +56,20 @@ class AsyncLSTMPredictor:
         """Create thread pool on first use so idle bots pay no cost."""
         if self._executor is None:
             from concurrent.futures import ThreadPoolExecutor
+
             self._executor = ThreadPoolExecutor(max_workers=1)
         return self._executor
 
     def _build_model(self):
         """Construct a minimal Keras LSTM when no ONNX checkpoint is provided."""
         tf = _get_tf()
-        model = tf.keras.Sequential([
-            tf.keras.layers.Input(shape=(self.history_len, 1)),
-            tf.keras.layers.LSTM(32, return_sequences=False),
-            tf.keras.layers.Dense(1),
-        ])
+        model = tf.keras.Sequential(
+            [
+                tf.keras.layers.Input(shape=(self.history_len, 1)),
+                tf.keras.layers.LSTM(32, return_sequences=False),
+                tf.keras.layers.Dense(1),
+            ]
+        )
         model.compile(optimizer="adam", loss="mse")
         return model
 
@@ -87,7 +92,7 @@ class AsyncLSTMPredictor:
             return self.last_prediction
 
         try:
-            raw_data = list(data_deque)[-self.history_len:]
+            raw_data = list(data_deque)[-self.history_len :]
 
             clean_prices = []
             for item in raw_data:

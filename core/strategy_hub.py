@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class StrategyResult:
     """Represent a result emitted by a named strategy."""
+
     strategy: str
     payload: dict[str, Any]
 
@@ -34,9 +35,7 @@ class StrategyHub:
         # Config flags (read from env at init)
         self._use_gather: bool = os.getenv("HFT_USE_GATHER", "1") == "1"
         timeout_ms = float(os.getenv("HFT_STRATEGY_TIMEOUT_MS", "100"))
-        self._strategy_timeout_sec: float | None = (
-            timeout_ms / 1000.0 if timeout_ms > 0 else None
-        )
+        self._strategy_timeout_sec: float | None = timeout_ms / 1000.0 if timeout_ms > 0 else None
 
     def register(self, strategy: BaseStrategy) -> None:
         """Register strategy instance by unique name."""
@@ -129,7 +128,7 @@ class StrategyHub:
 
         # Execute strategies either concurrently (gather) or sequentially
         raw_results: list[tuple[str, dict[str, Any] | None | Exception]] = []
-        
+
         if self._use_gather:
             # Concurrent execution: create tasks for all strategies
             tasks = []
@@ -152,7 +151,7 @@ class StrategyHub:
                     # Wrap with timeout; TimeoutError will be raised on timeout
                     coro = asyncio.wait_for(coro, timeout=self._strategy_timeout_sec)
                 tasks.append((name, coro))
-            
+
             # Gather all results, capturing exceptions (including TimeoutError)
             task_coros = [coro for _, coro in tasks]
             gathered = await asyncio.gather(*task_coros, return_exceptions=True)
@@ -213,9 +212,7 @@ class StrategyHub:
         # If multiple entry signals, pick highest confidence
         return self._merge_strategy_results(results)
 
-    def _merge_strategy_results(
-        self, results: list[StrategyResult]
-    ) -> dict[str, Any]:
+    def _merge_strategy_results(self, results: list[StrategyResult]) -> dict[str, Any]:
         """Merge multiple strategy results into a single decision.
 
         Priority: ENTRY > EXIT > HOLD.

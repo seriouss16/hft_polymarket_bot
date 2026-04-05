@@ -7,7 +7,7 @@ accidental exposure in logs, stdout, or error messages.
 
 def mask_api_key(api_key: str | None) -> str:
     """Mask an API key, showing only the last 4 characters.
-    
+
     Example: "sk-1234567890abcdef" -> "...cdef"
     """
     if not api_key:
@@ -19,7 +19,7 @@ def mask_api_key(api_key: str | None) -> str:
 
 def mask_address(address: str | None) -> str:
     """Mask a wallet address, showing only the last 4 characters.
-    
+
     Example: "0x1234567890abcdef" -> "...cdef"
     """
     if not address:

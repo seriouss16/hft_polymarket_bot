@@ -10,13 +10,8 @@ Covers:
 
 import pytest
 
-from core.executor import (
-    PnLTracker,
-    _up_outcome_quotes_ok,
-    mark_bid_for_side,
-    mark_price_for_side,
-)
-
+from core.executor import (PnLTracker, _up_outcome_quotes_ok,
+                           mark_bid_for_side, mark_price_for_side)
 
 # ---------------------------------------------------------------------------
 # _up_outcome_quotes_ok

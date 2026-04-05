@@ -26,19 +26,19 @@ class FastExchangeProvider:
             if not stream_symbol.endswith("usdt"):
                 stream_symbol = f"{stream_symbol}usdt"
             uri = f"wss://stream.binance.com:9443/stream?streams={stream_symbol}@bookTicker"
-        
+
         while True:
             try:
                 async with websockets.connect(uri, ping_interval=10, ping_timeout=5) as ws:
                     logging.info(f"✅ [{self.name}] Connected: {uri}")
-                    
+
                     if self.name == "coinbase":
                         product = self.symbol.upper()
                         if "-" not in product:
                             product = f"{product}-USD"
                         sub = {"type": "subscribe", "channels": [{"name": "ticker", "product_ids": [product]}]}
                         await ws.send(json.dumps(sub))
-                    
+
                     async for msg in ws:
                         try:
                             data = json.loads(msg)
@@ -76,7 +76,7 @@ class FastExchangeProvider:
                                 )
                             else:
                                 self.update_callback(self.name, price, loop_ts)
-                            
+
             except asyncio.CancelledError:
                 logging.info("🛑 [%s] WebSocket task cancelled; stopping provider.", self.name)
                 raise

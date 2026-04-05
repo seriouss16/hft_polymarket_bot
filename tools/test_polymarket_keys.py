@@ -114,11 +114,7 @@ def _smoke_test() -> SmokeResult:
             "Missing PRIVATE_KEY/CLOB_PRIVATE_KEY or FUNDER/WALLET/WALLET_ADDRESS/CLOB_FUNDER.",
         )
 
-    signature_type = int(
-        os.getenv("HFT_CLOB_SIGNATURE_TYPE")
-        or os.getenv("POLY_SIGNATURE_TYPE")
-        or "1"
-    )
+    signature_type = int(os.getenv("HFT_CLOB_SIGNATURE_TYPE") or os.getenv("POLY_SIGNATURE_TYPE") or "1")
 
     attempts: list[tuple[str, Any]] = []
     if api_key and api_secret and api_passphrase:
@@ -213,4 +209,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

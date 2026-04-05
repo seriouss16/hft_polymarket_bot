@@ -169,9 +169,7 @@ def update_trailing_state(eng: _TrailingHost, unrealized: float) -> None:
     if eng._peak_unrealized >= eng.trailing_sl_breakeven_at_usd:
         new_floor = 0.0
         if eng.trailing_sl_step_usd > 0.0:
-            steps_above = (
-                eng._peak_unrealized - eng.trailing_sl_breakeven_at_usd
-            ) / eng.trailing_sl_step_usd
+            steps_above = (eng._peak_unrealized - eng.trailing_sl_breakeven_at_usd) / eng.trailing_sl_step_usd
             new_floor = int(steps_above) * eng.trailing_sl_step_usd * eng.trailing_sl_step_lock_pct
         if eng._trailing_sl_floor is None or new_floor > eng._trailing_sl_floor:
             eng._trailing_sl_floor = new_floor

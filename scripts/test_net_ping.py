@@ -1,16 +1,16 @@
-import time
 import asyncio
+import json
+import logging
+import shutil
 import statistics
 import subprocess
-import logging
-import json
-import shutil
+import time
 from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 
 import httpx
-from py_clob_client.client import ClobClient
 import websockets
+from py_clob_client.client import ClobClient
 
 
 def normalize_clob_token_ids(raw) -> list[str]:

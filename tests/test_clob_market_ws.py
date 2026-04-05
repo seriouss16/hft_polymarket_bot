@@ -6,10 +6,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.clob_market_ws import (  # noqa: E402
-    ClobMarketBookCache,
-    sync_poly_book_from_cache,
-)
+from data.clob_market_ws import (ClobMarketBookCache,  # noqa: E402
+                                 sync_poly_book_from_cache)
 
 
 def test_book_event_official_doc_shape() -> None:
@@ -226,6 +224,7 @@ def test_health_metrics_no_timestamps_last_message_age_inf() -> None:
 # Cached snapshot and optimized imbalance tests
 # ---------------------------------------------------------------------
 
+
 def test_cached_snapshot_basic() -> None:
     """Test that snapshot caching works and returns consistent results."""
     c = ClobMarketBookCache()
@@ -252,7 +251,7 @@ def test_cached_snapshot_basic() -> None:
     assert "bid_vol_topn" in snap1
     assert "ask_vol_topn" in snap1
     assert "imbalance" in snap1
-    
+
     # Second call should use cache (same values)
     snap2 = c.get_snapshot_with_imbalance("test-token", 5)
     assert snap2 is not None
@@ -277,7 +276,7 @@ def test_cached_snapshot_dirty_on_book_update() -> None:
     snap1 = c.get_snapshot_with_imbalance("test-token", 5)
     assert snap1 is not None
     initial_bid_vol = snap1["bid_vol_topn"]
-    
+
     # Update book with price change
     c._apply_price_change(
         {
@@ -292,7 +291,7 @@ def test_cached_snapshot_dirty_on_book_update() -> None:
             ],
         }
     )
-    
+
     # Next call should recompute
     snap2 = c.get_snapshot_with_imbalance("test-token", 5)
     assert snap2 is not None
@@ -317,19 +316,17 @@ def test_cached_snapshot_dirty_on_price_change() -> None:
     s1 = c.get_snapshot_with_imbalance("t", 5)
     assert s1 is not None
     assert c._snapshot_dirty.get("t") is False
-    
+
     # Apply price change
     c._apply_price_change(
         {
             "event_type": "price_change",
-            "price_changes": [
-                {"asset_id": "t", "price": "0.5", "size": "0", "side": "BUY"}
-            ],
+            "price_changes": [{"asset_id": "t", "price": "0.5", "size": "0", "side": "BUY"}],
         }
     )
     # Dirty flag should be set
     assert c._snapshot_dirty.get("t") is True
-    
+
     # After reading, dirty flag should be cleared
     s2 = c.get_snapshot_with_imbalance("t", 5)
     assert s2 is not None
@@ -348,18 +345,18 @@ def test_top_n_extraction_correctness() -> None:
         c._asks["test"] = asks
         c._touch("test")
         c._snapshot_dirty["test"] = True
-    
+
     # Get snapshot with depth=5
     snap = c.get_snapshot_with_imbalance("test", 5)
     assert snap is not None
-    
+
     # Check that volumes are calculated correctly (top 5 levels * 10 = 50 each)
     assert snap["bid_vol_topn"] == 50.0
     assert snap["ask_vol_topn"] == 50.0
-    
+
     # Check that imbalance is 0 (equal volumes)
     assert abs(snap["imbalance"]) < 1e-9
-    
+
     # Verify that the cached top levels are stored correctly
     cached_bids = c._cached_top_bids.get("test")
     cached_asks = c._cached_top_asks.get("test")
@@ -367,7 +364,7 @@ def test_top_n_extraction_correctness() -> None:
     assert cached_asks is not None
     assert len(cached_bids) == 5
     assert len(cached_asks) == 5
-    
+
     # Bids should be in descending order (highest first)
     bid_prices = [p for p, _ in cached_bids]
     assert bid_prices == sorted(bid_prices, reverse=True)
@@ -375,7 +372,7 @@ def test_top_n_extraction_correctness() -> None:
     assert abs(bid_prices[0] - 0.69) < 1e-9
     # Lowest of top 5 should be 0.65
     assert abs(bid_prices[-1] - 0.65) < 1e-9
-    
+
     # Asks should be in ascending order (lowest first)
     ask_prices = [p for p, _ in cached_asks]
     assert ask_prices == sorted(ask_prices)
@@ -406,16 +403,16 @@ def test_incremental_imbalance_calculation() -> None:
     # Get snapshot with imbalance
     snap = c.get_snapshot_with_imbalance("test", 5)
     assert snap is not None
-    
+
     # Calculate expected imbalance manually
     bid_vol = 100.0 + 50.0  # 150
-    ask_vol = 80.0 + 40.0   # 120
+    ask_vol = 80.0 + 40.0  # 120
     expected_imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
-    
+
     assert abs(snap["bid_vol_topn"] - bid_vol) < 1e-9
     assert abs(snap["ask_vol_topn"] - ask_vol) < 1e-9
     assert abs(snap["imbalance"] - expected_imbalance) < 1e-9
-    
+
     # Check cached values
     assert c._total_bid_volume.get("test") == bid_vol
     assert c._total_ask_volume.get("test") == ask_vol
@@ -425,11 +422,12 @@ def test_incremental_imbalance_calculation() -> None:
 def test_cache_disabled_when_config_off() -> None:
     """Test that caching can be disabled via environment."""
     import os
+
     os.environ["HFT_CACHE_BOOK_SNAPSHOT"] = "0"
     c = ClobMarketBookCache()
     # Re-read env by creating new instance
     c._cache_enabled = False
-    
+
     c._apply_book(
         {
             "event_type": "book",
@@ -462,7 +460,7 @@ def test_snapshot_with_non_default_depth() -> None:
     snap1 = c.get_snapshot_with_imbalance("t", 5)
     # Cache should be populated
     assert "t" in c._cached_snapshot
-    
+
     # Second call with different depth should bypass cache
     snap2 = c.get_snapshot_with_imbalance("t", 3)
     # Values should still be correct (just different depth)
@@ -487,7 +485,7 @@ def test_invalidate_cache_method() -> None:
     c.get_snapshot_with_imbalance("t", 5)
     assert "t" in c._cached_snapshot
     assert c._snapshot_dirty.get("t") is False
-    
+
     # Invalidate
     c.invalidate_cache("t")
     assert c._snapshot_dirty.get("t") is True
@@ -519,7 +517,7 @@ def test_set_asset_ids_clears_removed_cache() -> None:
     c.get_snapshot_with_imbalance("t2", 5)
     assert "t1" in c._cached_snapshot
     assert "t2" in c._cached_snapshot
-    
+
     # Keep only t1
     c.set_asset_ids(["t1"])
     # t2 cache should be cleared

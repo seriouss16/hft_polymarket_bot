@@ -1,9 +1,11 @@
 """Tests for order parameter validation and secret masking utilities."""
 
 import math
+
 import pytest
+
 from core.live_engine import LiveExecutionEngine
-from utils.secrets_mask import mask_api_key, mask_address
+from utils.secrets_mask import mask_address, mask_api_key
 
 
 class TestValidateOrderParams:

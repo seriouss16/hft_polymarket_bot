@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from utils.resilience import TaskMonitor, TaskMetrics, safe_task, get_monitor, wrap_existing_task
+from utils.resilience import (TaskMetrics, TaskMonitor, get_monitor, safe_task,
+                              wrap_existing_task)
 
 
 class TestTaskMonitor:
@@ -142,6 +143,7 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_successful_task(self, monitor: TaskMonitor) -> None:
         """Test successful task execution without errors."""
+
         @safe_task(monitor=monitor, task_name="success_task")
         async def success_task() -> str:
             await asyncio.sleep(0.01)
@@ -158,11 +160,12 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_exception_caught_and_logged(self, monitor: TaskMonitor) -> None:
         """Test exceptions are caught, logged, and don't propagate."""
+
         @safe_task(monitor=monitor, task_name="failing_task")
         async def failing_task() -> None:
             raise ValueError("Test error")
 
-        with patch('utils.resilience.logger.log') as mock_log:
+        with patch("utils.resilience.logger.log") as mock_log:
             result = await failing_task()
             assert result is None  # safe_task returns None on error
             mock_log.assert_called_once()
@@ -179,6 +182,7 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_cancellation_propagates(self, monitor: TaskMonitor) -> None:
         """Test that asyncio.CancelledError is re-raised (not swallowed)."""
+
         @safe_task(monitor=monitor, task_name="cancel_task")
         async def cancel_task() -> None:
             await asyncio.sleep(10)  # Long sleep to ensure cancellation
@@ -197,6 +201,7 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_task_name_defaults_to_function_name(self) -> None:
         """Test that task_name defaults to function __name__."""
+
         @safe_task
         async def my_background_task() -> None:
             pass
@@ -208,6 +213,7 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_metadata_preservation(self) -> None:
         """Test that decorator preserves function metadata."""
+
         @safe_task(task_name="preserved_task")
         async def documented_task() -> str:
             """This is a docstring."""
@@ -220,6 +226,7 @@ class TestSafeTask:
     @pytest.mark.asyncio
     async def test_multiple_exceptions_in_sequence(self, monitor: TaskMonitor) -> None:
         """Test multiple consecutive exceptions are all recorded."""
+
         @safe_task(monitor=monitor, task_name="flaky_task")
         async def flaky_task() -> None:
             raise RuntimeError("Random error")
@@ -419,7 +426,7 @@ class TestIntegration:
         async def nested_task() -> None:
             nested_function()
 
-        with patch('utils.resilience.logger.log') as mock_log:
+        with patch("utils.resilience.logger.log") as mock_log:
             await nested_task()
             # Check that logger.log was called with the error and traceback
             assert mock_log.called
@@ -434,10 +441,12 @@ class TestIntegration:
                 log_message = format_str % (name_arg, error_msg_arg)
             else:
                 # Use keyword args
-                log_message = call_args[1].get('msg', '') % call_args[1]
-            
+                log_message = call_args[1].get("msg", "") % call_args[1]
+
             # Check that traceback includes nested_function or test file
-            assert "nested_function" in log_message or "test_resilience.py" in log_message, f"Traceback missing in: {log_message[:200]}"
+            assert (
+                "nested_function" in log_message or "test_resilience.py" in log_message
+            ), f"Traceback missing in: {log_message[:200]}"
             assert "ValueError: Deep error" in log_message
 
         metrics = monitor.get_metrics("nested_error")

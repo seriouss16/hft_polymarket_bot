@@ -16,11 +16,11 @@ from typing import Any, List
 
 def _median_avg(values: List[float]) -> float:
     """Calculate median average: for odd n take 3 central values, for even n take 4 central values.
-    
+
     For odd count: take 3 central values and average them.
     For even count: take 4 central values and average them.
     If n < 3 (odd) or n < 4 (even), return arithmetic mean of all values.
-    
+
     Example: [1,2,3,4,5,6,7] (n=7, odd) -> (3+4+5)/3 = 4.0
     """
     if not values:
@@ -31,13 +31,13 @@ def _median_avg(values: List[float]) -> float:
         if n < 3:
             return sum(sorted_vals) / n
         mid = n // 2
-        central = sorted_vals[mid-1:mid+2]  # 3 values: mid-1, mid, mid+1
+        central = sorted_vals[mid - 1 : mid + 2]  # 3 values: mid-1, mid, mid+1
     else:  # even
         if n < 4:
             return sum(sorted_vals) / n
         mid = n // 2
         # For even, take 4 central: mid-2, mid-1, mid, mid+1 (indices)
-        central = sorted_vals[mid-2:mid+2]
+        central = sorted_vals[mid - 2 : mid + 2]
     return sum(central) / len(central)
 
 
@@ -226,15 +226,11 @@ class StatsCollector:
             losses = a.n - a.wins
             wr = (a.wins / a.n * 100.0) if a.n else 0.0
             label = datetime.fromtimestamp(slot_ts, tz=timezone.utc).strftime("%m%d %H:%M")
-            lines.append(
-                f"   {label:>10}  {a.n:>3}  {a.wins:>2}-{losses:<2}  {wr:>5.1f}%  {a.pnl_sum:>+8.2f}"
-            )
+            lines.append(f"   {label:>10}  {a.n:>3}  {a.wins:>2}-{losses:<2}  {wr:>5.1f}%  {a.pnl_sum:>+8.2f}")
         if omitted:
             lines.append(f"   … {omitted} more slots (see HFT_STATS_SLOT_TABLE_MAX)")
         twr = (tot_w / tot_n * 100.0) if tot_n else 0.0
-        lines.append(
-            f"   {'Σ':>10}  {tot_n:>3}  {tot_w:>2}-{tot_n - tot_w:<2}  {twr:>5.1f}%  {tot_pnl:>+8.2f}"
-        )
+        lines.append(f"   {'Σ':>10}  {tot_n:>3}  {tot_w:>2}-{tot_n - tot_w:<2}  {twr:>5.1f}%  {tot_pnl:>+8.2f}")
         return lines
 
     def set_live_wallet_usdc(self, value: float | None) -> None:
@@ -251,28 +247,28 @@ class StatsCollector:
 
     def update_ws_metrics_from_engine(self, live_engine) -> None:
         """Update WS metrics from LiveExecutionEngine.
-        
+
         Phase 2 WebSocket Migration: Pull metrics from live engine for display.
         """
-        if hasattr(live_engine, '_get_ws_metrics'):
+        if hasattr(live_engine, "_get_ws_metrics"):
             ws_metrics = live_engine._get_ws_metrics()
             self.set_ws_metrics(ws_metrics)
-        if hasattr(live_engine, '_http_metrics'):
+        if hasattr(live_engine, "_http_metrics"):
             self.set_http_metrics(live_engine._http_metrics)
-    
+
     def set_balance_metrics(self, balance_metrics: dict[str, Any]) -> None:
         """Set balance cache metrics from BalanceCache.
-        
+
         Phase 3 WebSocket Migration: Display balance cache performance.
         """
         self._balance_metrics.update(balance_metrics)
-    
+
     def update_balance_metrics_from_cache(self, balance_cache) -> None:
         """Update balance metrics from BalanceCache instance.
-        
+
         Phase 3 WebSocket Migration: Pull metrics from balance cache for display.
         """
-        if hasattr(balance_cache, 'get_metrics'):
+        if hasattr(balance_cache, "get_metrics"):
             balance_metrics = balance_cache.get_metrics()
             self.set_balance_metrics(balance_metrics)
 
@@ -331,6 +327,7 @@ class StatsCollector:
             active = "DAY ☀️" if day_mode == "1" else "NIGHT 🌙"
             return f"{active} [forced]"
         from core.session_profile import current_profile_name  # noqa: PLC0415
+
         name = current_profile_name()
         label = "DAY ☀️" if name == "day" else "NIGHT 🌙"
         return f"{label} [auto]"
@@ -370,10 +367,10 @@ class StatsCollector:
         ]
         # Phase 2 WebSocket Migration: Add WS/HTTP metrics line
         report.append(f"📡 {self._ws_metrics_line()}")
-        
+
         # Phase 3 WebSocket Migration: Add balance cache metrics line
         report.append(f"💾 {self._balance_metrics_line()}")
-        
+
         if self._live_wallet_usdc is not None:
             report.append(
                 f"💵 USDC (CLOB API):   {self._live_wallet_usdc:>10.2f} USD  (free balance on venue, as in UI)",
@@ -407,7 +404,7 @@ class StatsCollector:
         _slot_lines = self._slot_performance_lines()
         if _slot_lines:
             report.extend(_slot_lines)
-        
+
         # Median metrics from this process session (not from on-disk journal CSV).
         _pnls = getattr(self.pnl, "closed_trade_pnls", None)
         if _pnls:
@@ -417,21 +414,18 @@ class StatsCollector:
                 report.append(f"   Median avg (all):            {js.median_avg_pnl:>+10.4f} USD")
                 report.append(f"   Median avg (wins):           {js.median_avg_win:>+10.4f} USD")
                 report.append(f"   Median avg (losses):         {js.median_avg_loss:>10.4f} USD")
-        
+
         report.append("=" * 45 + "\n")
 
         text = "\n".join(report)
         logging.info(text)
-        _snap = (
-            "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s"
-            % (
-                self.pnl.balance,
-                self.pnl.total_pnl,
-                self.pnl.trades_count,
-                win_rate,
-                self.pnl.max_drawdown * 100.0,
-                self._inventory_line(),
-            )
+        _snap = "STATS snapshot: balance=%.2f pnl=%.2f trades=%d win=%.1f%% dd=%.1f%% inv=%s" % (
+            self.pnl.balance,
+            self.pnl.total_pnl,
+            self.pnl.trades_count,
+            win_rate,
+            self.pnl.max_drawdown * 100.0,
+            self._inventory_line(),
         )
         if self._live_wallet_usdc is not None:
             _snap += " wallet_usdc=%.2f" % (self._live_wallet_usdc,)
@@ -439,7 +433,8 @@ class StatsCollector:
 
     def _journal_aggregates(self, journal_path: Path | None) -> _JournalStats:
         """Return detailed statistics parsed from journal CSV."""
-        from utils.trade_journal import _FIELDNAMES as _TJ_FIELDS  # noqa: PLC0415
+        from utils.trade_journal import \
+            _FIELDNAMES as _TJ_FIELDS  # noqa: PLC0415
 
         js = _JournalStats()
         if journal_path is None or not journal_path.is_file() or journal_path.stat().st_size == 0:
@@ -466,7 +461,9 @@ class StatsCollector:
                         pnl = float(row.get("pnl") or 0.0)
                     except (TypeError, ValueError):
                         logging.warning(
-                            "Bad pnl value in journal row %d: %r", line_no, row.get("pnl"),
+                            "Bad pnl value in journal row %d: %r",
+                            line_no,
+                            row.get("pnl"),
                         )
                         pnl = 0.0
                     js.rows += 1
@@ -557,7 +554,7 @@ class StatsCollector:
                 row("Journal rows", str(js.rows)),
                 row("Wins / Losses (journal)", f"{js.win_count} / {js.loss_count}"),
                 row("Win rate % (journal)", f"{js.win_rate_pct:.1f}"),
-                row("Profit factor", f"{js.profit_factor:.2f}" if js.profit_factor != float('inf') else "∞"),
+                row("Profit factor", f"{js.profit_factor:.2f}" if js.profit_factor != float("inf") else "∞"),
                 sep,
                 row("PnL sum (journal)", f"{js.pnl_sum:+.4f} USD"),
                 row("Sum of wins", f"{js.win_pnl_sum:+.4f} USD"),

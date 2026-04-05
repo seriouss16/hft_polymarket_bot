@@ -12,12 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.kill_switch_server import (
-    is_shutdown_requested,
-    set_engine,
-)
+from core.kill_switch_server import is_shutdown_requested, set_engine
 from core.live_engine import LiveExecutionEngine, OrderStatus, TrackedOrder
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures
@@ -27,13 +23,16 @@ from core.live_engine import LiveExecutionEngine, OrderStatus, TrackedOrder
 @pytest.fixture
 def engine_test_mode() -> LiveExecutionEngine:
     """Create a test-mode engine with minimal config."""
-    with patch.dict("os.environ", {
-        "POLY_CLOB_MIN_SHARES": "5",
-        "HFT_MAX_POSITION_USD": "0",
-        "HFT_MAX_ENTRY_ASK": "0.5",
-        "LIVE_MAX_SPREAD": "0.05",
-        "LIVE_ORDER_SIZE": "10",
-    }):
+    with patch.dict(
+        "os.environ",
+        {
+            "POLY_CLOB_MIN_SHARES": "5",
+            "HFT_MAX_POSITION_USD": "0",
+            "HFT_MAX_ENTRY_ASK": "0.5",
+            "LIVE_MAX_SPREAD": "0.05",
+            "LIVE_ORDER_SIZE": "10",
+        },
+    ):
         eng = LiveExecutionEngine(
             private_key=None,
             funder=None,
@@ -86,16 +85,22 @@ def partial_buy_order(sample_token: str) -> TrackedOrder:
 class TestCanEnterPosition:
     """Test anti-doubling gate for position entry."""
 
-    def test_allow_when_no_active_orders_and_no_position(self, engine_test_mode: LiveExecutionEngine, sample_token: str):
+    def test_allow_when_no_active_orders_and_no_position(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str
+    ):
         """Should allow entry when no active orders and no confirmed position."""
         assert engine_test_mode.can_enter_position(sample_token, "BUY") is True
 
-    def test_block_when_active_pending_buy_exists(self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder):
+    def test_block_when_active_pending_buy_exists(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder
+    ):
         """Should block if a PENDING BUY order already exists for the token."""
         engine_test_mode._active_orders[buy_order.order_id] = buy_order
         assert engine_test_mode.can_enter_position(sample_token, "BUY") is False
 
-    def test_block_when_active_partial_buy_exists(self, engine_test_mode: LiveExecutionEngine, sample_token: str, partial_buy_order: TrackedOrder):
+    def test_block_when_active_partial_buy_exists(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str, partial_buy_order: TrackedOrder
+    ):
         """Should block if a PARTIAL BUY order already exists for the token."""
         engine_test_mode._active_orders[partial_buy_order.order_id] = partial_buy_order
         assert engine_test_mode.can_enter_position(sample_token, "BUY") is False
@@ -105,7 +110,9 @@ class TestCanEnterPosition:
         engine_test_mode._confirmed_buys[sample_token] = 10.0  # 10 shares from prior fill
         assert engine_test_mode.can_enter_position(sample_token, "BUY") is False
 
-    def test_allow_when_confirmed_position_below_minimum(self, engine_test_mode: LiveExecutionEngine, sample_token: str):
+    def test_allow_when_confirmed_position_below_minimum(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str
+    ):
         """Should allow entry if confirmed shares are below POLY_CLOB_MIN_SHARES (dust)."""
         # Set confirmed shares below minimum (5 shares)
         engine_test_mode._confirmed_buys[sample_token] = 2.5
@@ -117,7 +124,9 @@ class TestCanEnterPosition:
         assert engine_test_mode.can_enter_position(sample_token, "BUY_UP") is True
         assert engine_test_mode.can_enter_position(sample_token, "BUY_DOWN") is True
 
-    def test_ignore_filled_or_cancelled_orders(self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder):
+    def test_ignore_filled_or_cancelled_orders(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder
+    ):
         """Should allow entry if existing BUY order is FILLED or CANCELLED."""
         # FILLED order should not block
         buy_order.status = OrderStatus.FILLED
@@ -165,6 +174,7 @@ class TestKillSwitchServer:
     def kill_server_imports(self):
         """Import kill-switch module for testing."""
         from core import kill_switch_server as ks
+
         return ks
 
     def test_initial_shutdown_flag_is_false(self, kill_server_imports):
@@ -270,48 +280,64 @@ class TestKillSwitchServer:
 class TestExecuteAntiDoublingIntegration:
     """Test that execute() respects can_enter_position gate."""
 
-    def test_execute_blocks_when_active_buy_exists(self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder):
+    def test_execute_blocks_when_active_buy_exists(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str, buy_order: TrackedOrder
+    ):
         """execute() should return (0,0) if can_enter_position returns False due to active order."""
         engine_test_mode._active_orders[buy_order.order_id] = buy_order
 
         # Patch can_enter_position to return False (simulate anti-doubling block)
         # Also patch is_fresh_for_trading to bypass freshness check
-        with patch.object(engine_test_mode, "can_enter_position", return_value=False) as mock_can_enter, \
-             patch("core.live_engine.is_fresh_for_trading", return_value=True):
-            result = asyncio.run(engine_test_mode.execute(
-                signal="BUY_UP",
-                token_id=sample_token,
-                order_size=10.0,
-            ))
+        with (
+            patch.object(engine_test_mode, "can_enter_position", return_value=False) as mock_can_enter,
+            patch("core.live_engine.is_fresh_for_trading", return_value=True),
+        ):
+            result = asyncio.run(
+                engine_test_mode.execute(
+                    signal="BUY_UP",
+                    token_id=sample_token,
+                    order_size=10.0,
+                )
+            )
             mock_can_enter.assert_called_once_with(sample_token, "BUY_UP")
             assert result == (0.0, 0.0)
 
-    def test_execute_blocks_when_confirmed_position_exists(self, engine_test_mode: LiveExecutionEngine, sample_token: str):
+    def test_execute_blocks_when_confirmed_position_exists(
+        self, engine_test_mode: LiveExecutionEngine, sample_token: str
+    ):
         """execute() should return (0,0) if confirmed position exists."""
         engine_test_mode._confirmed_buys[sample_token] = 15.0
 
-        with patch.object(engine_test_mode, "can_enter_position", return_value=False) as mock_can_enter, \
-             patch("core.live_engine.is_fresh_for_trading", return_value=True):
-            result = asyncio.run(engine_test_mode.execute(
-                signal="BUY_UP",
-                token_id=sample_token,
-                order_size=10.0,
-            ))
+        with (
+            patch.object(engine_test_mode, "can_enter_position", return_value=False) as mock_can_enter,
+            patch("core.live_engine.is_fresh_for_trading", return_value=True),
+        ):
+            result = asyncio.run(
+                engine_test_mode.execute(
+                    signal="BUY_UP",
+                    token_id=sample_token,
+                    order_size=10.0,
+                )
+            )
             mock_can_enter.assert_called_once()
             assert result == (0.0, 0.0)
 
     def test_execute_proceeds_when_no_block(self, engine_test_mode: LiveExecutionEngine, sample_token: str):
         """execute() should continue when can_enter_position returns True."""
-        with patch.object(engine_test_mode, "can_enter_position", return_value=True), \
-             patch("core.live_engine.is_fresh_for_trading", return_value=True):
+        with (
+            patch.object(engine_test_mode, "can_enter_position", return_value=True),
+            patch("core.live_engine.is_fresh_for_trading", return_value=True),
+        ):
             # The actual execute will fail later due to test_mode and missing mocks,
             # but we just want to verify can_enter_position was called and didn't block.
             try:
-                asyncio.run(engine_test_mode.execute(
-                    signal="BUY_UP",
-                    token_id=sample_token,
-                    order_size=10.0,
-                ))
+                asyncio.run(
+                    engine_test_mode.execute(
+                        signal="BUY_UP",
+                        token_id=sample_token,
+                        order_size=10.0,
+                    )
+                )
             except Exception:
                 pass  # Expected to fail later in the pipeline
 
@@ -360,6 +386,7 @@ class TestCancelAllOrders:
     def test_cancel_all_orders_no_orders(self, engine_test_mode: LiveExecutionEngine, caplog):
         """Should log info when there are no orders to cancel."""
         import logging
+
         caplog.set_level(logging.INFO)
         asyncio.run(engine_test_mode.cancel_all_orders())
         assert "no active orders to cancel" in caplog.text

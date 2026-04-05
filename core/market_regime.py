@@ -39,6 +39,7 @@ Regime = Literal["CALM", "MIXED", "ACTIVE"]
 @dataclass(slots=True)
 class RegimeState:
     """Snapshot of the current detected regime and its supporting metrics."""
+
     regime: Regime = "MIXED"
     speed_rms: float = 0.0
     stale_median_ms: float = 0.0

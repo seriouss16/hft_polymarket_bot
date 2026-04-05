@@ -10,7 +10,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from data.balance_cache import BalanceCache, BalanceCacheEntry, ConditionalAllowanceCache, AllowanceCacheEntry  # noqa: E402
+from data.balance_cache import (AllowanceCacheEntry,  # noqa: E402
+                                BalanceCache, BalanceCacheEntry,
+                                ConditionalAllowanceCache)
 
 
 def test_balance_cache_entry_is_fresh_method() -> None:
@@ -56,9 +58,7 @@ class TestConditionalAllowanceCache:
         cache = ConditionalAllowanceCache(ttl_sec=300.0)
         assert cache.get_cached_allowance("unknown") is None
 
-    def test_expired_allowance_returns_stale_value(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_expired_allowance_returns_stale_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When TTL expires, get_cached_allowance still returns stale value."""
         t0 = 1_000_000.0
         ttl_sec = 300.0
@@ -84,9 +84,7 @@ class TestConditionalAllowanceCache:
         # Queue should be cleared after retrieval
         assert cache.get_refresh_queue() == []
 
-    def test_schedule_refresh_queue_bounded_fifo_eviction(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_schedule_refresh_queue_bounded_fifo_eviction(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When over MAX_REFRESH_QUEUE_SIZE, oldest entries are evicted (FIFO)."""
         import data.balance_cache as bc
 

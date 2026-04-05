@@ -20,28 +20,28 @@ def rsi_slope_per_tick(rsi_tick_history) -> float:
 
 def exit_rsi(rsi: float, rsi_exit_clamp_high: float, rsi_exit_clamp_low: float) -> float:
     """Clamp RSI for exit logic to limit spurious 100/0 from short price history.
-    
+
     Args:
         rsi: The RSI value to clamp (typically 0-100 but may exceed due to short history).
         rsi_exit_clamp_high: Upper clamp bound (must be > rsi_exit_clamp_low).
         rsi_exit_clamp_low: Lower clamp bound (must be < rsi_exit_clamp_high).
-    
+
     Returns:
         Clamped RSI value between lo and hi.
-        
+
     Raises:
         ValueError: If rsi_exit_clamp_high <= rsi_exit_clamp_low (invalid configuration).
     """
     hi = float(rsi_exit_clamp_high)
     lo = float(rsi_exit_clamp_low)
-    
+
     # Validate configuration: high must be greater than low
     if hi <= lo:
         raise ValueError(
             f"Invalid RSI exit clamp configuration: high ({hi}) must be > low ({lo}). "
             "Check HFT_RSI_EXIT_CLAMP_HIGH and HFT_RSI_EXIT_CLAMP_LOW in config."
         )
-    
+
     return float(np.clip(rsi, lo, hi))
 
 
@@ -55,7 +55,7 @@ def rsi_range_exit_triggered(
     dynamic_lower: float | None = None,
 ) -> bool:
     """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin).
-    
+
     Uses dynamic RSI bands if provided, otherwise falls back to static entry bands.
     Dynamic bands adapt to volatility for more responsive exit thresholds.
     """
@@ -66,20 +66,22 @@ def rsi_range_exit_triggered(
     min_hold = float(eng.rsi_range_exit_min_hold_sec)
     fade_need_pos = os.getenv("HFT_RSI_RANGE_EXIT_FADE_REQUIRE_POSITIVE") == "1"
     rx = exit_rsi(current_rsi, eng.rsi_exit_clamp_high, eng.rsi_exit_clamp_low)
-    
+
     # Choose dynamic or static bands
     if dynamic_upper is not None and dynamic_lower is not None:
         upper_band = dynamic_upper
         lower_band = dynamic_lower
         # Debug logging for dynamic bands (non-blocking)
-        _append_debug_log({
-            "event": "rsi_exit_dynamic_bands",
-            "position_side": position_side,
-            "current_rsi": float(current_rsi),
-            "dynamic_upper": float(dynamic_upper),
-            "dynamic_lower": float(dynamic_lower),
-            "clamped_rsi": float(rx),
-        })
+        _append_debug_log(
+            {
+                "event": "rsi_exit_dynamic_bands",
+                "position_side": position_side,
+                "current_rsi": float(current_rsi),
+                "dynamic_upper": float(dynamic_upper),
+                "dynamic_lower": float(dynamic_lower),
+                "clamped_rsi": float(rx),
+            }
+        )
     else:
         # Fallback to static entry bands (backward compatibility)
         if position_side == "UP":
@@ -89,15 +91,17 @@ def rsi_range_exit_triggered(
             upper_band = eng.rsi_entry_down_high
             lower_band = eng.rsi_entry_down_low
         # Debug logging for static bands (non-blocking)
-        _append_debug_log({
-            "event": "rsi_exit_static_bands",
-            "position_side": position_side,
-            "current_rsi": float(current_rsi),
-            "static_upper": float(upper_band),
-            "static_lower": float(lower_band),
-            "clamped_rsi": float(rx),
-        })
-    
+        _append_debug_log(
+            {
+                "event": "rsi_exit_static_bands",
+                "position_side": position_side,
+                "current_rsi": float(current_rsi),
+                "static_upper": float(upper_band),
+                "static_lower": float(lower_band),
+                "clamped_rsi": float(rx),
+            }
+        )
+
     if position_side == "UP":
         if rx >= upper_band and unrealized >= tp_line:
             return True

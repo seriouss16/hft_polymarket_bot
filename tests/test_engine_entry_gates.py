@@ -3,7 +3,8 @@
 import math
 from collections import deque
 
-from core.engine_entry_gates import entry_skew_allows_entry, zscore_monotonic_for_direction
+from core.engine_entry_gates import (entry_skew_allows_entry,
+                                     zscore_monotonic_for_direction)
 
 
 def test_entry_skew_disabled_when_max_nonpositive():

@@ -9,56 +9,40 @@ from typing import Any, Deque
 
 import numpy as np
 
-from ml.indicators import (
-    IncrementalADX,
-    IncrementalRSI,
-    compute_adx_last,
-    compute_ema_last,
-    compute_macd_last,
-    compute_reaction_score,
-    compute_rsi,
-    dynamic_rsi_bands,
-)
-
-from core.engine_entry_candidates import entry_candidate_from_state, entry_momentum_alt_signal
-from core.engine_entry_gates import (
-    price_to_beat_gate,
-    entry_aggressive_trend_age_ok,
-    entry_ask_allows_open,
-    entry_edge_jump_ok,
-    entry_latency_allows_entry,
-    entry_liquidity_spread_ok,
-    entry_outcome_price_allows,
-    entry_rsi_slope_allows,
-    entry_skew_allows_entry,
-    entry_slot_window_allows,
-    entry_speed_acceleration_ok,
-    entry_trend_flip_settled_ok,
-    entry_zscore_trend_ok,
-    latency_expiry_edge_multiplier,
-    low_speed_edge_multiplier,
-    max_entry_latency_ms_all_profiles,
-    record_entry_samples,
-    zscore_monotonic_for_direction,
-)
+from core.engine_entry_candidates import (entry_candidate_from_state,
+                                          entry_momentum_alt_signal)
+from core.engine_entry_gates import (entry_aggressive_trend_age_ok,
+                                     entry_ask_allows_open, entry_edge_jump_ok,
+                                     entry_latency_allows_entry,
+                                     entry_liquidity_spread_ok,
+                                     entry_outcome_price_allows,
+                                     entry_rsi_slope_allows,
+                                     entry_skew_allows_entry,
+                                     entry_slot_window_allows,
+                                     entry_speed_acceleration_ok,
+                                     entry_trend_flip_settled_ok,
+                                     entry_zscore_trend_ok,
+                                     latency_expiry_edge_multiplier,
+                                     low_speed_edge_multiplier,
+                                     max_entry_latency_ms_all_profiles,
+                                     price_to_beat_gate, record_entry_samples,
+                                     zscore_monotonic_for_direction)
 from core.engine_price import price_array_for_rsi
 from core.engine_rsi_exit import exit_rsi as clamp_exit_rsi
 from core.engine_rsi_exit import rsi_range_exit_triggered, rsi_slope_per_tick
-from core.engine_sizing import (
-    calc_dynamic_amount,
-    deposit_trade_notional,
-    hold_met,
-    pnl_target_and_stop_lines,
-    position_notional_usd,
-    reset_trailing_state,
-    tier_dynamic_amount,
-    trailing_sl_triggered,
-    trailing_tp_triggered,
-    update_trailing_state,
-)
-from core.engine_trend import dynamic_edge_threshold as compute_dynamic_edge_threshold
+from core.engine_sizing import (calc_dynamic_amount, deposit_trade_notional,
+                                hold_met, pnl_target_and_stop_lines,
+                                position_notional_usd, reset_trailing_state,
+                                tier_dynamic_amount, trailing_sl_triggered,
+                                trailing_tp_triggered, update_trailing_state)
+from core.engine_trend import \
+    dynamic_edge_threshold as compute_dynamic_edge_threshold
 from core.engine_trend import micro_trend_metrics
 from core.engine_trend import update_trend as apply_update_trend
+from ml.indicators import (IncrementalADX, IncrementalRSI, compute_adx_last,
+                           compute_ema_last, compute_macd_last,
+                           compute_reaction_score, compute_rsi,
+                           dynamic_rsi_bands)
 from utils.async_debug_logger import AsyncDebugLogger
 from utils.debug_log import set_debug_logger as _set_debug_logger
 
@@ -69,6 +53,7 @@ _debug_logger: AsyncDebugLogger | None = None
 def _append_debug_log(payload: dict) -> None:
     """Queue a debug log entry for non-blocking async write."""
     from utils.debug_log import _append_debug_log as _append
+
     _append(payload)
 
 
@@ -127,12 +112,12 @@ class HFTEngine:
     def __init__(self, pnl_tracker, strategy_label="latency_arbitrage"):
         self.pnl = pnl_tracker
         self._strategy_label = str(strategy_label)
-        
+
         # --- Base edge (price points) ---
         self.noise_edge = float(os.getenv("HFT_NOISE_EDGE"))
         self.buy_edge = float(os.getenv("HFT_BUY_EDGE"))
         self.sell_edge = -float(os.getenv("HFT_SELL_EDGE_ABS"))
-        
+
         # --- Timing and sizing ---
         self.cooldown = float(os.getenv("HFT_COOLDOWN_SEC"))
         self.last_trade_time = 0.0
@@ -140,12 +125,8 @@ class HFTEngine:
         self.trade_amount_usd = float(os.getenv("HFT_DEFAULT_TRADE_USD"))
         self.min_hold_sec = float(os.getenv("HFT_MIN_HOLD_SEC"))
         self.exit_on_opposite_trend = os.getenv("HFT_EXIT_ON_OPPOSITE_TREND") == "1"
-        self.opposite_trend_exit_min_hold_sec = float(
-            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC")
-        )
-        self.opposite_trend_exit_min_abs_edge = float(
-            os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_ABS_EDGE")
-        )
+        self.opposite_trend_exit_min_hold_sec = float(os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_HOLD_SEC"))
+        self.opposite_trend_exit_min_abs_edge = float(os.getenv("HFT_OPPOSITE_TREND_EXIT_MIN_ABS_EDGE"))
         self.post_close_reentry_sec = float(os.getenv("HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC"))
         self.last_close_time = 0.0
         self.entry_poly_mid = None
@@ -178,33 +159,25 @@ class HFTEngine:
         self.micro_trend_stale_sec = _env_float_default("HFT_MICRO_TREND_STALE_SEC", 14.0)
         self.rsi_price_len = int(os.getenv("HFT_RSI_PRICE_LEN"))
         self._last_rsi = 50.0
-        
+
         # --- Incremental indicator calculators ---
         self.use_incremental_indicators = os.getenv("HFT_USE_INCREMENTAL_INDICATORS", "1") == "1"
         self._rsi_calculator = IncrementalRSI(period=self.rsi_period) if self.use_incremental_indicators else None
         self._adx_calculator = IncrementalADX(period=self.adx_period) if self.use_incremental_indicators else None
         self._adx_last_processed_index = -1  # Tracks last index in px_adx that was processed
         self._indicators_dirty = True  # Set when price history changes, cleared after update
-        self.rsi_entry_up_low = float(
-            os.getenv("HFT_RSI_ENTRY_UP_LOW") or os.getenv("HFT_RSI_ENTRY_YES_LOW")
-        )
-        self.rsi_entry_up_high = float(
-            os.getenv("HFT_RSI_ENTRY_UP_HIGH") or os.getenv("HFT_RSI_ENTRY_YES_HIGH")
-        )
-        self.rsi_entry_down_low = float(
-            os.getenv("HFT_RSI_ENTRY_DOWN_LOW") or os.getenv("HFT_RSI_ENTRY_NO_LOW")
-        )
-        self.rsi_entry_down_high = float(
-            os.getenv("HFT_RSI_ENTRY_DOWN_HIGH") or os.getenv("HFT_RSI_ENTRY_NO_HIGH")
-        )
-        
+        self.rsi_entry_up_low = float(os.getenv("HFT_RSI_ENTRY_UP_LOW") or os.getenv("HFT_RSI_ENTRY_YES_LOW"))
+        self.rsi_entry_up_high = float(os.getenv("HFT_RSI_ENTRY_UP_HIGH") or os.getenv("HFT_RSI_ENTRY_YES_HIGH"))
+        self.rsi_entry_down_low = float(os.getenv("HFT_RSI_ENTRY_DOWN_LOW") or os.getenv("HFT_RSI_ENTRY_NO_LOW"))
+        self.rsi_entry_down_high = float(os.getenv("HFT_RSI_ENTRY_DOWN_HIGH") or os.getenv("HFT_RSI_ENTRY_NO_HIGH"))
+
         # RSI exits
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE"))
         self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE"))
         self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K"))
         self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
         self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
-        
+
         # Validate RSI exit clamp configuration
         if self.rsi_exit_clamp_high <= self.rsi_exit_clamp_low:
             raise ValueError(
@@ -217,7 +190,7 @@ class HFTEngine:
         # Read RSI slope exit thresholds from env (mandatory)
         self.rsi_slope_up_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_UP"))
         self.rsi_slope_down_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_DOWN"))
-        
+
         # Validate RSI slope exit configuration
         if self.rsi_slope_up_exit >= 0:
             raise ValueError(
@@ -231,7 +204,7 @@ class HFTEngine:
                 f"({self.rsi_slope_down_exit}) must be > 0 (positive for DOWN direction exit). "
                 f"Check config/runtime.env"
             )
-        
+
         self._rsi_tick_history = deque(maxlen=10)
         self._last_rsi_upper = 70.0
         self._last_rsi_lower = 30.0
@@ -249,12 +222,8 @@ class HFTEngine:
         self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI"))
         self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA"))
         self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD"))
-        self.rsi_allow_bypass_on_strong_edge = os.getenv(
-            "HFT_RSI_ALLOW_BYPASS_STRONG_EDGE", "0"
-        ) == "1"
-        self.rsi_allow_bypass_on_aggressive_edge = os.getenv(
-            "HFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "1"
-        ) == "1"
+        self.rsi_allow_bypass_on_strong_edge = os.getenv("HFT_RSI_ALLOW_BYPASS_STRONG_EDGE", "0") == "1"
+        self.rsi_allow_bypass_on_aggressive_edge = os.getenv("HFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "1") == "1"
         self.aggressive_entry_relax_speed = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED"))
 
         # --- Entry confirmation ---
@@ -297,9 +266,7 @@ class HFTEngine:
         self.min_imbalance_entry = float(os.getenv("HFT_MIN_IMBALANCE_ENTRY", "0"))
         # When trend is UP, multiply max spread limits (legacy + liquidity) so BUY_UP is not
         # blocked as often as BUY_DOWN. 1.0 = no change. Values < 1.0 are clamped to 1.0.
-        self.spread_gate_up_relax_mult = max(
-            1.0, float(os.getenv("HFT_SPREAD_GATE_UP_RELAX_MULT", "1.0"))
-        )
+        self.spread_gate_up_relax_mult = max(1.0, float(os.getenv("HFT_SPREAD_GATE_UP_RELAX_MULT", "1.0")))
         self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
 
         # --- Latency guard ---
@@ -311,9 +278,7 @@ class HFTEngine:
         self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN"))
         self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
-        self.no_entry_last_sec = _env_float_default(
-            "HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC
-        )
+        self.no_entry_last_sec = _env_float_default("HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC)
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -343,16 +308,16 @@ class HFTEngine:
         self._speed_samples = deque(maxlen=12)
         self._zscore_samples = deque(maxlen=12)
         self.position_trend = "FLAT"
-        
+
         # --- HFT Optimization: Reusable entry_context dict ---
         self._entry_context: dict[str, Any] = {}
         self._entry_context_ready = False
         self.entry_context = {}  # Exposed read-only property (populated from _entry_context)
-        
+
         # --- HFT Optimization: Cached trend state ---
         self._trend_state: dict[str, Any] = {}
         self._trend_state_dirty = True  # Set to True when underlying data changes
-        
+
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
@@ -361,7 +326,7 @@ class HFTEngine:
         self._last_filter_diag_log_ts = time.time()
         self._filter_diag_stats: dict[str, int] = {}
         self._init_entry_profiles()
-        
+
         # Initialize async debug logger if enabled
         global _debug_logger
         if os.getenv("HFT_DEBUG_LOG_ENABLED", "0") == "1":
@@ -402,9 +367,7 @@ class HFTEngine:
         soft["entry_low_speed_abs"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_ABS"))
         soft["entry_low_speed_edge_mult"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_EDGE_MULT"))
         soft["entry_aggressive_min_trend_age_sec"] = float(os.getenv("HFT_SOFT_ENTRY_AGGRESSIVE_MIN_TREND_AGE_SEC"))
-        soft["rsi_allow_bypass_on_aggressive_edge"] = (
-            os.getenv("HFT_SOFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE") == "1"
-        )
+        soft["rsi_allow_bypass_on_aggressive_edge"] = os.getenv("HFT_SOFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE") == "1"
         return soft
 
     def _init_entry_profiles(self) -> None:
@@ -473,9 +436,7 @@ class HFTEngine:
             self.entry_min_ask_down_cap,
             self.entry_max_ask_down_cap,
             self.entry_max_latency_ms,
-            "-inf"
-            if self.entry_min_skew_ms == float("-inf")
-            else f"{self.entry_min_skew_ms:.0f}",
+            "-inf" if self.entry_min_skew_ms == float("-inf") else f"{self.entry_min_skew_ms:.0f}",
             self.entry_max_skew_ms,
             self.trend_flip_min_age_sec,
             os.getenv("HFT_STRONG_JUMP_MIN_TREND_AGE_SEC"),
@@ -504,10 +465,7 @@ class HFTEngine:
         """Return True when rolling PnL regime allows new entries (optional soft_flow bypass)."""
         if os.getenv("HFT_REGIME_FILTER_ENABLED") == "0":
             return True
-        if (
-            os.getenv("HFT_REGIME_BYPASS_SOFT_FLOW") == "1"
-            and self.get_active_profile() == "soft_flow"
-        ):
+        if os.getenv("HFT_REGIME_BYPASS_SOFT_FLOW") == "1" and self.get_active_profile() == "soft_flow":
             return True
         return bool(self.pnl.is_good_regime())
 
@@ -571,11 +529,7 @@ class HFTEngine:
 
     def _snapshot_orderbook_mids(self, poly_orderbook: dict[str, Any]) -> tuple[float, float, float]:
         """Return poly oracle mid, UP outcome mid, and DOWN outcome mid from one book snapshot."""
-        poly_mid = float(
-            poly_orderbook.get("btc_oracle")
-            or poly_orderbook.get("mid", 0.0)
-            or 0.0
-        )
+        poly_mid = float(poly_orderbook.get("btc_oracle") or poly_orderbook.get("mid", 0.0) or 0.0)
         up_ask = float(poly_orderbook["ask"])
         up_bid = float(poly_orderbook["bid"])
         up_mid = (up_bid + up_ask) * 0.5
@@ -654,9 +608,7 @@ class HFTEngine:
             return False
         if trend_name == "FLAT":
             return False
-        opposite = (pos_side == "DOWN" and trend_name == "UP") or (
-            pos_side == "UP" and trend_name == "DOWN"
-        )
+        opposite = (pos_side == "DOWN" and trend_name == "UP") or (pos_side == "UP" and trend_name == "DOWN")
         if not opposite:
             return False
         if self.opposite_trend_exit_min_hold_sec > 0.0 and hold_sec < self.opposite_trend_exit_min_hold_sec:
@@ -753,18 +705,20 @@ class HFTEngine:
         """Return the most recently computed ADX value (cached from last tick)."""
         return self._last_adx
 
-    def _rsi_range_exit_triggered(
-        self, position_side, current_rsi, unrealized, hold_sec: float = 0.0
-    ):
+    def _rsi_range_exit_triggered(self, position_side, current_rsi, unrealized, hold_sec: float = 0.0):
         """Return True when RSI band exit is allowed (take-profit at band or fade exit past margin).
 
         Fade exits (RSI past band against the position) respect ``rsi_range_exit_min_hold_sec``
         to avoid immediate churn when RSI spikes on a short lookback. TP-at-band exits are unchanged.
-        
+
         Uses dynamic RSI bands computed from price volatility for adaptive thresholds.
         """
         return rsi_range_exit_triggered(
-            self, position_side, current_rsi, unrealized, hold_sec,
+            self,
+            position_side,
+            current_rsi,
+            unrealized,
+            hold_sec,
             dynamic_upper=self._last_rsi_upper,
             dynamic_lower=self._last_rsi_lower,
         )
@@ -780,15 +734,11 @@ class HFTEngine:
 
     def dynamic_edge_threshold(self, price_history, recent_pnl=0.0, latency_ms=0.0, extra_mult=1.0):
         """Return adaptive edge threshold in price units from recent volatility."""
-        return compute_dynamic_edge_threshold(
-            self, price_history, recent_pnl, latency_ms, extra_mult
-        )
+        return compute_dynamic_edge_threshold(self, price_history, recent_pnl, latency_ms, extra_mult)
 
     def _load_rsi_slope_entry_params(self) -> None:
         """Read RSI slope entry gates from env (see entry_rsi_slope_allows). Single call site."""
-        self.entry_rsi_slope_filter_enabled = (
-            os.getenv("HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED") == "1"
-        )
+        self.entry_rsi_slope_filter_enabled = os.getenv("HFT_ENTRY_RSI_SLOPE_FILTER_ENABLED") == "1"
         self.rsi_up_entry_max = float(os.getenv("HFT_RSI_UP_ENTRY_MAX"))
         self.rsi_up_slope_min = float(os.getenv("HFT_RSI_UP_SLOPE_MIN"))
         self.rsi_down_entry_min = float(os.getenv("HFT_RSI_DOWN_ENTRY_MIN"))
@@ -811,9 +761,7 @@ class HFTEngine:
         self.entry_low_speed_edge_mult = float(os.getenv("HFT_ENTRY_LOW_SPEED_EDGE_MULT"))
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
-        self.no_entry_last_sec = _env_float_default(
-            "HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC
-        )
+        self.no_entry_last_sec = _env_float_default("HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC)
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -992,9 +940,7 @@ class HFTEngine:
 
     def _low_speed_edge_multiplier(self, speed: float) -> float:
         """Raise required oracle edge when edge speed is low (fade / chop risk)."""
-        return low_speed_edge_multiplier(
-            speed, self.entry_low_speed_abs, self.entry_low_speed_edge_mult
-        )
+        return low_speed_edge_multiplier(speed, self.entry_low_speed_abs, self.entry_low_speed_edge_mult)
 
     def entry_latency_allows_entry(self, latency_ms: float) -> bool:
         """Block entries when max feed staleness_ms exceeds entry_max_latency_ms."""
@@ -1005,9 +951,7 @@ class HFTEngine:
 
         Gate off when ``entry_max_skew_ms <= 0``. Unset ``HFT_ENTRY_MIN_SKEW_MS`` → no lower bound.
         """
-        ok = entry_skew_allows_entry(
-            self.entry_min_skew_ms, self.entry_max_skew_ms, skew_ms
-        )
+        ok = entry_skew_allows_entry(self.entry_min_skew_ms, self.entry_max_skew_ms, skew_ms)
         if not ok:
             self._last_skew_gate_skew_ms = float(skew_ms)
         return ok
@@ -1239,7 +1183,7 @@ class HFTEngine:
         """Expose latest trend analytics for debug output (cached)."""
         if not self._trend_state_dirty:
             return self._trend_state
-        
+
         now = time.time()
         speed = 0.0
         edge = 0.0
@@ -1261,18 +1205,20 @@ class HFTEngine:
             window_sec=self.micro_trend_window_sec,
         )
         trend_stale = bool(age > self.micro_trend_stale_sec)
-        
+
         # Update cached dict in-place to avoid allocation
         self._trend_state.clear()
-        self._trend_state.update({
-            "trend": self.trend_dir,
-            "edge": edge,
-            "speed": speed,
-            "depth": self.trend_depth,
-            "age": age,
-            "adx": adx_f if np.isfinite(adx_f) else None,
-            "trend_stale": trend_stale,
-        })
+        self._trend_state.update(
+            {
+                "trend": self.trend_dir,
+                "edge": edge,
+                "speed": speed,
+                "depth": self.trend_depth,
+                "age": age,
+                "adx": adx_f if np.isfinite(adx_f) else None,
+                "trend_stale": trend_stale,
+            }
+        )
         self._trend_state.update(micro)
         self._trend_state_dirty = False
         return self._trend_state
@@ -1298,7 +1244,7 @@ class HFTEngine:
     ):
         self._diag_inc("ticks")
         self._emit_filter_diag_if_due()
-        if not fast_price or not poly_orderbook['ask']:
+        if not fast_price or not poly_orderbook["ask"]:
             return
         _ = lstm_forecast
 
@@ -1307,38 +1253,42 @@ class HFTEngine:
 
         px = price_array_for_rsi(price_history, self.rsi_price_len)
         px_adx = price_array_for_rsi(price_history, self.adx_tick_len)
-        
+
         # Incremental ADX calculation (or cached if not dirty)
         if self.use_incremental_indicators and self._adx_calculator:
             if self._indicators_dirty:
                 # Incremental update: only process new prices since last tick
                 current_len = len(px_adx)
                 last_processed = self._adx_last_processed_index
-                
+
                 # Check if we need to reset due to history shrink (e.g., market reset)
                 if current_len < last_processed:
-                    logging.info(f"ADX: price history shrank from {last_processed} to {current_len}, resetting calculator")
+                    logging.info(
+                        f"ADX: price history shrank from {last_processed} to {current_len}, resetting calculator"
+                    )
                     self._adx_calculator.reset(period=self.adx_period)
                     self._adx_last_processed_index = -1
                     last_processed = -1
-                
+
                 # Process only new prices (truly incremental)
                 if current_len > last_processed:
                     new_prices_count = 0
                     for i in range(last_processed + 1, current_len):
                         # Compute synthetic OHLC for this tick using rolling window
                         start = max(0, i - self.adx_period + 1)
-                        window = px_adx[start:i+1]
+                        window = px_adx[start : i + 1]
                         high_i = float(np.max(window))
                         low_i = float(np.min(window))
                         close_i = float(px_adx[i])
                         self._adx_calculator.update(high_i, low_i, close_i)
                         new_prices_count += 1
-                    
+
                     self._adx_last_processed_index = current_len - 1
                     if new_prices_count > 0:
-                        logging.debug(f"ADX incremental: processed {new_prices_count} new prices, total index={self._adx_last_processed_index}")
-                
+                        logging.debug(
+                            f"ADX incremental: processed {new_prices_count} new prices, total index={self._adx_last_processed_index}"
+                        )
+
                 self._last_adx = self._adx_calculator.get_last_adx()
                 # Do not clear _indicators_dirty here — incremental RSI below must run too.
         else:
@@ -1410,11 +1360,7 @@ class HFTEngine:
         self._last_rsi_lower = lower_b
         self._last_rsi_slope = self._rsi_slope_per_tick()
 
-        poly_mid = float(
-            poly_orderbook.get("btc_oracle")
-            or poly_orderbook.get("mid", 0.0)
-            or 0.0
-        )
+        poly_mid = float(poly_orderbook.get("btc_oracle") or poly_orderbook.get("mid", 0.0) or 0.0)
         bid_size = float(poly_orderbook.get("bid_size_top", 1.0))
         ask_size = float(poly_orderbook.get("ask_size_top", 1.0))
         db_top = float(poly_orderbook.get("down_bid_size_top", 0.0))
@@ -1427,9 +1373,7 @@ class HFTEngine:
         _dtot = db_top + da_top
         imb_down = db_top / (_dtot + 1e-9) if _dtot > 0.0 else 0.0
 
-        up_bid, up_ask, down_bid, down_ask, up_mid, down_mid = poly_book_outcome_quotes(
-            poly_orderbook
-        )
+        up_bid, up_ask, down_bid, down_ask, up_mid, down_mid = poly_book_outcome_quotes(poly_orderbook)
 
         self.update_trend(fast_price, poly_mid)
         self.invalidate_trend_state()  # Mark trend cache as dirty since update_trend modified state
@@ -1445,12 +1389,8 @@ class HFTEngine:
             _max_sp = self.max_entry_spread
             if trend["trend"] == "UP" and self.spread_gate_up_relax_mult > 1.0:
                 _max_sp = _max_sp * self.spread_gate_up_relax_mult
-            spread_gate_legacy = (
-                spread_up <= _max_sp or abs(edge_now) >= self.wide_spread_min_edge
-            )
-        liquidity_ok = self.entry_liquidity_spread_ok(
-            spread_up, spread_down, edge_now, trend["trend"]
-        )
+            spread_gate_legacy = spread_up <= _max_sp or abs(edge_now) >= self.wide_spread_min_edge
+        liquidity_ok = self.entry_liquidity_spread_ok(spread_up, spread_down, edge_now, trend["trend"])
         speed_ok = self.entry_speed_acceleration_ok(trend["trend"], trend["speed"])
         z_ok = self.entry_zscore_trend_ok(trend["trend"], edge_speed=trend["speed"])
         entry_context_ok = speed_ok and z_ok
@@ -1474,9 +1414,7 @@ class HFTEngine:
             )
         signal = None
         slot_entry_ok = self._entry_slot_window_allows(seconds_to_expiry)
-        price_to_beat_ok_up, price_to_beat_ok_down = self._price_to_beat_gate(
-            fast_price, slot_price_to_beat
-        )
+        price_to_beat_ok_up, price_to_beat_ok_down = self._price_to_beat_gate(fast_price, slot_price_to_beat)
         _now_entries = time.time()
         _post_close_ok = (
             self.last_close_time <= 0.0
@@ -1511,10 +1449,7 @@ class HFTEngine:
                 )
             if signal is None:
                 self._diag_inc("entry_no_signal")
-            if (
-                signal is not None
-                and not spread_gate
-            ):
+            if signal is not None and not spread_gate:
                 self._diag_inc("entry_block_spread_gate")
                 if not spread_gate_legacy:
                     self._diag_inc("entry_block_spread_legacy")
@@ -1536,10 +1471,7 @@ class HFTEngine:
                     self._diag_inc("entry_block_aggressive_age")
                 _now = time.time()
                 _fg_log = float(os.getenv("HFT_FEED_GATE_LOG_MIN_SEC"))
-                if (
-                    _fg_log > 0.0
-                    and _now - self._last_feed_gate_log_ts >= _fg_log
-                ):
+                if _fg_log > 0.0 and _now - self._last_feed_gate_log_ts >= _fg_log:
                     logging.info(
                         "Entry blocked by spread_gate: signal=%s stale=%.0fms skew=%.0fms "
                         "spread_legacy=%s liq=%s speed_z=%s/%s chop_lat_skew_flip=%s/%s/%s "
@@ -1574,9 +1506,7 @@ class HFTEngine:
 
         strong_rsi = self._is_strong_oracle_edge(edge_now)
         aggressive_edge = self._is_aggressive_oracle_edge(edge_now)
-        rsi_agg_bypass = (
-            aggressive_edge and self.rsi_allow_bypass_on_aggressive_edge
-        )
+        rsi_agg_bypass = aggressive_edge and self.rsi_allow_bypass_on_aggressive_edge
         if self.no_entry_guards:
             rsi_ok_up = True
             rsi_ok_down = True
@@ -1596,18 +1526,10 @@ class HFTEngine:
             book_ok_up = book_entry_up or strong_rsi or aggressive_edge
             book_ok_down = book_entry_down or strong_rsi or aggressive_edge
         else:
-            in_band_up = (
-                self.rsi_entry_up_low < current_rsi < self.rsi_entry_up_high
-            )
-            in_band_down = (
-                self.rsi_entry_down_low < current_rsi < self.rsi_entry_down_high
-            )
-            rsi_ok_up = in_band_up or (
-                strong_rsi and self.rsi_allow_bypass_on_strong_edge
-            ) or rsi_agg_bypass
-            rsi_ok_down = in_band_down or (
-                strong_rsi and self.rsi_allow_bypass_on_strong_edge
-            ) or rsi_agg_bypass
+            in_band_up = self.rsi_entry_up_low < current_rsi < self.rsi_entry_up_high
+            in_band_down = self.rsi_entry_down_low < current_rsi < self.rsi_entry_down_high
+            rsi_ok_up = in_band_up or (strong_rsi and self.rsi_allow_bypass_on_strong_edge) or rsi_agg_bypass
+            rsi_ok_down = in_band_down or (strong_rsi and self.rsi_allow_bypass_on_strong_edge) or rsi_agg_bypass
             book_ok_up = book_entry_up or strong_rsi or aggressive_edge
             book_ok_down = book_entry_down or strong_rsi or aggressive_edge
 
@@ -1683,31 +1605,32 @@ class HFTEngine:
                 self.position_trend = trend["trend"]
                 # Reuse entry_context dict to avoid allocation
                 self._entry_context.clear()
-                self._entry_context.update({
-                    "entry_edge": fast_price - poly_mid,
-                    "entry_trend": trend["trend"],
-                    "entry_speed": trend["speed"],
-                    "entry_depth": trend["depth"],
-                    "entry_adx": trend.get("adx"),
-                    "entry_imbalance": imbalance,
-                    "latency_ms": latency_ms,
-                    "skew_ms": float(skew_ms),
-                    "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
-                    "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
-                    "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
-                    "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                    "entry_up_bid": up_bid,
-                    "entry_up_ask": up_ask,
-                    "entry_down_bid": down_bid,
-                    "entry_down_ask": down_ask,
-                    "strategy_name": self._display_strategy_name(),
-                    "entry_profile": self.get_active_profile(),
-                })
+                self._entry_context.update(
+                    {
+                        "entry_edge": fast_price - poly_mid,
+                        "entry_trend": trend["trend"],
+                        "entry_speed": trend["speed"],
+                        "entry_depth": trend["depth"],
+                        "entry_adx": trend.get("adx"),
+                        "entry_imbalance": imbalance,
+                        "latency_ms": latency_ms,
+                        "skew_ms": float(skew_ms),
+                        "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                        "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                        "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                        "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                        "entry_up_bid": up_bid,
+                        "entry_up_ask": up_ask,
+                        "entry_down_bid": down_bid,
+                        "entry_down_ask": down_ask,
+                        "strategy_name": self._display_strategy_name(),
+                        "entry_profile": self.get_active_profile(),
+                    }
+                )
                 self._entry_context_ready = True
                 self.entry_context = self._entry_context
                 logging.info(
-                    "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | "
-                    "strategy=%s profile=%s",
+                    "🧭 Entry context: poly_mid=%.4f fast=%.2f edge=%.2f trend=%s imb=%.2f | " "strategy=%s profile=%s",
                     poly_mid,
                     fast_price,
                     fast_price - poly_mid,
@@ -1774,26 +1697,28 @@ class HFTEngine:
                 self.position_trend = trend["trend"]
                 # Reuse entry_context dict to avoid allocation
                 self._entry_context.clear()
-                self._entry_context.update({
-                    "entry_edge": fast_price - poly_mid,
-                    "entry_trend": trend["trend"],
-                    "entry_speed": trend["speed"],
-                    "entry_depth": trend["depth"],
-                    "entry_adx": trend.get("adx"),
-                    "entry_imbalance": imbalance,
-                    "latency_ms": latency_ms,
-                    "skew_ms": float(skew_ms),
-                    "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
-                    "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
-                    "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
-                    "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
-                    "entry_up_bid": up_bid,
-                    "entry_up_ask": up_ask,
-                    "entry_down_bid": down_bid,
-                    "entry_down_ask": down_ask,
-                    "strategy_name": self._display_strategy_name(),
-                    "entry_profile": self.get_active_profile(),
-                })
+                self._entry_context.update(
+                    {
+                        "entry_edge": fast_price - poly_mid,
+                        "entry_trend": trend["trend"],
+                        "entry_speed": trend["speed"],
+                        "entry_depth": trend["depth"],
+                        "entry_adx": trend.get("adx"),
+                        "entry_imbalance": imbalance,
+                        "latency_ms": latency_ms,
+                        "skew_ms": float(skew_ms),
+                        "entry_book_px": float((open_event or {}).get("book_px") or 0.0),
+                        "entry_exec_px": float((open_event or {}).get("exec_px") or 0.0),
+                        "shares_bought": float((open_event or {}).get("shares_filled") or 0.0),
+                        "cost_usd": float((open_event or {}).get("amount_usd") or 0.0),
+                        "entry_up_bid": up_bid,
+                        "entry_up_ask": up_ask,
+                        "entry_down_bid": down_bid,
+                        "entry_down_ask": down_ask,
+                        "strategy_name": self._display_strategy_name(),
+                        "entry_profile": self.get_active_profile(),
+                    }
+                )
                 self._entry_context_ready = True
                 self.entry_context = self._entry_context
                 logging.info(
@@ -1866,9 +1791,7 @@ class HFTEngine:
 
             if sec_left is not None and sec_left < self.slot_99c_max_sec:
                 reached_99c = (
-                    (down_bid >= 0.99 or down_ask >= 0.99)
-                    if pos_side == "DOWN"
-                    else (up_bid >= 0.99 or up_ask >= 0.99)
+                    (down_bid >= 0.99 or down_ask >= 0.99) if pos_side == "DOWN" else (up_bid >= 0.99 or up_ask >= 0.99)
                 )
                 if reached_99c:
                     logging.warning(
@@ -1911,16 +1834,23 @@ class HFTEngine:
             trailing_sl = self._trailing_sl_triggered(unrealized, hold_sec)
             tp_line, sl_line = self._pnl_target_and_stop_lines()
             pnl_sl = self._hold_met(hold_sec) and unrealized <= -sl_line
-            
+
             # Diagnostic logging for exit conditions
             if hold_sec >= self.min_hold_sec:
                 logging.debug(
                     "EXIT_DIAG: hold_sec=%.2f side_move=%.4f poly_tp_move=%.4f poly_sl_move=%.4f "
                     "unrealized=%.4f sl_line=%.4f tp_line=%.4f "
                     "reaction_confirmed=%s protective_stop=%s pnl_sl=%s",
-                    hold_sec, side_move, self.poly_take_profit_move, self.poly_stop_move,
-                    unrealized, sl_line, tp_line,
-                    reaction_confirmed, protective_stop, pnl_sl,
+                    hold_sec,
+                    side_move,
+                    self.poly_take_profit_move,
+                    self.poly_stop_move,
+                    unrealized,
+                    sl_line,
+                    tp_line,
+                    reaction_confirmed,
+                    protective_stop,
+                    pnl_sl,
                 )
             pos_side = self.pnl.position_side or "UP"
             rsi_x = self._exit_rsi(current_rsi)
@@ -1935,9 +1865,7 @@ class HFTEngine:
                 # Imbalance gate: only fire on ask-heavy book when RSI not extreme-low.
                 _imb_reversal_ok = imbalance >= 0.55 and rsi_x > _imb_rsi_gate
                 internal_reversal = (
-                    _imb_reversal_ok
-                    or rsi_x >= upper_b
-                    or self._last_rsi_slope >= self.rsi_slope_down_exit
+                    _imb_reversal_ok or rsi_x >= upper_b or self._last_rsi_slope >= self.rsi_slope_down_exit
                 )
             else:
                 # UP token profits when BTC rises → take profit when BTC is overbought
@@ -1946,9 +1874,7 @@ class HFTEngine:
                 # Imbalance gate: bid-light book (imbalance <= 0.45) signals sellers returning.
                 _imb_reversal_ok = imbalance <= 0.45 and rsi_x < (100.0 - _imb_rsi_gate)
                 internal_reversal = (
-                    _imb_reversal_ok
-                    or rsi_x >= upper_b
-                    or self._last_rsi_slope <= self.rsi_slope_up_exit
+                    _imb_reversal_ok or rsi_x >= upper_b or self._last_rsi_slope <= self.rsi_slope_up_exit
                 )
             reaction_tp_confirmed = reaction_confirmed and internal_reversal
             rsi_range_exit = self._rsi_range_exit_triggered(
@@ -1958,9 +1884,8 @@ class HFTEngine:
                 hold_sec,
             )
 
-            opposite_trend = (
-                (pos_side == "DOWN" and trend["trend"] == "UP")
-                or (pos_side == "UP" and trend["trend"] == "DOWN")
+            opposite_trend = (pos_side == "DOWN" and trend["trend"] == "UP") or (
+                pos_side == "UP" and trend["trend"] == "DOWN"
             )
             trend_flip_exit = self._opposite_trend_exit_triggered(
                 pos_side,
@@ -2027,27 +1952,33 @@ class HFTEngine:
                     reason = "PNL_SL"
                 else:
                     self._diag_inc("exit_reason_reaction_tp")
-                
+
                 # Diagnostic logging for exit reason priority
                 logging.info(
                     "EXIT_REASON_DIAG: reason=%s hold=%.2f "
                     "trend_flip=%s trailing_tp=%s trailing_sl=%s reaction_tp=%s "
                     "protective_stop=%s rsi_range=%s pnl_sl=%s "
                     "side_move=%.4f poly_sl_move=%.4f unrealized=%.4f sl_line=%.4f",
-                    reason, hold_sec,
-                    trend_flip_exit, trailing_tp, trailing_sl, reaction_tp_confirmed,
-                    protective_stop, rsi_range_exit, pnl_sl,
-                    side_move, self.poly_stop_move, unrealized, sl_line,
+                    reason,
+                    hold_sec,
+                    trend_flip_exit,
+                    trailing_tp,
+                    trailing_sl,
+                    reaction_tp_confirmed,
+                    protective_stop,
+                    rsi_range_exit,
+                    pnl_sl,
+                    side_move,
+                    self.poly_stop_move,
+                    unrealized,
+                    sl_line,
                 )
-                
+
                 _trail_info = ""
                 if self.trailing_tp_enabled or self.trailing_sl_enabled:
                     _sf = self._trailing_sl_floor
                     _sl_floor_s = f"{_sf:.4f}" if _sf is not None else "None"
-                    _trail_info = (
-                        f" peak_pnl={self._peak_unrealized:+.4f}"
-                        f" sl_floor={_sl_floor_s}"
-                    )
+                    _trail_info = f" peak_pnl={self._peak_unrealized:+.4f}" f" sl_floor={_sl_floor_s}"
                 logging.info(
                     "📌 Exit reason=%s hold=%.1fs poly_move=%.4f side_move=%.4f edge=%.2f pnl=%.2f imb=%.2f "
                     "rsi=%.1f band=[%.1f,%.1f] slope=%+.2f%s",
@@ -2162,4 +2093,3 @@ class HFTEngine:
                 settlement_fill=settlement_fill,
                 performance_key=perf_key,
             )
-
