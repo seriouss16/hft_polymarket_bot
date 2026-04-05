@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import time
 import traceback
 from typing import Any, Callable, Coroutine, Optional
-from dataclasses import dataclass, field
-from collections import defaultdict
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +33,7 @@ class TaskMonitor:
         self._lock = asyncio.Lock()
         self._alert_callbacks: list[Callable[[str, str], None]] = []
         self._stall_threshold_sec: float = 60.0
-        self._error_rate_threshold: float = 0.5  # 50% error rate
+        self._error_rate_threshold: float = 0.5
 
     def register_task(self, name: str) -> TaskMetrics:
         """Register a task for monitoring."""
@@ -76,20 +74,27 @@ class TaskMonitor:
                 if not success:
                     metrics.total_errors += 1
 
-    async def mark_task_error(self, name: str, error: str) -> None:
-        """Record an error for a task."""
+    async def mark_task_error(self, name: str, error: str, trigger_alerts: bool = True) -> None:
+        """Record an error for a task and mark the run as completed.
+        
+        Args:
+            name: Task name
+            error: Error message
+            trigger_alerts: Whether to trigger alert callbacks
+        """
         async with self._lock:
             if metrics := self._tasks.get(name):
+                metrics.total_runs += 1
                 metrics.total_errors += 1
                 metrics.last_error = error
                 metrics.last_error_time = time.time()
                 metrics.is_running = False
-                # Trigger alert callbacks
-                for callback in self._alert_callbacks:
-                    try:
-                        callback(name, f"Task error: {error}")
-                    except Exception as e:
-                        logger.warning("Alert callback failed: %s", e)
+                if trigger_alerts:
+                    for callback in self._alert_callbacks:
+                        try:
+                            callback(name, f"Task error: {error}")
+                        except Exception as e:
+                            logger.warning("Alert callback failed: %s", e)
 
     async def check_stalled_tasks(self) -> list[str]:
         """Check for tasks that appear stalled (running but no recent completion)."""
@@ -97,10 +102,8 @@ class TaskMonitor:
         stalled = []
         async with self._lock:
             for name, metrics in self._tasks.items():
-                if metrics.is_running:
-                    # If task has been running for too long without progress
-                    if now - metrics.start_time > self._stall_threshold_sec:
-                        stalled.append(name)
+                if metrics.is_running and now - metrics.start_time > self._stall_threshold_sec:
+                    stalled.append(name)
         return stalled
 
     async def check_error_rates(self) -> list[str]:
@@ -108,7 +111,7 @@ class TaskMonitor:
         high_error = []
         async with self._lock:
             for name, metrics in self._tasks.items():
-                if metrics.total_runs > 10:  # Only check after sufficient runs
+                if metrics.total_runs >= 10:
                     error_rate = metrics.total_errors / metrics.total_runs
                     if error_rate > self._error_rate_threshold:
                         high_error.append(name)
@@ -158,15 +161,6 @@ def safe_task(
 
     Returns:
         Wrapped coroutine function
-
-    Example:
-        @safe_task
-        async def background_loop():
-            while True:
-                await do_work()
-
-        # Or wrap an existing coroutine:
-        task = safe_task(my_coroutine(), task_name="my_task")
     """
     def decorator(func: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Coroutine[Any, Any, Any]]:
         name = task_name or func.__name__
@@ -180,21 +174,17 @@ def safe_task(
                 await mon.mark_task_end(name, success=True)
                 return result
             except asyncio.CancelledError:
-                # Task cancellation is expected during shutdown
                 metrics.is_running = False
                 raise
             except Exception as e:
                 metrics.is_running = False
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                 logger.log(log_level, "Task '%s' failed: %s", name, error_msg, exc_info=False)
-                await mon.mark_task_error(name, error_msg)
-                if alert_on_error:
-                    # Additional alert logic can be added here
-                    pass
-                # Don't re-raise - task ends gracefully
+                # Record error and optionally alert
+                await mon.mark_task_error(name, error_msg, trigger_alerts=alert_on_error)
                 return None
 
-        # Preserve function metadata
+        # Preserve metadata
         wrapper.__name__ = func.__name__
         wrapper.__doc__ = func.__doc__
         wrapper.__qualname__ = func.__qualname__
@@ -203,10 +193,8 @@ def safe_task(
         return wrapper
 
     if coro_func is not None:
-        # Used as @safe_task without parentheses
         return decorator(coro_func)
     else:
-        # Used as @safe_task() or safe_task(coro)
         return decorator
 
 
@@ -218,35 +206,47 @@ def wrap_existing_task(
     """
     Wrap an existing asyncio.Task to catch and log its exceptions.
 
+    This function adds a done callback to the task to update metrics.
+    It does NOT modify the task's exception handling; exceptions will still
+    propagate to whoever awaits the task. For new tasks, use @safe_task.
+
     Args:
-        task: The asyncio task to wrap
+        task: The asyncio task to monitor
         name: Name for monitoring
-        monitor: TaskMonitor instance
+        monitor: TaskMonitor instance (defaults to global)
 
     Returns:
-        The same task with added exception handling
+        The same task with added monitoring
     """
     mon = monitor or get_monitor()
     metrics = mon.register_task(name)
+    if not task.done():
+        metrics.is_running = True
+        metrics.start_time = time.time()
 
-    async def _task_wrapper() -> Any:
-        await mon.mark_task_start(name)
+    def _on_done(fut: asyncio.Task) -> None:
+        """Callback when task completes."""
         try:
-            result = await task
-            await mon.mark_task_end(name, success=True)
-            return result
-        except asyncio.CancelledError:
-            metrics.is_running = False
-            raise
+            exc = fut.exception()
+            if exc is None:
+                # Success
+                metrics.is_running = False
+                metrics.last_run = time.time()
+                metrics.total_runs += 1
+            else:
+                # Exception (including CancelledError)
+                if isinstance(exc, asyncio.CancelledError):
+                    metrics.is_running = False
+                    # Don't count cancellation as a run or error
+                else:
+                    metrics.is_running = False
+                    metrics.total_errors += 1
+                    metrics.last_error = f"{type(exc).__name__}: {exc}"
+                    metrics.last_error_time = time.time()
+                    error_msg = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+                    logger.error("Task '%s' failed: %s", name, error_msg, exc_info=False)
         except Exception as e:
-            metrics.is_running = False
-            error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            logger.error("Task '%s' failed: %s", name, error_msg, exc_info=False)
-            await mon.mark_task_error(name, error_msg)
-            return None
+            logger.warning("Error in task done callback for %s: %s", name, e)
 
-    # Create a new task that wraps the original
-    wrapped = asyncio.create_task(_task_wrapper())
-    # Cancel the original task since we're replacing it
-    task.cancel()
-    return wrapped
+    task.add_done_callback(_on_done)
+    return task
