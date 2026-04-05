@@ -123,6 +123,9 @@ class FastPriceAggregator:
             "coinbase": deque(maxlen=1000),
         }
 
+        # Simulation lag injection
+        self.sim_feed_delay = float(os.getenv("HFT_SIM_FEED_DELAY_SEC", "0.0") or "0.0")
+
     @staticmethod
     def tail_last_n(seq, n: int) -> list[float]:
         """Return the last n samples from a deque or list without copying the full sequence."""
@@ -287,6 +290,11 @@ class FastPriceAggregator:
         """
         if now_loop is None:
             now_loop = asyncio.get_running_loop().time()
+
+        # Apply artificial lag for simulation testing
+        if self.sim_feed_delay > 0:
+            now_loop -= self.sim_feed_delay
+
         _MISSING = 1e9
         c_ts = float(self.data.get("coinbase", {}).get("timestamp", 0.0))
         b_ts = float(self.data.get("binance", {}).get("timestamp", 0.0))
