@@ -37,7 +37,6 @@ from core.live_common import (
     SELL_SIDE,
     TimerEvent,
     TrackedOrder,
-    WsMarketEvent,
     WsOrderEvent,
     _CLOB_BOOK_HTTP_TIMEOUT,
     _ORDER_FILL_POLL_SEC,
@@ -68,7 +67,7 @@ class OrderFSM:
         self.engine = engine
         self._done_event = asyncio.Event()
 
-    async def transition(self, event: WsOrderEvent | RestResponseEvent | TimerEvent | WsMarketEvent) -> None:
+    async def transition(self, event: WsOrderEvent | RestResponseEvent | TimerEvent) -> None:
         """Handle state transitions based on incoming events."""
         if self.tracked.status in (
             OrderStatus.FILLED,
@@ -84,8 +83,6 @@ class OrderFSM:
             await self._handle_rest_response(event)
         elif isinstance(event, TimerEvent):
             await self._handle_timer(event)
-        elif isinstance(event, WsMarketEvent):
-            await self._handle_market_update(event)
 
         if self.tracked.status in (
             OrderStatus.FILLED,
@@ -127,10 +124,6 @@ class OrderFSM:
     async def _handle_timer(self, event: TimerEvent) -> None:
         if self.tracked.is_stale:
             await self._reprice_or_emergency()
-
-    async def _handle_market_update(self, event: WsMarketEvent) -> None:
-        # Market updates can be used for dynamic repricing decisions
-        pass
 
     async def _reprice_or_emergency(self) -> None:
         """Execute reprice logic or emergency exit when stale."""
@@ -421,11 +414,6 @@ class LiveExecutionEngine:
                     # Periodic check for all active FSMs
                     for fsm in list(self._fsms.values()):
                         await fsm.transition(event)
-                elif isinstance(event, WsMarketEvent):
-                    # Market updates can affect all FSMs for the same token
-                    for fsm in list(self._fsms.values()):
-                        if fsm.tracked.token_id == event.token_id:
-                            await fsm.transition(event)
 
                 self._event_queue.task_done()
             except asyncio.CancelledError:

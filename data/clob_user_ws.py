@@ -54,18 +54,6 @@ class OrderEventType(Enum):
 
 
 @dataclass(slots=True)
-class OrderEvent:
-    """Represents an order event from WebSocket."""
-    order_id: str
-    event_type: OrderEventType
-    status: str
-    filled_size: float
-    original_size: float
-    timestamp: float
-    ws_latency_ms: float = 0.0
-
-
-@dataclass(slots=True)
 class OrderStateInfo:
     """Complete order state information with event history."""
     order_id: str
@@ -76,7 +64,6 @@ class OrderStateInfo:
     placed_at: float = 0.0
     last_updated: float = 0.0
     event_count: int = 0
-    event_history: list[OrderEvent] = field(default_factory=list)
     ws_events_received: int = 0
     http_fallback_count: int = 0
     last_ws_event_ts: float = 0.0

@@ -147,15 +147,6 @@ class WsOrderEvent:
 
 
 @dataclass(slots=True, frozen=True)
-class WsMarketEvent:
-    """Event from market WebSocket channel."""
-    token_id: str
-    best_bid: float
-    best_ask: float
-    timestamp: float = field(default_factory=time.time)
-
-
-@dataclass(slots=True, frozen=True)
 class RestResponseEvent:
     """Event from REST API response (e.g. order placement)."""
     order_id: str | None
