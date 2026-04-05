@@ -27,8 +27,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.live_common import LiveRiskManager
 from core.live_engine import (BUY, SELL_SIDE, LiveExecutionEngine,
-                              LiveRiskManager, OrderStatus, TrackedOrder,
+                              OrderStatus, TrackedOrder,
                               _collateral_usd_from_balance_allowance_response)
 
 # _ORDER_STALE_SEC is read at module import time from the env default (3.0 s).
