@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from collections import defaultdict
@@ -327,9 +328,29 @@ class LiveExecutionEngine:
             self.client.set_api_creds(derived)
             self._api_creds = derived
             logging.info(
-                "[LIVE] ClobClient credentials derived from private key (key=%.8s...).",
-                derived.api_key,
+                "[LIVE] ClobClient credentials derived from private key (key=...%s).",
+                derived.api_key[-4:] if derived.api_key else "????",
             )
+
+    @staticmethod
+    def _validate_order_params(side: str, price: float, size: float) -> tuple[bool, str]:
+        """Validate order parameters before sending to CLOB.
+
+        Returns (is_valid, error_message).
+        """
+        if not math.isfinite(price):
+            return False, f"price is not finite: {price}"
+        if not math.isfinite(size):
+            return False, f"size is not finite: {size}"
+        if price <= 0.0:
+            return False, f"price must be > 0, got {price}"
+        if size <= 0.0:
+            return False, f"size must be > 0, got {size}"
+        if price > 1.0:
+            return False, f"price must be <= 1.0 for Polymarket, got {price}"
+        if side not in ("BUY", "SELL"):
+            return False, f"invalid side: {side}"
+        return True, ""
 
     async def initialize(self) -> None:
         """Start the event worker task."""
@@ -1132,6 +1153,12 @@ class LiveExecutionEngine:
             logging.info("[SIM FAK SELL] size=%.4f token=%s", size, token_id[:20])
             return (size, 0.50)
         try:
+            # Validate size parameter
+            is_valid, error_msg = self._validate_order_params(SELL_SIDE, 0.01, size)
+            if not is_valid:
+                logging.error("FAK SELL validation failed: %s", error_msg)
+                return (0.0, 0.0)
+            
             from py_clob_client.clob_types import MarketOrderArgs
             best_bid, _ = self.get_best_prices(token_id)
             _fak_worst_mult = max(0.01, min(1.0, req_float("LIVE_FAK_SELL_WORST_BID_MULT")))
@@ -1227,6 +1254,12 @@ class LiveExecutionEngine:
             logging.error("Cannot place order: py_clob_client unavailable.")
             return None, False
         try:
+            # Validate order parameters
+            is_valid, error_msg = self._validate_order_params(side, price, size)
+            if not is_valid:
+                logging.error("Order validation failed: %s", error_msg)
+                return None, False
+            
             # Create order args (fast, CPU-bound)
             order = OrderArgs(token_id=token_id, price=price, size=size, side=side)
             
@@ -1541,6 +1574,11 @@ class LiveExecutionEngine:
             token_id[:20],
         )
         self._entry_stats["emergency_exits"] += 1
+        # Validate order parameters before placing emergency order
+        is_valid, error_msg = self._validate_order_params(side, price, place_sz)
+        if not is_valid:
+            logging.error("Emergency order validation failed: %s", error_msg)
+            return
         order_id, immediate = await self._place_limit_raw(
             token_id, side, price, place_sz
         )
