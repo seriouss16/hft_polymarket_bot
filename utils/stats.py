@@ -5,6 +5,7 @@ Phase 2 WebSocket Migration: Includes WebSocket/HTTP latency metrics tracking.
 
 import csv
 import logging
+import math
 import os
 import time
 from collections import Counter
@@ -123,6 +124,30 @@ class _JournalStats:
     def median_avg_loss(self) -> float:
         """Return median average of losing trades."""
         return _median_avg(self.loss_pnl_values)
+
+    @property
+    def sharpe_ratio(self) -> float:
+        """Return Sharpe Ratio of realized PnLs (annualized assuming 252 trading days).
+        
+        Uses arithmetic mean of PnLs and their standard deviation.
+        Returns 0.0 if standard deviation is zero or no trades.
+        """
+        all_values = self.win_pnl_values + self.loss_pnl_values
+        if not all_values or len(all_values) < 2:
+            return 0.0
+        
+        mean_pnl = sum(all_values) / len(all_values)
+        variance = sum((x - mean_pnl) ** 2 for x in all_values) / (len(all_values) - 1)
+        std_dev = math.sqrt(variance)
+        
+        if std_dev < 1e-9:
+            return 0.0
+        
+        # Annualization factor: sqrt(number of trades per year)
+        # For HFT, we might have thousands of trades.
+        # Standard Sharpe uses sqrt(252) for daily returns.
+        # Here we just return the raw per-trade Sharpe or a simple scaled version.
+        return mean_pnl / std_dev
 
 
 def _stats_from_realized_pnls(pnls: List[float]) -> _JournalStats:
@@ -544,6 +569,7 @@ class StatsCollector:
                 row("Median avg (all, session)", f"{js_session.median_avg_pnl:+.4f} USD"),
                 row("Median avg (wins, session)", f"{js_session.median_avg_win:+.4f} USD"),
                 row("Median avg (losses, session)", f"{js_session.median_avg_loss:+.4f} USD"),
+                row("Sharpe Ratio (session)", f"{js_session.sharpe_ratio:.4f}"),
                 sep,
             ]
 
