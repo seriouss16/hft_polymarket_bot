@@ -6,10 +6,99 @@ import asyncio
 import logging
 import time
 import traceback
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Optional, TypeVar, Generic, Union
 from dataclasses import dataclass
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+class CircuitState(Enum):
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
+
+
+class CircuitBreakerError(Exception):
+    """Exception raised when the circuit breaker is OPEN."""
+    pass
+
+
+class CircuitBreaker:
+    """
+    Circuit Breaker pattern implementation for external API resilience.
+    
+    States:
+    - CLOSED: Normal operation. Failures are tracked.
+    - OPEN: Circuit is broken. Calls fail immediately.
+    - HALF_OPEN: Testing if the service has recovered.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        error_threshold: int = 5,
+        recovery_timeout: float = 60.0,
+    ) -> None:
+        self.name = name
+        self.error_threshold = error_threshold
+        self.recovery_timeout = recovery_timeout
+        
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time: float = 0.0
+        self._lock = asyncio.Lock()
+
+    async def call(self, func: Callable[..., Coroutine[Any, Any, T]], *args: Any, **kwargs: Any) -> T:
+        """
+        Execute the decorated function if the circuit is not OPEN.
+        """
+        async with self._lock:
+            await self._check_state()
+            
+            if self.state == CircuitState.OPEN:
+                raise CircuitBreakerError(f"Circuit '{self.name}' is OPEN")
+
+        try:
+            result = await func(*args, **kwargs)
+            await self.record_success()
+            return result
+        except Exception:
+            await self.record_failure()
+            raise
+
+    async def _check_state(self) -> None:
+        """Internal state transition logic based on timeouts."""
+        if self.state == CircuitState.OPEN:
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                logger.info("Circuit '%s' transitioning to HALF_OPEN", self.name)
+                self.state = CircuitState.HALF_OPEN
+
+    async def record_success(self) -> None:
+        """Record a successful call and potentially close the circuit."""
+        async with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                logger.info("Circuit '%s' recovered, transitioning to CLOSED", self.name)
+                self.state = CircuitState.CLOSED
+                self.failure_count = 0
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count = 0
+
+    async def record_failure(self) -> None:
+        """Record a failed call and potentially open the circuit."""
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            
+            if self.state == CircuitState.CLOSED:
+                if self.failure_count >= self.error_threshold:
+                    logger.warning("Circuit '%s' threshold reached, transitioning to OPEN", self.name)
+                    self.state = CircuitState.OPEN
+            elif self.state == CircuitState.HALF_OPEN:
+                logger.warning("Circuit '%s' failed in HALF_OPEN, transitioning back to OPEN", self.name)
+                self.state = CircuitState.OPEN
 
 
 @dataclass
