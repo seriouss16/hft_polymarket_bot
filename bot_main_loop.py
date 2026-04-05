@@ -359,9 +359,10 @@ async def main():
         live_exec.set_user_order_cache(clob_user_cache)
         clob_user_task = asyncio.create_task(clob_user_cache.run_forever())
         
-        # Phase 3 WebSocket Migration: Initialize balance cache
+        # Phase 3 WebSocket Migration: Initialize balance cache (MANDATORY in LIVE mode)
         # Polymarket does not provide balance updates via WebSocket, so we use
-        # cached HTTP polling with configurable staleness thresholds
+        # cached HTTP polling with configurable staleness thresholds.
+        # The balance cache is required to eliminate blocking I/O in the critical path.
         _balance_cache_max_age_sec = float(os.getenv("BALANCE_CACHE_MAX_AGE_SEC", "5.0"))
         _balance_conditional_max_age_sec = float(os.getenv("BALANCE_CONDITIONAL_MAX_AGE_SEC", "10.0"))
         balance_cache = BalanceCache(
@@ -370,6 +371,8 @@ async def main():
             max_age_sec=_balance_cache_max_age_sec,
             conditional_max_age_sec=_balance_conditional_max_age_sec,
         )
+        if balance_cache is None:
+            raise RuntimeError("BalanceCache initialization failed in LIVE mode")
         
         # Pre-emptive conditional allowance cache (eliminates blocking API calls from critical path)
         allowance_cache = ConditionalAllowanceCache()
@@ -395,7 +398,8 @@ async def main():
         # Without CTF allowance the CLOB rejects every SELL with "not enough balance".
         await asyncio.to_thread(live_exec.ensure_allowances)
         _live_account_balance_limit = req_float("LIVE_ACCOUNT_BALANCE")
-        _account_balance = live_exec.fetch_usdc_balance()
+        # Use balance_cache to fetch (will populate cache if needed)
+        _account_balance = balance_cache.get_usdc_balance() if balance_cache else None
         _effective_account = _account_balance if _account_balance is not None else _live_account_balance_limit
         if _effective_account > 0.0 and _session_deposit > _effective_account:
             _abort = (
