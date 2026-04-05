@@ -119,6 +119,10 @@ class ClobMarketBookCache:
         self._asset_ids: list[str] = []
         self._ws: Any = None
         self._stop = asyncio.Event()
+
+        # Sequence tracking (Data Integrity - Sequence Protection)
+        self._last_sequence: dict[str, int] = {}
+        self._sequence_gaps: int = 0
         
         # --- HFT Optimization: Cached snapshot with dirty flag ---
         self._cache_enabled = os.getenv("HFT_CACHE_BOOK_SNAPSHOT", "1").strip().lower() in (
@@ -149,6 +153,7 @@ class ClobMarketBookCache:
                     self._bids.pop(k, None)
                     self._asks.pop(k, None)
                     self._last_ts.pop(k, None)
+                    self._last_sequence.pop(k, None)
                     # Clear cache entries for removed assets
                     if self._cache_enabled:
                         self._snapshot_dirty.pop(k, None)
@@ -389,14 +394,47 @@ class ClobMarketBookCache:
         if self._cache_enabled and asset_id in self._snapshot_dirty:
             self._snapshot_dirty[asset_id] = False
 
+    def _check_sequence(self, asset_id: str, seq: int) -> bool:
+        """Return True if event is valid (seq > last_sequence), False if it should be dropped.
+        
+        Updates _last_sequence and tracks gaps.
+        """
+        if seq <= 0:
+            return True  # Ignore missing/invalid sequence numbers
+            
+        last = self._last_sequence.get(asset_id, 0)
+        if seq <= last:
+            logging.warning(
+                "[WS_SEQ] Dropping stale event for %s: got_seq=%d last_seq=%d",
+                asset_id, seq, last
+            )
+            return False
+            
+        if last > 0 and seq > last + 1:
+            gap = seq - last - 1
+            self._sequence_gaps += gap
+            logging.warning(
+                "[WS_SEQ] Sequence gap for %s: expected=%d got=%d gap=%d total_gaps=%d",
+                asset_id, last + 1, seq, gap, self._sequence_gaps
+            )
+            
+        self._last_sequence[asset_id] = seq
+        return True
+
     def _apply_book(self, msg: dict[str, Any]) -> None:
         """Replace L2 for ``asset_id`` from a ``book`` event (full snapshot)."""
         aid = str(msg.get("asset_id") or "")
         if not aid:
             return
+            
+        seq = int(msg.get("sequence") or 0)
+        
         bids = _levels_from_side_rows(msg.get("bids"))
         asks = _levels_from_side_rows(msg.get("asks"))
         with self._lock:
+            if seq > 0 and not self._check_sequence(aid, seq):
+                return
+                
             self._bids[aid] = bids
             self._asks[aid] = asks
             self._touch(aid)
@@ -417,10 +455,16 @@ class ClobMarketBookCache:
             aid = str(ch.get("asset_id") or "")
             if not aid:
                 continue
+                
+            seq = int(msg.get("sequence") or 0)
+            
             price = _parse_num(ch.get("price"))
             size = _parse_num(ch.get("size"))
             side = str(ch.get("side") or "").upper()
             with self._lock:
+                if seq > 0 and not self._check_sequence(aid, seq):
+                    continue
+                    
                 bids = self._bids.setdefault(aid, {})
                 asks = self._asks.setdefault(aid, {})
                 if side == "BUY":
@@ -454,11 +498,17 @@ class ClobMarketBookCache:
         aid = str(msg.get("asset_id") or "")
         if not aid:
             return
+            
+        seq = int(msg.get("sequence") or 0)
+        
         bb = _parse_num(msg.get("best_bid"))
         ba = _parse_num(msg.get("best_ask"))
         if bb <= 0.0 and ba <= 0.0:
             return
         with self._lock:
+            if seq > 0 and not self._check_sequence(aid, seq):
+                return
+                
             bids = self._bids.setdefault(aid, {})
             asks = self._asks.setdefault(aid, {})
             if bb > 0.0:
