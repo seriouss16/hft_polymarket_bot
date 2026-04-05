@@ -41,7 +41,7 @@ def _suppress_uvloop_shutdown_error(args: threading.ExceptHookArgs) -> None:
 
 
 def run_cli() -> None:
-    """Console entry for \`uv run hft-bot\` / \`hft-bot\`."""
+    """Console entry for `uv run hft-bot` / `hft-bot`."""
     threading.excepthook = _suppress_uvloop_shutdown_error
     try:
         asyncio.run(main())

@@ -1,6 +1,6 @@
 """Centralized metrics registry for HFT bot.
 
-Exposes key performance indicators (PnL, Win Rate, Sharpe, Latency) 
+Exposes key performance indicators (PnL, Win Rate, Sharpe, Latency)
 in a format suitable for monitoring and reporting.
 """
 
@@ -13,22 +13,23 @@ from typing import Any, Dict, Optional
 @dataclass
 class MetricsSnapshot:
     """Snapshot of current bot metrics."""
+
     timestamp: float = field(default_factory=time.time)
     pnl_total: float = 0.0
     win_rate: float = 0.0
     trades_count: int = 0
     sharpe_ratio: float = 0.0
     max_drawdown: float = 0.0
-    
+
     # Latency metrics (ms)
     latency_p50: float = 0.0
     latency_p95: float = 0.0
     latency_p99: float = 0.0
-    
+
     # WebSocket metrics
     ws_events_received: int = 0
     http_fallbacks: int = 0
-    
+
     # System metrics
     uptime_sec: float = 0.0
 
@@ -44,11 +45,7 @@ class MetricsRegistry:
         self._stats_collector = None
 
     def configure(
-        self, 
-        pnl_tracker: Any = None, 
-        aggregator: Any = None, 
-        live_engine: Any = None,
-        stats_collector: Any = None
+        self, pnl_tracker: Any = None, aggregator: Any = None, live_engine: Any = None, stats_collector: Any = None
     ):
         """Wire up components to the registry."""
         if pnl_tracker:
@@ -62,9 +59,7 @@ class MetricsRegistry:
 
     def get_snapshot(self) -> MetricsSnapshot:
         """Generate a fresh snapshot of all metrics."""
-        snapshot = MetricsSnapshot(
-            uptime_sec=time.time() - self._start_time
-        )
+        snapshot = MetricsSnapshot(uptime_sec=time.time() - self._start_time)
 
         if self._pnl_tracker:
             snapshot.pnl_total = float(getattr(self._pnl_tracker, "total_pnl", 0.0))
@@ -77,6 +72,7 @@ class MetricsRegistry:
         # Sharpe Ratio from stats_collector or calculated from closed_trade_pnls
         if self._pnl_tracker and hasattr(self._pnl_tracker, "closed_trade_pnls"):
             from utils.stats import _stats_from_realized_pnls
+
             pnls = self._pnl_tracker.closed_trade_pnls
             if pnls:
                 js = _stats_from_realized_pnls(pnls)
@@ -105,17 +101,17 @@ class MetricsRegistry:
         """Return metrics in Prometheus-compatible format."""
         snap = self.get_snapshot()
         lines = [
-            f'hft_pnl_total {snap.pnl_total}',
-            f'hft_win_rate {snap.win_rate}',
-            f'hft_trades_total {snap.trades_count}',
-            f'hft_sharpe_ratio {snap.sharpe_ratio}',
-            f'hft_max_drawdown {snap.max_drawdown}',
-            f'hft_latency_ms_p50 {snap.latency_p50}',
-            f'hft_latency_ms_p95 {snap.latency_p95}',
-            f'hft_latency_ms_p99 {snap.latency_p99}',
-            f'hft_ws_events_total {snap.ws_events_received}',
-            f'hft_http_fallbacks_total {snap.http_fallbacks}',
-            f'hft_uptime_seconds {snap.uptime_sec}',
+            f"hft_pnl_total {snap.pnl_total}",
+            f"hft_win_rate {snap.win_rate}",
+            f"hft_trades_total {snap.trades_count}",
+            f"hft_sharpe_ratio {snap.sharpe_ratio}",
+            f"hft_max_drawdown {snap.max_drawdown}",
+            f"hft_latency_ms_p50 {snap.latency_p50}",
+            f"hft_latency_ms_p95 {snap.latency_p95}",
+            f"hft_latency_ms_p99 {snap.latency_p99}",
+            f"hft_ws_events_total {snap.ws_events_received}",
+            f"hft_http_fallbacks_total {snap.http_fallbacks}",
+            f"hft_uptime_seconds {snap.uptime_sec}",
         ]
         return "\n".join(lines) + "\n"
 

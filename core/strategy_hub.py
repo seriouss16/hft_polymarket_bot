@@ -111,6 +111,7 @@ class StrategyHub:
     ) -> dict[str, Any] | None:
         """Run one active strategy or all strategies and return merged decision."""
         import time
+
         signal_ts = time.time()
         if not self._parallel_enabled:
             res = await self.get_active_strategy().process_tick(

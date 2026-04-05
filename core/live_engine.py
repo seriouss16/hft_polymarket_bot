@@ -2260,7 +2260,7 @@ class LiveExecutionEngine:
             status=OrderStatus.PENDING,
             filled_size=0.0,
             signal_ts=signal_ts,
-            send_ts=send_ts if 'send_ts' in locals() else time.time(),
+            send_ts=send_ts if "send_ts" in locals() else time.time(),
         )
         self._active_orders[order_id] = tracked
         logging.info(
@@ -2481,7 +2481,7 @@ class LiveExecutionEngine:
             filled_size=shares if immediate else 0.0,
             entry_best_ask=best_ask,
             signal_ts=signal_ts,
-            send_ts=send_ts if 'send_ts' in locals() else time.time(),
+            send_ts=send_ts if "send_ts" in locals() else time.time(),
         )
         self._active_orders[order_id] = tracked
         self._entry_stats["executed"] += 1

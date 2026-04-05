@@ -29,10 +29,10 @@ from data.poly_clob import ClobAsyncHTTPClient, PolyOrderBook
 from data.providers import FastExchangeProvider
 from ml.model import AsyncLSTMPredictor
 from utils.env_config import req_float, req_str
+from utils.metrics_registry import registry as metrics_registry
 from utils.resilience import safe_task
 from utils.stats import StatsCollector
 from utils.trade_journal import TradeJournal
-from utils.metrics_registry import registry as metrics_registry
 
 
 class _BackgroundTaskManager:
@@ -409,12 +409,7 @@ async def main():
     journal = TradeJournal(path=req_str("TRADE_JOURNAL_PATH"))
 
     # Configure centralized metrics registry
-    metrics_registry.configure(
-        pnl_tracker=pnl,
-        aggregator=aggregator,
-        live_engine=live_exec,
-        stats_collector=stats
-    )
+    metrics_registry.configure(pnl_tracker=pnl, aggregator=aggregator, live_engine=live_exec, stats_collector=stats)
 
     # Background task manager for non-critical async operations
     bg_tasks = _BackgroundTaskManager()

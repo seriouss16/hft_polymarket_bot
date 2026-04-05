@@ -128,21 +128,21 @@ class _JournalStats:
     @property
     def sharpe_ratio(self) -> float:
         """Return Sharpe Ratio of realized PnLs (annualized assuming 252 trading days).
-        
+
         Uses arithmetic mean of PnLs and their standard deviation.
         Returns 0.0 if standard deviation is zero or no trades.
         """
         all_values = self.win_pnl_values + self.loss_pnl_values
         if not all_values or len(all_values) < 2:
             return 0.0
-        
+
         mean_pnl = sum(all_values) / len(all_values)
         variance = sum((x - mean_pnl) ** 2 for x in all_values) / (len(all_values) - 1)
         std_dev = math.sqrt(variance)
-        
+
         if std_dev < 1e-9:
             return 0.0
-        
+
         # Annualization factor: sqrt(number of trades per year)
         # For HFT, we might have thousands of trades.
         # Standard Sharpe uses sqrt(252) for daily returns.

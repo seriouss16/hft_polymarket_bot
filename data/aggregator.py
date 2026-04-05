@@ -139,7 +139,7 @@ class FastPriceAggregator:
     def update(self, exchange, price, ts=None, bid=None, ask=None, exchange_ts=None):
         """Apply one tick from a websocket feed into local buffers."""
         current_time = ts if ts is not None else asyncio.get_running_loop().time()
-        
+
         # Track latency if exchange_ts is provided (ms)
         if exchange_ts and exchange in self._latency_buffers:
             # exchange_ts is usually in ms or s depending on provider
@@ -325,7 +325,7 @@ class FastPriceAggregator:
         buffer = self._latency_buffers.get(exchange)
         if not buffer:
             return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
-        
+
         arr = np.array(buffer)
         return {
             "p50": float(np.percentile(arr, 50)),

@@ -69,6 +69,7 @@ class FastExchangeProvider:
                                 if "time" in data:
                                     try:
                                         from datetime import datetime
+
                                         dt = datetime.fromisoformat(data["time"].replace("Z", "+00:00"))
                                         exchange_ts = dt.timestamp()
                                     except Exception:

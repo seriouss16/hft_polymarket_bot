@@ -170,10 +170,10 @@ class TrackedOrder:
 
     # Lifecycle timestamps for metrics & tracing
     signal_ts: float = 0.0  # When strategy generated the signal
-    send_ts: float = 0.0    # When order was sent to exchange
-    ack_ts: float = 0.0     # When exchange acknowledged the order
-    fill_ts: float = 0.0    # When order was fully filled
-    exit_ts: float = 0.0    # When order was closed (filled/cancelled/failed)
+    send_ts: float = 0.0  # When order was sent to exchange
+    ack_ts: float = 0.0  # When exchange acknowledged the order
+    fill_ts: float = 0.0  # When order was fully filled
+    exit_ts: float = 0.0  # When order was closed (filled/cancelled/failed)
 
     @property
     def age_sec(self) -> float:

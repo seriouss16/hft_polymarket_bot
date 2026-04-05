@@ -58,6 +58,7 @@ tests/test_env_unify.py
 tests/test_executor.py
 tests/test_executor_helpers.py
 tests/test_indicators.py
+tests/test_lag_simulation.py
 tests/test_latency_fixes.py
 tests/test_live_engine.py
 tests/test_metrics_tracing.py
