@@ -1040,6 +1040,33 @@ class LiveExecutionEngine:
             logging.warning("Cancel failed order=%s: %s", order_id, exc)
             return False
 
+    async def cancel_all_orders(self) -> None:
+        """Cancel all active orders — used by kill-switch for emergency shutdown.
+
+        Iterates through ``_active_orders`` and attempts to cancel each one.
+        Does not clear ``_confirmed_buys`` (position tracking) — that is handled
+        separately by the shutdown logic if needed.
+        """
+        if not self._active_orders:
+            logging.info("[LIVE] cancel_all_orders: no active orders to cancel")
+            return
+
+        logging.warning(
+            "[LIVE] cancel_all_orders: cancelling %d active order(s)",
+            len(self._active_orders),
+        )
+        # Cancel each order; collect order_ids for logging
+        order_ids = list(self._active_orders.keys())
+        for order_id in order_ids:
+            try:
+                self._cancel_order(order_id)
+            except Exception as exc:
+                logging.error("cancel_all_orders: failed to cancel order %s: %s", order_id[:12], exc)
+
+        # Note: We do NOT clear _active_orders here because the FSM worker may still
+        # process cancellation confirmations. The orders will be removed naturally
+        # as callbacks fire or during subsequent cleanup.
+
     async def _recover_fill_after_cancel(
         self,
         tracked: TrackedOrder,
@@ -2194,6 +2221,12 @@ class LiveExecutionEngine:
                 "[STALE_ORDERBOOK] [BUY] Blocking execute for %s: data not fresh",
                 token_id[:8]
             )
+            return _SKIP
+
+        # Anti-doubling safety gate: prevent entering if already have position or pending order
+        if not self.can_enter_position(token_id, signal):
+            self._entry_stats["skip_signal"] += 1
+            self._log_entry_stats_if_due()
             return _SKIP
 
         if (

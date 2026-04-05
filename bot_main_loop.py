@@ -13,6 +13,7 @@ from bot_runtime import UVLOOP_ACTIVE
 from core.executor import PnLTracker, mark_price_for_side
 from core.live_common import reconcile_binary_outcome_books
 from core.live_engine import LiveExecutionEngine, LiveRiskManager
+from core.kill_switch_server import set_engine as set_kill_engine, is_shutdown_requested, run_kill_server
 from core.market_regime import MarketRegimeDetector
 from core.risk_engine import RiskEngine
 from core.selector import MarketSelector
@@ -831,6 +832,13 @@ async def main():
         name="pulse_logging",
     )
     
+    # Start kill-switch server as background task (LIVE mode only)
+    _kill_server_task: asyncio.Task | None = None
+    if LIVE_MODE:
+        set_kill_engine(live_exec)
+        _kill_server_task = asyncio.create_task(run_kill_server())
+        logging.info("🛡️ Kill-switch server started as background task")
+    
     try:
         while True:
             now = asyncio.get_event_loop().time()
@@ -851,6 +859,12 @@ async def main():
                     live_risk.max_session_loss,
                 )
                 shutdown_reason = "session_loss_limit"
+                break
+
+            # Check kill-switch flag (emergency shutdown via HTTP /kill endpoint)
+            if LIVE_MODE and is_shutdown_requested():
+                logging.critical("🛑 Kill-switch activated — stopping main loop")
+                shutdown_reason = "kill_switch"
                 break
 
             # Stats logging moved to background task (_stats_logging_task) — no inline work.
@@ -1599,6 +1613,8 @@ async def main():
             _allowance_refresh_task.cancel()
         if _heartbeat_task is not None and not _heartbeat_task.done():
             _heartbeat_task.cancel()
+        if _kill_server_task is not None and not _kill_server_task.done():
+            _kill_server_task.cancel()
         clob_ws_cache.stop()
         if not clob_ws_task.done():
             clob_ws_task.cancel()
