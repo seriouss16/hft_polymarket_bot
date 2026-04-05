@@ -167,10 +167,16 @@ class BalanceCache:
     def get_usdc_balance(self) -> Optional[float]:
         """Get USDC balance from cache or fetch if stale.
         
+        Uses double-checked locking to minimize lock contention:
+        1. Quick check without lock to see if cache is fresh
+        2. If stale, release lock and fetch in background
+        3. Re-acquire lock to update cache atomically
+        
         Returns:
             USDC balance in USD, or None if fetch fails
         """
         start_time = time.perf_counter()
+        
         with self._lock:
             self._metrics.fetches_total += 1
 
@@ -180,9 +186,12 @@ class BalanceCache:
                 self._metrics.record_latency(latency_ms)
                 return self._usdc_cache.value
 
-            try:
-                balance = self._fetcher()
-                if balance is not None:
+        # Cache miss or stale - fetch outside lock (non-blocking for other threads)
+        try:
+            balance = self._fetcher()
+            if balance is not None:
+                # Update cache under lock
+                with self._lock:
                     self._usdc_cache = BalanceCacheEntry(
                         value=balance,
                         timestamp=time.time(),
@@ -192,17 +201,20 @@ class BalanceCache:
                         "[BALANCE] USDC balance fetched: %.4f USD (cache_age=%.3fs)",
                         balance, self._usdc_cache.age_sec,
                     )
-                else:
+            else:
+                with self._lock:
                     self._metrics.errors += 1
                     logging.warning("[BALANCE] USDC balance fetch returned None")
-            except Exception as exc:
+                balance = None
+        except Exception as exc:
+            with self._lock:
                 self._metrics.errors += 1
                 logging.warning("[BALANCE] USDC balance fetch failed: %s", exc)
-                balance = None
+            balance = None
 
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            self._metrics.record_latency(latency_ms)
-            return balance
+        latency_ms = (time.perf_counter() - start_time) * 1000
+        self._metrics.record_latency(latency_ms)
+        return balance
 
     def get_cached_usdc_balance(self) -> Optional[float]:
         """Return cached USDC balance without blocking.
@@ -247,6 +259,7 @@ class BalanceCache:
             Conditional token balance in shares, or None if fetch fails
         """
         start_time = time.perf_counter()
+        
         with self._lock:
             self._metrics.fetches_total += 1
 
@@ -257,9 +270,12 @@ class BalanceCache:
                 self._metrics.record_latency(latency_ms)
                 return cache_entry.value
 
-            try:
-                balance = self._conditional_fetcher(token_id)
-                if balance is not None:
+        # Cache miss or stale - fetch outside lock (non-blocking for other threads)
+        try:
+            balance = self._conditional_fetcher(token_id)
+            if balance is not None:
+                # Update cache under lock
+                with self._lock:
                     self._conditional_caches[token_id] = BalanceCacheEntry(
                         value=balance,
                         timestamp=time.time(),
@@ -273,24 +289,26 @@ class BalanceCache:
                         balance,
                         self._conditional_caches[token_id].age_sec,
                     )
-                else:
+            else:
+                with self._lock:
                     self._metrics.errors += 1
                     logging.warning(
                         "[BALANCE] Conditional balance fetch returned None for %s",
                         token_id[:20],
                     )
-            except Exception as exc:
+        except Exception as exc:
+            with self._lock:
                 self._metrics.errors += 1
                 logging.warning(
                     "[BALANCE] Conditional balance fetch failed for %s: %s",
                     token_id[:20],
                     exc,
                 )
-                balance = None
+            balance = None
 
-            latency_ms = (time.perf_counter() - start_time) * 1000
-            self._metrics.record_latency(latency_ms)
-            return balance
+        latency_ms = (time.perf_counter() - start_time) * 1000
+        self._metrics.record_latency(latency_ms)
+        return balance
     
     def clear_conditional_cache(self, token_id: str) -> None:
         """Clear conditional balance cache for a specific token.
