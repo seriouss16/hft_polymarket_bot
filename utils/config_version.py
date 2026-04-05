@@ -2,7 +2,7 @@ import os
 import json
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, UTC
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -34,7 +34,7 @@ class ConfigVersioner:
         """
         env_snapshot = self._get_env_snapshot()
         config_hash = self._calculate_hash(env_snapshot)
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         version_id = f"{timestamp}_{config_hash[:12]}"
         
         file_path = self.versions_dir / f"{version_id}.json"
