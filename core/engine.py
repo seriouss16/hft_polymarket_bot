@@ -1,11 +1,10 @@
 """Signal, risk, and simulated execution for Polymarket latency strategy."""
 
-import json
 import logging
 import os
 import time
 from collections import deque
-from typing import Any, Deque
+from typing import Any
 
 import numpy as np
 
@@ -25,8 +24,7 @@ from core.engine_entry_gates import (entry_aggressive_trend_age_ok,
                                      latency_expiry_edge_multiplier,
                                      low_speed_edge_multiplier,
                                      max_entry_latency_ms_all_profiles,
-                                     price_to_beat_gate, record_entry_samples,
-                                     zscore_monotonic_for_direction)
+                                     price_to_beat_gate, record_entry_samples)
 from core.engine_price import price_array_for_rsi
 from core.engine_rsi_exit import exit_rsi as clamp_exit_rsi
 from core.engine_rsi_exit import rsi_range_exit_triggered, rsi_slope_per_tick
