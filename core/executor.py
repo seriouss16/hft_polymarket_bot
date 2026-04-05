@@ -332,6 +332,19 @@ class PnLTracker:
         performance_key=None,
         strategy_name=None,
     ):
+        """Record a simulated or live-suppressed trade in the PnL tracker.
+
+        Args:
+            side (str): Trade side (BUY, BUY_UP, BUY_DOWN, SELL).
+            price (float): Execution or book price.
+            amount_usd (float, optional): Notional amount in USD.
+            settlement_fill (bool): Whether this is a settlement-at-expiry fill.
+            performance_key (str, optional): Key for strategy performance attribution.
+            strategy_name (str, optional): Name of the strategy for logging.
+
+        Returns:
+            dict, optional: Trade metadata if recorded or suppressed.
+        """
         """Record a simulated buy or sell; default notional matches HFT_DEFAULT_TRADE_USD when omitted.
 
         For SELL, performance_key (e.g. latency:latency or soft:soft_flow) attributes realized PnL to a bucket.
@@ -558,7 +571,14 @@ class PnLTracker:
         return None
 
     def get_unrealized_pnl(self, book: dict) -> float:
-        """Return markPnL at the outcome bid (conservative exit)."""
+        """Calculate unrealized PnL based on current market bid.
+
+        Args:
+            book (dict): Current Polymarket orderbook snapshot.
+
+        Returns:
+            float: Unrealized PnL in USD.
+        """
         if self.inventory <= 0 or not self.position_side:
             return 0.0
         mark = mark_bid_for_side(book, self.position_side)

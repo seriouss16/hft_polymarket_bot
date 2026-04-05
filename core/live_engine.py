@@ -1434,10 +1434,14 @@ class LiveExecutionEngine:
             return None, False
 
     async def _fak_sell(self, token_id: str, size: float) -> float:
-        """Execute a FAK market SELL and return total filled shares.
+        """Execute a Fill-And-Kill (FAK) market SELL order.
 
-        Delegates to _place_fak_sell (sync) and logs the result.
-        Used when a sub-minimum SELL is needed (CLOB rejects GTC for < min_shares).
+        Args:
+            token_id (str): The outcome token ID to sell.
+            size (float): Number of shares to sell.
+
+        Returns:
+            float: Total filled shares from the FAK order.
         """
         filled, price = await asyncio.to_thread(self._place_fak_sell, token_id, size)
         if filled > 0:
@@ -1659,10 +1663,12 @@ class LiveExecutionEngine:
                 self._last_buy_skip_reason = "emergency_buy_failed"
 
     async def emergency_exit(self, token_id: str, size: float, side: str = SELL_SIDE) -> None:
-        """Externally triggered emergency close: cancel all open orders then cross the book.
+        """Execute an emergency exit by cancelling orders and crossing the book.
 
-        Called by the engine when the position must be closed immediately
-        (e.g. market regime deteriorated, trailing SL hit, slot expiry, shutdown).
+        Args:
+            token_id (str): The outcome token ID to exit.
+            size (float): Number of shares to exit.
+            side (str): The side of the exit order (default: SELL_SIDE).
         """
         pending = [o for o in list(self._active_orders.values()) if o.token_id == token_id]
         for order in pending:

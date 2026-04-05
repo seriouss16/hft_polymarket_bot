@@ -110,6 +110,12 @@ class HFTEngine:
     """
 
     def __init__(self, pnl_tracker, strategy_label="latency_arbitrage"):
+        """Initialize the HFT engine with PnL tracking and strategy configuration.
+
+        Args:
+            pnl_tracker (PnLTracker): Instance for tracking position state and PnL.
+            strategy_label (str): Label for the strategy (default: "latency_arbitrage").
+        """
         self.pnl = pnl_tracker
         self._strategy_label = str(strategy_label)
 
@@ -677,7 +683,11 @@ class HFTEngine:
         )
 
     def get_rsi_v5_state(self):
-        """Return RSI (or blended reaction score), bands, slope, and MA/MACD extras."""
+        """Return the current state of RSI and related indicators.
+
+        Returns:
+            dict: A dictionary containing RSI, bands, slope, and MA/MACD metrics.
+        """
         return {
             "rsi": self._last_rsi,
             "rsi_raw": self._last_rsi_raw,
@@ -724,16 +734,38 @@ class HFTEngine:
         )
 
     def can_trade(self):
-        """Return True when risk limits allow new trade."""
+        """Check if risk limits allow opening a new trade.
+
+        Returns:
+            bool: True if current exposure is below the maximum allowed position.
+        """
         usd_exposure = abs(self.pnl.inventory * self.pnl.entry_price) if self.pnl.inventory > 0 else 0.0
         return usd_exposure < self.max_position
 
     def update_trend(self, fast_price, poly_mid):
-        """Track crossing of target price and estimate trend speed/depth."""
+        """Update trend metrics based on fast oracle and Polymarket mid prices.
+
+        Args:
+            fast_price (float): Current price from the fast oracle (e.g., CEX).
+            poly_mid (float): Current midpoint price on Polymarket.
+
+        Returns:
+            dict: Updated trend metrics including direction, speed, and depth.
+        """
         return apply_update_trend(self, fast_price, poly_mid)
 
     def dynamic_edge_threshold(self, price_history, recent_pnl=0.0, latency_ms=0.0, extra_mult=1.0):
-        """Return adaptive edge threshold in price units from recent volatility."""
+        """Compute an adaptive edge threshold based on market volatility and latency.
+
+        Args:
+            price_history (np.ndarray): Array of recent prices.
+            recent_pnl (float): Recent realized PnL for regime adjustment.
+            latency_ms (float): Current feed latency in milliseconds.
+            extra_mult (float): Additional multiplier for the threshold.
+
+        Returns:
+            float: The computed dynamic edge threshold in price units.
+        """
         return compute_dynamic_edge_threshold(self, price_history, recent_pnl, latency_ms, extra_mult)
 
     def _load_rsi_slope_entry_params(self) -> None:
@@ -1242,6 +1274,25 @@ class HFTEngine:
         slot_price_to_beat: float = 0.0,
         **_ignored,
     ):
+        """Process a single market tick to update state and generate signals.
+
+        Args:
+            fast_price (float): Current price from the fast oracle.
+            poly_orderbook (dict): Current Polymarket orderbook snapshot.
+            price_history (np.ndarray): Array of recent prices for indicators.
+            lstm_forecast (float): Forecast value from the LSTM model.
+            zscore (float): Current price z-score.
+            latency_ms (float): Feed latency in milliseconds.
+            recent_pnl (float): Recent realized PnL.
+            meta_enabled (bool): Whether meta-strategy gates are enabled.
+            seconds_to_expiry (float, optional): Seconds remaining until market expiry.
+            skew_ms (float): Clock skew in milliseconds.
+            slot_price_to_beat (float): Target price to beat for the current slot.
+            **_ignored: Additional keyword arguments.
+
+        Returns:
+            dict, optional: Event payload if a trade was executed (OPEN/CLOSE).
+        """
         self._diag_inc("ticks")
         self._emit_filter_diag_if_due()
         if not fast_price or not poly_orderbook["ask"]:
