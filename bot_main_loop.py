@@ -1223,7 +1223,9 @@ async def main():
                                 _live_filled,
                                 _close_tid[:20],
                             )
-                            _sell_filled, _sell_px = await live_exec.close_position(_close_tid, _live_filled)
+                            _sell_filled, _sell_px = await live_exec.close_position(
+                                _close_tid, _live_filled, signal_ts=decision.get("signal_ts", 0.0)
+                            )
                             if _sell_filled > 0 and _sell_px > 0:
                                 live_exec.clear_filled_buy(_close_tid)
                                 _live_pnl = pnl.live_close(
@@ -1439,6 +1441,7 @@ async def main():
                                                 _open_signal,
                                                 _live_tid,
                                                 budget_usd=_cost_usd,
+                                                signal_ts=decision.get("signal_ts", 0.0),
                                                 **_exec_kw,
                                             )
                                     else:
@@ -1447,6 +1450,7 @@ async def main():
                                             _open_signal,
                                             _live_tid,
                                             budget_usd=_cost_usd,
+                                            signal_ts=decision.get("signal_ts", 0.0),
                                             **_exec_kw,
                                         )
                                     if _filled_sh > 0:

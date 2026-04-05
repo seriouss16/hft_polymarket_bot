@@ -81,6 +81,10 @@ class OrderFSM:
         if status in ("matched", "filled"):
             self.tracked.status = OrderStatus.FILLED
             self.tracked.filled_size = min(self.tracked.size, event.filled)
+            if not self.tracked.fill_ts:
+                self.tracked.fill_ts = event.timestamp
+            if not self.tracked.exit_ts:
+                self.tracked.exit_ts = event.timestamp
         elif status in ("canceled", "cancelled"):
             self.tracked.status = OrderStatus.CANCELLED
             self.tracked.filled_size = event.filled
@@ -89,6 +93,8 @@ class OrderFSM:
             self.tracked.filled_size = min(self.tracked.size, event.filled)
             self.tracked.placed_at = time.time()  # Reset stale timer
         elif status == "live":
+            if not self.tracked.ack_ts:
+                self.tracked.ack_ts = event.timestamp
             if self.tracked.status == OrderStatus.PLACING:
                 self.tracked.status = OrderStatus.PENDING
 
@@ -101,7 +107,13 @@ class OrderFSM:
         if event.status in ("matched", "filled"):
             self.tracked.status = OrderStatus.FILLED
             self.tracked.filled_size = self.tracked.size
+            if not self.tracked.fill_ts:
+                self.tracked.fill_ts = event.timestamp
+            if not self.tracked.exit_ts:
+                self.tracked.exit_ts = event.timestamp
         elif event.status == "live":
+            if not self.tracked.ack_ts:
+                self.tracked.ack_ts = event.timestamp
             if self.tracked.status == OrderStatus.PLACING:
                 self.tracked.status = OrderStatus.PENDING
 
@@ -1397,6 +1409,7 @@ class LiveExecutionEngine:
 
             # Non-blocking HTTP request (620ms network-bound from Portugal, ~20ms from Ireland)
             # Wrapped in Circuit Breaker
+            send_ts = time.time()
             try:
                 resp = await self.circuit_breaker.call(
                     lambda: loop.run_in_executor(None, self.client.post_order, signed, OrderType.GTC)
@@ -2055,7 +2068,7 @@ class LiveExecutionEngine:
         )
         return (total_filled, avg_price)
 
-    async def close_position(self, token_id: str, size: float) -> tuple[float, float]:
+    async def close_position(self, token_id: str, size: float, signal_ts: float = 0.0) -> tuple[float, float]:
         """Sell all ``size`` shares and return (total_filled_shares, avg_price).
 
         When ``_confirmed_buys`` holds this token, ``size`` is replaced by that
@@ -2246,6 +2259,8 @@ class LiveExecutionEngine:
             size=size,
             status=OrderStatus.PENDING,
             filled_size=0.0,
+            signal_ts=signal_ts,
+            send_ts=send_ts if 'send_ts' in locals() else time.time(),
         )
         self._active_orders[order_id] = tracked
         logging.info(
@@ -2294,6 +2309,7 @@ class LiveExecutionEngine:
         *,
         best_bid: float | None = None,
         best_ask: float | None = None,
+        signal_ts: float = 0.0,
     ) -> tuple[float, float]:
         """Place a limit BUY, wait for CLOB confirmation, return (filled_shares, avg_price).
 
@@ -2464,6 +2480,8 @@ class LiveExecutionEngine:
             status=OrderStatus.FILLED if immediate else OrderStatus.PENDING,
             filled_size=shares if immediate else 0.0,
             entry_best_ask=best_ask,
+            signal_ts=signal_ts,
+            send_ts=send_ts if 'send_ts' in locals() else time.time(),
         )
         self._active_orders[order_id] = tracked
         self._entry_stats["executed"] += 1

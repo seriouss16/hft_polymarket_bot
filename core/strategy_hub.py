@@ -110,8 +110,10 @@ class StrategyHub:
         slot_price_to_beat: float = 0.0,
     ) -> dict[str, Any] | None:
         """Run one active strategy or all strategies and return merged decision."""
+        import time
+        signal_ts = time.time()
         if not self._parallel_enabled:
-            return await self.get_active_strategy().process_tick(
+            res = await self.get_active_strategy().process_tick(
                 fast_price=fast_price,
                 poly_orderbook=poly_orderbook,
                 price_history=price_history,
@@ -125,6 +127,9 @@ class StrategyHub:
                 skew_ms=skew_ms,
                 slot_price_to_beat=slot_price_to_beat,
             )
+            if res:
+                res["signal_ts"] = signal_ts
+            return res
 
         # Execute strategies either concurrently (gather) or sequentially
         raw_results: list[tuple[str, dict[str, Any] | None | Exception]] = []
@@ -210,7 +215,10 @@ class StrategyHub:
 
         # Merge results: priority order: entry signals > exit signals > hold
         # If multiple entry signals, pick highest confidence
-        return self._merge_strategy_results(results)
+        merged = self._merge_strategy_results(results)
+        if merged:
+            merged["signal_ts"] = signal_ts
+        return merged
 
     def _merge_strategy_results(self, results: list[StrategyResult]) -> dict[str, Any]:
         """Merge multiple strategy results into a single decision.
