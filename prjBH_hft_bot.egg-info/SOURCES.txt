@@ -48,6 +48,7 @@ tests/test_circuit_breaker.py
 tests/test_clob_market_ws.py
 tests/test_clob_user_ws.py
 tests/test_config_validation.py
+tests/test_config_versioning.py
 tests/test_critical_path_integration.py
 tests/test_engine_entry_gates.py
 tests/test_engine_live_entry_sync.py
@@ -59,6 +60,7 @@ tests/test_executor_helpers.py
 tests/test_indicators.py
 tests/test_latency_fixes.py
 tests/test_live_engine.py
+tests/test_metrics_tracing.py
 tests/test_micro_trend.py
 tests/test_resilience.py
 tests/test_safety_gates.py
@@ -70,11 +72,13 @@ tests/test_trade_journal.py
 tests/test_workspace_root.py
 utils/async_debug_logger.py
 utils/config_validation.py
+utils/config_version.py
 utils/debug_log.py
 utils/env_config.py
 utils/env_merge.py
 utils/env_unify.py
 utils/log_dedupe.py
+utils/metrics_registry.py
 utils/resilience.py
 utils/secrets_mask.py
 utils/stats.py
