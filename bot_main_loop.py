@@ -331,7 +331,6 @@ async def main():
     FAST_LOG_MIN_SEC = req_float("HFT_FAST_LOG_MIN_SEC")
     pulse_log_period = PULSE_INTERVAL if PULSE_INTERVAL > 0.0 else FAST_LOG_MIN_SEC
     MAIN_LOOP_SLEEP = req_float("HFT_LOOP_SLEEP_SEC")
-    CLOB_PULL_INTERVAL = req_float("CLOB_BOOK_PULL_SEC")
     LSTM_MIN_INTERVAL = req_float("LSTM_INFERENCE_SEC")
     ENABLE_LSTM = os.getenv("HFT_ENABLE_LSTM") == "1"
     SLOT_POLL_SEC = req_float("HFT_SLOT_POLL_SEC")
@@ -677,7 +676,6 @@ async def main():
     _live_inventory_reconcile_sec = float(os.getenv("LIVE_INVENTORY_RECONCILE_SEC", "5"))
     _last_live_reconcile_ts = 0.0
     last_lstm_time = 0
-    last_book_pull_time = 0
     # Last asyncio time when CLOB HTTP pull wrote valid UP bid/ask into poly_book (live OPEN freshness).
     last_clob_book_success_time = 0.0
     last_book_mismatch_warn_time = 0.0
@@ -837,14 +835,14 @@ async def main():
     journal.start_async_writer()
 
     # Start background stats logging task
-    _stats_task = bg_tasks.create_task(
+    bg_tasks.create_task(
         _stats_logging_task(stats, balance_cache, live_exec, STATS_INTERVAL, bg_tasks._shutdown_event, LIVE_MODE),
         name="stats_logging",
     )
 
     # Start background pulse logging task (poly_book_ref holds mutable reference to current poly_book)
     _poly_book_ref = [poly_book]
-    _pulse_task = bg_tasks.create_task(
+    bg_tasks.create_task(
         _pulse_logging_task(
             aggregator,
             _poly_book_ref,
@@ -918,7 +916,6 @@ async def main():
                     logging.info("🕒 New 5m slot: UTC boundary ts=%s.", ts)
                     last_slot_ts = ts
                 slug = selector.format_slug(ts)
-                current_slug = slug
                 up_id, down_id, question, condition_id = await selector.fetch_up_down_token_ids(slug)
 
                 if up_id and (up_id != token_up_id or down_id != token_down_id):
@@ -992,14 +989,14 @@ async def main():
             # 2. Data ingestion
             _net_dbg = os.getenv("HFT_NETWORK_TIMING_DEBUG") == "1"
             if _net_dbg:
-                _nw_t0 = time.perf_counter()
+                time.perf_counter()
             if USE_SMART_FAST:
                 fast_price = aggregator.get_weighted_price()
             else:
                 fast_price = aggregator.get_coinbase_price() or aggregator.get_weighted_price()
             primary_data = aggregator.get_primary_history()
             if _net_dbg:
-                _nw_t1 = time.perf_counter()
+                time.perf_counter()
 
             # 3. LSTM is optional: engine ignores forecast; keep off by default for lower CPU latency.
             if (
@@ -1127,7 +1124,6 @@ async def main():
                 # order until _live_skip_until (see OPEN block below). Do NOT fold this
                 # into meta_enabled: that would make HFTEngine skip OPEN while paper
                 # still evaluates the same tick — keep process_tick parity with paper.
-                _skip_cooldown_active = LIVE_MODE and (now < _live_skip_until)
 
                 # Validate binary market constraint (UP + DOWN ≈ 1.0) and fix
                 # stale/wrong orderbook data before passing it to the engine.
