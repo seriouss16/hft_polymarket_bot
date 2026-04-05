@@ -23,7 +23,7 @@ import requests
 from dataclasses import dataclass
 
 from utils.env_config import req_float, req_int, req_str
-from utils.resilience import safe_task
+from utils.resilience import safe_task, CircuitBreaker, CircuitBreakerError
 
 from core.live_common import (
     BUY,
@@ -306,6 +306,13 @@ class LiveExecutionEngine:
         self._event_queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: asyncio.Task | None = None
         self._fsms: dict[str, OrderFSM] = {}
+        
+        # Circuit Breaker for Polymarket API
+        self.circuit_breaker = CircuitBreaker(
+            name="PolymarketAPI",
+            error_threshold=req_int("HFT_CIRCUIT_BREAKER_THRESHOLD") if os.getenv("HFT_CIRCUIT_BREAKER_THRESHOLD") else 5,
+            recovery_timeout=req_float("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") if os.getenv("HFT_CIRCUIT_BREAKER_RECOVERY_SEC") else 60.0,
+        )
 
         if ClobClient is None:
             if not self.test_mode:
@@ -542,7 +549,8 @@ class LiveExecutionEngine:
         """
         if self.test_mode or self.client is None:
             return None
-        try:
+
+        async def _fetch():
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
@@ -550,7 +558,8 @@ class LiveExecutionEngine:
                 token_id=token_id,
                 signature_type=sig_type,
             )
-            resp = self.client.get_balance_allowance(params=params)
+            # Use to_thread because SDK calls are blocking
+            resp = await asyncio.to_thread(self.client.get_balance_allowance, params=params)
             raw = (
                 resp.get("balance") if isinstance(resp, dict)
                 else getattr(resp, "balance", None)
@@ -563,6 +572,29 @@ class LiveExecutionEngine:
                 token_id[:20], raw, bal,
             )
             return bal
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we are in an async context, we must use a Future or wait.
+                # But fetch_conditional_balance is sync. This is a design conflict.
+                # For now, we use run_coroutine_threadsafe if in a different thread,
+                # or we just accept that sync calls to this from the main loop are bad.
+                # However, most calls are from to_thread(fetch_conditional_balance).
+                import threading
+                if threading.current_thread() is threading.main_thread():
+                    # This is dangerous if called from the main thread's async loop.
+                    # But the engine's sync methods shouldn't be called from the main loop directly.
+                    return loop.run_until_complete(self.circuit_breaker.call(_fetch))
+                else:
+                    # Called from a worker thread (via to_thread)
+                    future = asyncio.run_coroutine_threadsafe(self.circuit_breaker.call(_fetch), loop)
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.circuit_breaker.call(_fetch))
+        except CircuitBreakerError:
+            logging.warning("[CIRCUIT] fetch_conditional_balance skipped: Circuit is OPEN")
+            return None
         except Exception as exc:
             logging.warning(
                 "[LIVE] fetch_conditional_balance failed token=%s: %s", token_id[:20], exc,
@@ -577,15 +609,31 @@ class LiveExecutionEngine:
         """
         if self.test_mode or self.client is None:
             return None
-        try:
+
+        async def _fetch():
             from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
             sig_type = req_int("POLY_SIGNATURE_TYPE")
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
                 signature_type=sig_type,
             )
-            resp = self.client.get_balance_allowance(params=params)
+            resp = await asyncio.to_thread(self.client.get_balance_allowance, params=params)
             return _collateral_usd_from_balance_allowance_response(resp)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import threading
+                if threading.current_thread() is threading.main_thread():
+                    return loop.run_until_complete(self.circuit_breaker.call(_fetch))
+                else:
+                    future = asyncio.run_coroutine_threadsafe(self.circuit_breaker.call(_fetch), loop)
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.circuit_breaker.call(_fetch))
+        except CircuitBreakerError:
+            logging.warning("[CIRCUIT] fetch_usdc_balance skipped: Circuit is OPEN")
+            return None
         except Exception as exc:
             logging.warning("fetch_usdc_balance failed: %s", exc)
             return None
@@ -1034,10 +1082,26 @@ class LiveExecutionEngine:
         if self.test_mode or self.client is None:
             logging.info("[SIM] Cancel order %s.", order_id)
             return True
-        try:
-            self.client.cancel(order_id)
+
+        async def _cancel():
+            await asyncio.to_thread(self.client.cancel, order_id)
             logging.info("[LIVE] Cancelled order %s.", order_id)
             return True
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import threading
+                if threading.current_thread() is threading.main_thread():
+                    return loop.run_until_complete(self.circuit_breaker.call(_cancel))
+                else:
+                    future = asyncio.run_coroutine_threadsafe(self.circuit_breaker.call(_cancel), loop)
+                    return future.result()
+            else:
+                return loop.run_until_complete(self.circuit_breaker.call(_cancel))
+        except CircuitBreakerError:
+            logging.warning("[CIRCUIT] _cancel_order skipped: Circuit is OPEN")
+            return False
         except Exception as exc:
             logging.warning("Cancel failed order=%s: %s", order_id, exc)
             return False
@@ -1334,8 +1398,15 @@ class LiveExecutionEngine:
             signed = await loop.run_in_executor(None, self.client.create_order, order)
             
             # Non-blocking HTTP request (620ms network-bound from Portugal, ~20ms from Ireland)
-            resp = await loop.run_in_executor(None, self.client.post_order, signed, OrderType.GTC)
-            
+            # Wrapped in Circuit Breaker
+            try:
+                resp = await self.circuit_breaker.call(
+                    lambda: loop.run_in_executor(None, self.client.post_order, signed, OrderType.GTC)
+                )
+            except CircuitBreakerError:
+                logging.error("[CIRCUIT] Order placement aborted: Circuit is OPEN")
+                return None, False
+
             if isinstance(resp, dict):
                 order_id = str(resp.get("orderID") or resp.get("order_id") or "")
                 immediate = str(resp.get("status", "")).lower() in ("matched", "filled")
@@ -1990,6 +2061,13 @@ class LiveExecutionEngine:
         if size <= 0:
             return (0.0, 0.0)
 
+        # Circuit Breaker check
+        from utils.resilience import CircuitState
+        if self.circuit_breaker.state == CircuitState.OPEN:
+            logging.warning("[CIRCUIT] Blocking close_position: Circuit is OPEN")
+            # We still return (0.0, 0.0) but this is more critical as it's an exit
+            return (0.0, 0.0)
+
         # Freshness check before placing SELL
         if self.stale_block_actions and not is_fresh_for_trading(
             token_id, self._market_book_cache, self._user_order_cache
@@ -2214,6 +2292,12 @@ class LiveExecutionEngine:
         _SKIP = (0.0, 0.0)
         self._last_buy_skip_reason = None
         self._entry_stats["attempts"] += 1
+
+        # Circuit Breaker check
+        from utils.resilience import CircuitState
+        if self.circuit_breaker.state == CircuitState.OPEN:
+            logging.warning("[CIRCUIT] Blocking execute: Circuit is OPEN")
+            return _SKIP
 
         # Freshness check before placing BUY
         if self.stale_block_actions and not is_fresh_for_trading(
