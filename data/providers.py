@@ -48,6 +48,7 @@ class FastExchangeProvider:
                         price = None
                         bid_px = None
                         ask_px = None
+                        exchange_ts = None
 
                         if self.name == "binance":
                             # Combined stream wraps payload in ``data``; raw ``/ws/`` sends payload at top level.
@@ -56,6 +57,8 @@ class FastExchangeProvider:
                                 bid_px = float(tick["b"])
                                 ask_px = float(tick["a"])
                                 price = (bid_px + ask_px) / 2.0
+                                if "E" in tick:
+                                    exchange_ts = float(tick["E"]) / 1000.0
 
                         elif self.name == "coinbase":
                             if data.get("type") == "ticker":
@@ -63,6 +66,13 @@ class FastExchangeProvider:
                                 if "best_bid" in data and "best_ask" in data:
                                     bid_px = float(data["best_bid"])
                                     ask_px = float(data["best_ask"])
+                                if "time" in data:
+                                    try:
+                                        from datetime import datetime
+                                        dt = datetime.fromisoformat(data["time"].replace("Z", "+00:00"))
+                                        exchange_ts = dt.timestamp()
+                                    except Exception:
+                                        pass
 
                         if price:
                             loop_ts = asyncio.get_running_loop().time()
@@ -73,9 +83,10 @@ class FastExchangeProvider:
                                     loop_ts,
                                     bid_px,
                                     ask_px,
+                                    exchange_ts=exchange_ts,
                                 )
                             else:
-                                self.update_callback(self.name, price, loop_ts)
+                                self.update_callback(self.name, price, loop_ts, exchange_ts=exchange_ts)
 
             except asyncio.CancelledError:
                 logging.info("🛑 [%s] WebSocket task cancelled; stopping provider.", self.name)

@@ -117,6 +117,12 @@ class FastPriceAggregator:
         if self.use_incremental:
             self._zscore_calculator = IncrementalZScore(window_size=self.zscore_window)
 
+        # Latency histograms (p50, p95, p99)
+        self._latency_buffers = {
+            "binance": deque(maxlen=1000),
+            "coinbase": deque(maxlen=1000),
+        }
+
     @staticmethod
     def tail_last_n(seq, n: int) -> list[float]:
         """Return the last n samples from a deque or list without copying the full sequence."""
@@ -127,9 +133,19 @@ class FastPriceAggregator:
         skip = len(seq) - n
         return list(itertools.islice(seq, skip, None))
 
-    def update(self, exchange, price, ts=None, bid=None, ask=None):
+    def update(self, exchange, price, ts=None, bid=None, ask=None, exchange_ts=None):
         """Apply one tick from a websocket feed into local buffers."""
         current_time = ts if ts is not None else asyncio.get_running_loop().time()
+        
+        # Track latency if exchange_ts is provided (ms)
+        if exchange_ts and exchange in self._latency_buffers:
+            # exchange_ts is usually in ms or s depending on provider
+            # We assume it's been normalized to seconds or we normalize here
+            # For now, we assume exchange_ts is unix seconds
+            latency_ms = (current_time - exchange_ts) * 1000.0
+            if latency_ms > 0:
+                self._latency_buffers[exchange].append(latency_ms)
+
         self.data[exchange] = {
             "price": price,
             "timestamp": current_time,
@@ -294,4 +310,17 @@ class FastPriceAggregator:
             "poly_age_ms": poly_age_ms,
             "skew_ms": skew_ms,
             "staleness_ms": staleness_ms,
+        }
+
+    def get_latency_stats(self, exchange: str) -> dict[str, float]:
+        """Return p50, p95, p99 latency for the given exchange."""
+        buffer = self._latency_buffers.get(exchange)
+        if not buffer:
+            return {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+        
+        arr = np.array(buffer)
+        return {
+            "p50": float(np.percentile(arr, 50)),
+            "p95": float(np.percentile(arr, 95)),
+            "p99": float(np.percentile(arr, 99)),
         }
