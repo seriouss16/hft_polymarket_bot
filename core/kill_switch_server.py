@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
+
+if TYPE_CHECKING:
+    from core.live_engine import LiveExecutionEngine
 
 # Global shutdown flag — set by /kill endpoint
 _shutdown_requested = False
