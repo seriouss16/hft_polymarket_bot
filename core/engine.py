@@ -229,9 +229,15 @@ class HFTEngine:
         self.rsi_allow_bypass_on_strong_edge = os.getenv("HFT_RSI_ALLOW_BYPASS_STRONG_EDGE", "0") == "1"
         self.rsi_allow_bypass_on_aggressive_edge = os.getenv("HFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "1") == "1"
         self.aggressive_entry_relax_speed = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED"))
+        self.aggressive_entry_relax_speed_down = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED_DOWN"))
 
         # --- Entry confirmation ---
         self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC"))
+        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
+        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT"))
+        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW"))
+        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH"))
+        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE"))
         self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
         self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
 
@@ -274,6 +280,10 @@ class HFTEngine:
         self.entry_momentum_alt_enabled = os.getenv("HFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
 
         # --- Latency guard ---
+        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS"))
+        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT"))
+        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC"))
+        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT"))
         self.entry_max_latency_ms = float(os.getenv("HFT_ENTRY_MAX_LATENCY_MS"))
         self.entry_min_skew_ms, self.entry_max_skew_ms = _entry_skew_bounds_from_env()
         self._last_skew_gate_skew_ms = 0.0
@@ -283,6 +293,7 @@ class HFTEngine:
         self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
         self.no_entry_last_sec = _env_float_default("HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC)
+        self.slot_interval_sec = _env_float_default("HFT_SLOT_INTERVAL_SEC", 300.0)
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -326,6 +337,7 @@ class HFTEngine:
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
         self._last_entry_cap_deny_log_ts = 0.0
+        self._last_entry_noise_log_ts = 0.0
         self.filter_diag_log_sec = float(os.getenv("HFT_FILTER_DIAG_LOG_SEC"))
         self._last_filter_diag_log_ts = time.time()
         self._filter_diag_stats: dict[str, int] = {}
@@ -792,6 +804,7 @@ class HFTEngine:
         self.entry_low_speed_abs = float(os.getenv("HFT_ENTRY_LOW_SPEED_ABS"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
         self.no_entry_last_sec = _env_float_default("HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC)
+        self.slot_interval_sec = _env_float_default("HFT_SLOT_INTERVAL_SEC", 300.0)
         self.slot_force_close_last_sec = float(os.getenv("HFT_SLOT_FORCE_CLOSE_LAST_SEC"))
         self.slot_99c_max_sec = float(os.getenv("HFT_SLOT_99C_MAX_SEC"))
         self.slot_expiry_info_max_sec = float(os.getenv("HFT_SLOT_EXPIRY_INFO_MAX_SEC"))
@@ -843,6 +856,7 @@ class HFTEngine:
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
         self._last_entry_cap_deny_log_ts = 0.0
+        self._last_entry_noise_log_ts = 0.0
         self._filter_diag_stats = {}
         self._last_filter_diag_log_ts = time.time()
         self.last_close_time = 0.0

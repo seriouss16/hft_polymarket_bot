@@ -35,7 +35,7 @@ def is_shutdown_requested() -> bool:
     return _shutdown_requested
 
 
-async def handle_kill(request: web.Request) -> web.Response:
+async def handle_kill(request: web.Request) -> web.Response:  # noqa: F841) -> web.Response:
     """Handle POST /kill — trigger emergency shutdown."""
     global _shutdown_requested
     logging.critical("🛑 KILL-SWITCH ACTIVATED via /kill endpoint")
@@ -60,7 +60,7 @@ async def handle_kill(request: web.Request) -> web.Response:
     )
 
 
-async def health_check(request: web.Request) -> web.Response:
+async def health_check(request: web.Request) -> web.Response:  # noqa: F841) -> web.Response:
     """Simple health check endpoint."""
     return web.json_response(
         {
