@@ -13,8 +13,8 @@ from bot_runtime import UVLOOP_ACTIVE
 from core.executor import PnLTracker, mark_price_for_side
 from core.kill_switch_server import is_shutdown_requested, run_kill_server
 from core.kill_switch_server import set_engine as set_kill_engine
-from core.live_common import reconcile_binary_outcome_books
-from core.live_engine import LiveExecutionEngine, LiveRiskManager
+from core.live_common import LiveRiskManager, reconcile_binary_outcome_books
+from core.live_engine import LiveExecutionEngine
 from core.market_regime import MarketRegimeDetector
 from core.risk_engine import RiskEngine
 from core.selector import MarketSelector
