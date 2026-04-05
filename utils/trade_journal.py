@@ -65,6 +65,7 @@ JOURNAL_FIELDNAMES = [
     "strategy_name",
     "entry_profile",
     "performance_key",
+    "sim_feed_delay_sec",
     "row_kind",
 ]
 
@@ -193,6 +194,7 @@ class JournalEntryComposer:
             "strategy_name": decision.get("strategy_name"),
             "entry_profile": decision.get("entry_profile"),
             "performance_key": decision.get("performance_key"),
+            "sim_feed_delay_sec": os.getenv("HFT_SIM_FEED_DELAY_SEC", "0.0"),
         }
 
     @staticmethod
@@ -244,6 +246,7 @@ class JournalEntryComposer:
             "strategy_name": decision.get("strategy_name"),
             "entry_profile": decision.get("entry_profile"),
             "performance_key": decision.get("performance_key"),
+            "sim_feed_delay_sec": os.getenv("HFT_SIM_FEED_DELAY_SEC", "0.0"),
         }
 
 
