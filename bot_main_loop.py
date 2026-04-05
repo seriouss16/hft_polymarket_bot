@@ -662,7 +662,6 @@ async def main():
 
     token_up_id = None
     token_down_id = None
-    current_slug = None
     poly_book = None
     # last_stats_time and last_pulse_time removed — stats/pulse logging moved to background tasks
     _regime_last_price: float = 0.0

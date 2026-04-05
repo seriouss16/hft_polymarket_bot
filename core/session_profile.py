@@ -180,7 +180,6 @@ def maybe_switch_profile() -> str | None:
     Returns the new profile name if a switch occurred, else None.
     Call strategy_hub.reload_profile_params() after a non-None return.
     """
-    global _CURRENT_PROFILE
     name = current_profile_name()
     if name == _CURRENT_PROFILE:
         return None
