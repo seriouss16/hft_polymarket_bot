@@ -148,7 +148,6 @@ class HFTEngine:
         )
         self.post_close_reentry_sec = float(os.getenv("HFT_POST_CLOSE_REENTRY_COOLDOWN_SEC"))
         self.last_close_time = 0.0
-        self.reaction_timeout_sec = float(os.getenv("HFT_REACTION_TIMEOUT_SEC"))
         self.entry_poly_mid = None
         self.entry_outcome_mid = None
         self.entry_fast_price = None
@@ -162,17 +161,10 @@ class HFTEngine:
         self.stop_loss_usd = float(os.getenv("HFT_STOP_LOSS_USD"))
         self.pnl_tp_pct = float(os.getenv("HFT_PNL_TP_PERCENT"))
         self.pnl_sl_pct = float(os.getenv("HFT_PNL_SL_PERCENT"))
-        self.pnl_tp_min_hold_sec = float(os.getenv("HFT_PNL_TP_MIN_HOLD_SEC"))
 
         # --- Trailing TP/SL ---
         self.trailing_tp_enabled = os.getenv("HFT_TRAILING_TP_ENABLED") == "1"
-        self.trailing_tp_activate_usd = float(os.getenv("HFT_TRAILING_TP_ACTIVATE_USD"))
-        self.trailing_tp_pullback_pct = float(os.getenv("HFT_TRAILING_TP_PULLBACK_PCT"))
-        self.trailing_tp_min_pullback_usd = float(os.getenv("HFT_TRAILING_TP_MIN_PULLBACK_USD"))
         self.trailing_sl_enabled = os.getenv("HFT_TRAILING_SL_ENABLED") == "1"
-        self.trailing_sl_breakeven_at_usd = float(os.getenv("HFT_TRAILING_SL_BREAKEVEN_AT_USD"))
-        self.trailing_sl_step_usd = float(os.getenv("HFT_TRAILING_SL_STEP_USD"))
-        self.trailing_sl_step_lock_pct = float(os.getenv("HFT_TRAILING_SL_STEP_LOCK_PCT"))
         self._peak_unrealized = 0.0
         self._trailing_sl_floor = None
 
@@ -209,15 +201,7 @@ class HFTEngine:
         # RSI exits
         self.rsi_exit_upper_base = float(os.getenv("HFT_RSI_EXIT_UPPER_BASE"))
         self.rsi_exit_lower_base = float(os.getenv("HFT_RSI_EXIT_LOWER_BASE"))
-        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD"))
-        self.rsi_range_exit_band_margin = float(os.getenv("HFT_RSI_RANGE_EXIT_BAND_MARGIN"))
-        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH"))
-        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW"))
         self.rsi_band_vol_k = float(os.getenv("HFT_RSI_BAND_VOL_K"))
-        self.rsi_range_exit_profit_frac = float(os.getenv("HFT_RSI_RANGE_EXIT_PROFIT_FRAC"))
-        self.rsi_range_exit_min_hold_sec = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC"))
-        # Extra RSI points beyond margin before fade exit (reduces sensitivity; not time-based).
-        self.rsi_range_exit_fade_buffer = float(os.getenv("HFT_RSI_RANGE_EXIT_FADE_BUFFER", "0") or 0.0)
         self.rsi_exit_clamp_high = float(os.getenv("HFT_RSI_EXIT_CLAMP_HIGH"))
         self.rsi_exit_clamp_low = float(os.getenv("HFT_RSI_EXIT_CLAMP_LOW"))
         
@@ -230,7 +214,6 @@ class HFTEngine:
             )
 
         # --- RSI slope ---
-        self.rsi_slope_exit_enabled = os.getenv("HFT_RSI_SLOPE_EXIT_ENABLED") == "1"
         # Read RSI slope exit thresholds from env (mandatory)
         self.rsi_slope_up_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_UP"))
         self.rsi_slope_down_exit = float(os.getenv("HFT_RSI_SLOPE_EXIT_DOWN"))
@@ -266,12 +249,6 @@ class HFTEngine:
         self.reaction_w_rsi = float(os.getenv("HFT_REACTION_W_RSI"))
         self.reaction_w_ma = float(os.getenv("HFT_REACTION_W_MA"))
         self.reaction_w_macd = float(os.getenv("HFT_REACTION_W_MACD"))
-        self.rsi_hold_up_floor = float(
-            os.getenv("HFT_RSI_HOLD_UP_FLOOR") or os.getenv("HFT_RSI_HOLD_YES_FLOOR")
-        )
-        self.rsi_hold_down_ceiling = float(
-            os.getenv("HFT_RSI_HOLD_DOWN_CEILING") or os.getenv("HFT_RSI_HOLD_NO_CEILING")
-        )
         self.rsi_allow_bypass_on_strong_edge = os.getenv(
             "HFT_RSI_ALLOW_BYPASS_STRONG_EDGE", "0"
         ) == "1"
@@ -279,15 +256,9 @@ class HFTEngine:
             "HFT_RSI_ALLOW_BYPASS_AGGRESSIVE_EDGE", "1"
         ) == "1"
         self.aggressive_entry_relax_speed = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED"))
-        self.aggressive_entry_relax_speed_down = float(os.getenv("HFT_AGGRESSIVE_ENTRY_RELAX_SPEED_DOWN"))
 
         # --- Entry confirmation ---
         self.entry_confirm_age = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_SEC"))
-        self.reversal_confirm_age = float(os.getenv("HFT_REVERSAL_CONFIRM_AGE_SEC"))
-        self.entry_extreme_min_edge = float(os.getenv("HFT_ENTRY_EXTREME_MIN_EDGE"))
-        self.entry_extreme_price_low = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_LOW"))
-        self.entry_extreme_price_high = float(os.getenv("HFT_ENTRY_EXTREME_PRICE_HIGH"))
-        self.entry_depth_mult = float(os.getenv("HFT_ENTRY_DEPTH_MULT"))
         self.entry_up_speed_min = float(os.getenv("HFT_ENTRY_UP_SPEED_MIN"))
         self.entry_down_speed_max = float(os.getenv("HFT_ENTRY_DOWN_SPEED_MAX"))
 
@@ -295,7 +266,6 @@ class HFTEngine:
         self.speed_floor = float(os.getenv("HFT_SPEED_FLOOR"))
         self.entry_accel_enabled = os.getenv("HFT_ENTRY_ACCEL_ENABLED") == "1"
         self.entry_accel_min = float(os.getenv("HFT_ENTRY_ACCEL_MIN"))
-        self.reversal_speed_floor = float(os.getenv("HFT_REVERSAL_SPEED_FLOOR"))
 
         # --- Dynamic size (risk management) ---
         self.dynamic_risk_per_tick_usd = float(os.getenv("HFT_DYNAMIC_RISK_PER_TICK_USD"))
@@ -314,8 +284,6 @@ class HFTEngine:
 
         # --- Order book and liquidity ---
         self.book_move_entry_min = float(os.getenv("HFT_BOOK_MOVE_ENTRY_MIN"))
-        self.book_move_stop_max = float(os.getenv("HFT_BOOK_MOVE_STOP_MAX"))
-        self.book_stall_ticks_limit = int(os.getenv("HFT_BOOK_STALL_TICKS"))
         self.max_entry_spread = float(os.getenv("HFT_MAX_ENTRY_SPREAD"))
         self.max_entry_ask = float(os.getenv("HFT_MAX_ENTRY_ASK"))
         self._prev_up_mid = None
@@ -323,7 +291,6 @@ class HFTEngine:
         self._book_stall_ticks = 0
         self.strong_edge_rsi_mult = float(os.getenv("HFT_STRONG_EDGE_RSI_MULT"))
         self.aggressive_edge_mult = float(os.getenv("HFT_AGGRESSIVE_EDGE_MULT"))
-        self.entry_confirm_age_strong = float(os.getenv("HFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
         self.wide_spread_min_edge = float(os.getenv("HFT_WIDE_SPREAD_MIN_EDGE"))
         self.entry_liquidity_max_spread = float(os.getenv("HFT_ENTRY_LIQUIDITY_MAX_SPREAD"))
         # Poly top-of-book bid/(bid+ask) for UP / DOWN outcome; 0 = gate disabled.
@@ -343,11 +310,6 @@ class HFTEngine:
         self.entry_max_ask_up_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_UP"))
         self.entry_min_ask_down_cap = float(os.getenv("HFT_ENTRY_MIN_ASK_DOWN"))
         self.entry_max_ask_down_cap = float(os.getenv("HFT_ENTRY_MAX_ASK_DOWN"))
-        self.latency_high_ms = float(os.getenv("HFT_LATENCY_HIGH_MS"))
-        self.latency_high_edge_mult = float(os.getenv("HFT_LATENCY_HIGH_EDGE_MULT"))
-        self.expiry_tight_sec = float(os.getenv("HFT_EXPIRY_TIGHT_SEC"))
-        self.expiry_edge_mult = float(os.getenv("HFT_EXPIRY_EDGE_MULT"))
-        self.slot_interval_sec = float(os.getenv("HFT_SLOT_INTERVAL_SEC"))
         self.no_entry_first_sec = float(os.getenv("HFT_NO_ENTRY_FIRST_SEC"))
         self.no_entry_last_sec = _env_float_default(
             "HFT_NO_ENTRY_LAST_SEC", _DEFAULT_NO_ENTRY_LAST_SEC
@@ -372,7 +334,6 @@ class HFTEngine:
         self.entry_aggressive_min_trend_age_sec = float(os.getenv("HFT_AGGRESSIVE_MIN_TREND_AGE_SEC"))
 
         # --- Auxiliary state ---
-        self.soft_exits_enabled = True
         self.no_entry_guards = os.getenv("HFT_NO_ENTRY_GUARDS") == "1"
         self.edge_window = deque(maxlen=120)
         self.last_edge_sign = 0
@@ -392,7 +353,6 @@ class HFTEngine:
         self._trend_state: dict[str, Any] = {}
         self._trend_state_dirty = True  # Set to True when underlying data changes
         
-        self._last_entry_noise_log_ts = 0.0
         self._last_regime_skip_log_ts = 0.0
         self._last_slot_expiry_info_log_ts = 0.0
         self._last_feed_gate_log_ts = 0.0
@@ -411,16 +371,10 @@ class HFTEngine:
             _set_debug_logger(_debug_logger)
 
     _PROFILE_ATTRS = (
-        "noise_edge",
         "buy_edge",
-        "sell_edge",
         "entry_confirm_age",
-        "reversal_confirm_age",
-        "entry_confirm_age_strong",
         "strong_edge_rsi_mult",
         "aggressive_edge_mult",
-        "entry_momentum_alt_enabled",
-        "entry_max_edge_jump_pts",
         "entry_max_latency_ms",
         "speed_floor",
         "entry_low_speed_abs",
@@ -438,22 +392,11 @@ class HFTEngine:
 
     def _build_soft_flow_profile(self, latency_base: dict[str, float | bool]) -> dict[str, float | bool]:
         """Build soft-flow profile from HFT_SOFT_* env with calmer defaults than latency."""
-        sell_abs = os.getenv("HFT_SELL_EDGE_ABS")
         soft: dict[str, float | bool] = dict(latency_base)
-        soft["noise_edge"] = float(os.getenv("HFT_SOFT_NOISE_EDGE"))
         soft["buy_edge"] = float(os.getenv("HFT_SOFT_BUY_EDGE"))
-        soft["sell_edge"] = -float(os.getenv("HFT_SOFT_SELL_EDGE_ABS") or sell_abs)
         soft["entry_confirm_age"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_SEC"))
-        soft["reversal_confirm_age"] = float(
-            os.getenv("HFT_SOFT_REVERSAL_CONFIRM_AGE_SEC") or str(latency_base["reversal_confirm_age"])
-        )
-        soft["entry_confirm_age_strong"] = float(os.getenv("HFT_SOFT_ENTRY_CONFIRM_AGE_STRONG_SEC"))
         soft["strong_edge_rsi_mult"] = float(os.getenv("HFT_SOFT_STRONG_EDGE_RSI_MULT"))
         soft["aggressive_edge_mult"] = float(os.getenv("HFT_SOFT_AGGRESSIVE_EDGE_MULT"))
-        soft["entry_momentum_alt_enabled"] = (
-            os.getenv("HFT_SOFT_ENTRY_MOMENTUM_ALT_ENABLED") == "1"
-        )
-        soft["entry_max_edge_jump_pts"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_EDGE_JUMP_PTS"))
         soft["entry_max_latency_ms"] = float(os.getenv("HFT_SOFT_ENTRY_MAX_LATENCY_MS"))
         soft["speed_floor"] = float(os.getenv("HFT_SOFT_SPEED_FLOOR") or str(latency_base["speed_floor"]))
         soft["entry_low_speed_abs"] = float(os.getenv("HFT_SOFT_ENTRY_LOW_SPEED_ABS"))
@@ -1156,15 +1099,6 @@ class HFTEngine:
             entry_zscore_strict_ticks=self.entry_zscore_strict_ticks,
             entry_zscore_bypass_abs_speed=self.entry_zscore_bypass_abs_speed,
             monotonic_strictness=self.zscore_monotonic_strictness,
-        )
-
-    def _zscore_monotonic_for_direction(self, trend_dir: str) -> bool:
-        """Return True if recent z-score ticks are monotone in the trade direction."""
-        return zscore_monotonic_for_direction(
-            self._zscore_samples,
-            self.entry_zscore_strict_ticks,
-            trend_dir,
-            self.zscore_monotonic_strictness,
         )
 
     def _imbalance_allows_entry(self, signal: str, imb_up: float, imb_down: float) -> bool:
@@ -2229,21 +2163,3 @@ class HFTEngine:
                 performance_key=perf_key,
             )
 
-    def start_debug_logger(self) -> None:
-        """Start the async debug logger background task.
-        
-        Should be called from the main event loop after engine initialization.
-        """
-        global _debug_logger
-        if _debug_logger is not None:
-            _debug_logger.start()
-
-    async def stop_debug_logger(self) -> int:
-        """Stop the async debug logger and flush pending entries.
-        
-        Returns the number of log entries dropped due to queue overflow.
-        """
-        global _debug_logger
-        if _debug_logger is not None:
-            return await _debug_logger.stop()
-        return 0
