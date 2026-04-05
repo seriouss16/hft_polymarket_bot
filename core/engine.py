@@ -150,6 +150,12 @@ class HFTEngine:
         # --- Trailing TP/SL ---
         self.trailing_tp_enabled = os.getenv("HFT_TRAILING_TP_ENABLED") == "1"
         self.trailing_sl_enabled = os.getenv("HFT_TRAILING_SL_ENABLED") == "1"
+        self.trailing_tp_activate_usd = float(os.getenv("HFT_TRAILING_TP_ACTIVATE_USD"))
+        self.trailing_tp_pullback_pct = float(os.getenv("HFT_TRAILING_TP_PULLBACK_PCT"))
+        self.trailing_tp_min_pullback_usd = float(os.getenv("HFT_TRAILING_TP_MIN_PULLBACK_USD"))
+        self.trailing_sl_breakeven_at_usd = float(os.getenv("HFT_TRAILING_SL_BREAKEVEN_AT_USD"))
+        self.trailing_sl_step_usd = float(os.getenv("HFT_TRAILING_SL_STEP_USD"))
+        self.trailing_sl_step_lock_pct = float(os.getenv("HFT_TRAILING_SL_STEP_LOCK_PCT"))
         self._peak_unrealized = 0.0
         self._trailing_sl_floor = None
 
@@ -189,6 +195,13 @@ class HFTEngine:
                 f"({self.rsi_exit_clamp_high}) must be > HFT_RSI_EXIT_CLAMP_LOW "
                 f"({self.rsi_exit_clamp_low}). Check config/runtime.env"
             )
+
+        self.rsi_range_exit_band_margin = _env_float_default("HFT_RSI_RANGE_EXIT_BAND_MARGIN", 20.0)
+        self.rsi_range_exit_min_profit_usd = float(os.getenv("HFT_RSI_RANGE_EXIT_MIN_PROFIT_USD"))
+        self.rsi_range_exit_min_hold_sec = _env_float_default("HFT_RSI_RANGE_EXIT_MIN_HOLD_SEC", 2.0)
+        self.rsi_range_exit_fade_buffer = _env_float_default("HFT_RSI_RANGE_EXIT_FADE_BUFFER", 0.0)
+        self.rsi_extreme_low = float(os.getenv("HFT_RSI_EXTREME_LOW"))
+        self.rsi_extreme_high = float(os.getenv("HFT_RSI_EXTREME_HIGH"))
 
         # --- RSI slope ---
         # Read RSI slope exit thresholds from env (mandatory)
