@@ -375,44 +375,6 @@ class BalanceCache:
             self._last_log_time = time.time()
 
 
-class BalanceCacheProvider:
-    """Provider for creating and managing balance caches.
-    
-    This class handles the integration with LiveExecutionEngine
-    and provides a clean interface for balance caching.
-    """
-    
-    @staticmethod
-    def create_from_engine(
-        live_engine: Any,
-        max_age_sec: float = 5.0,
-        conditional_max_age_sec: float = 10.0,
-    ) -> BalanceCache:
-        """Create a BalanceCache from a LiveExecutionEngine instance.
-        
-        Args:
-            live_engine: LiveExecutionEngine instance with fetch_usdc_balance
-                and fetch_conditional_balance methods
-            max_age_sec: Maximum cache age for USDC balance
-            conditional_max_age_sec: Maximum cache age for conditional balances
-            
-        Returns:
-            Configured BalanceCache instance
-        """
-        def usdc_fetcher() -> Optional[float]:
-            return live_engine.fetch_usdc_balance()
-        
-        def conditional_fetcher(token_id: str) -> Optional[float]:
-            return live_engine.fetch_conditional_balance(token_id)
-        
-        return BalanceCache(
-            balance_fetcher=usdc_fetcher,
-            conditional_balance_fetcher=conditional_fetcher,
-            max_age_sec=max_age_sec,
-            conditional_max_age_sec=conditional_max_age_sec,
-        )
-
-
 @dataclass
 class AllowanceCacheEntry:
     """Cached allowance entry with expiration tracking."""
