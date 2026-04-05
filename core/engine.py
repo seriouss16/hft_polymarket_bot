@@ -1958,7 +1958,7 @@ class HFTEngine:
             if opposite_trend and not should_close:
                 _append_debug_log(
                     {
-                        "sessionId": DEBUG_SESSION_ID,
+                        "sessionId": os.getenv("DEBUG_SESSION_ID", "default"),
                         "runId": "post-fix",
                         "hypothesisId": "H2",
                         "location": "core/engine.py:process_tick",
